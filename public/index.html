@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NIGHT pallet LINE</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/admin.mjs"></script>
+</head>
+<body>
+  <header><div class="header-inner"><a href="/" class="brand">NIGHT pallet <strong>LINE</strong></a><span id="account"></span></div></header>
+  <main id="main">
+    <p id="notice" role="status" aria-live="polite"></p>
+    <section id="auth" class="auth">
+      <form id="login" class="panel">
+        <h1>管理画面にログイン</h1>
+        <label>法人ID<input name="tenant" autocomplete="organization" required></label>
+        <label>メールアドレス<input name="email" type="email" autocomplete="username" required></label>
+        <label>パスワード<input name="password" type="password" autocomplete="current-password" required></label>
+        <label>認証アプリの6桁のコード<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required></label>
+        <button type="submit">ログイン</button>
+        <button type="button" class="secondary" id="show-activate">招待を受け取った方</button>
+      </form>
+      <form id="activate" class="panel" hidden>
+        <h1>招待を有効にする</h1>
+        <p>受け取った設定キーを認証アプリに登録し、表示された6桁のコードを入力してください。</p>
+        <label>招待コード<input name="invite" autocomplete="off" required></label>
+        <label>新しいパスワード<input name="password" type="password" minlength="12" autocomplete="new-password" required></label>
+        <label>認証コード<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required></label>
+        <button type="submit">有効にする</button>
+        <button type="button" class="secondary" id="show-login">ログイン画面へ</button>
+      </form>
+    </section>
+    <section id="workspace" hidden>
+      <div class="heading">
+        <div><p class="section-label">法人</p><h1 id="tenant-name"></h1></div>
+        <button id="logout" class="secondary">ログアウト</button>
+      </div>
+      <div id="content"></div>
+    </section>
+  </main>
+  <template id="store-fields">
+    <label>店舗名<input name="name" maxlength="100" required></label>
+    <label>所在地<input name="address" maxlength="240" required></label>
+    <label>営業区分<input name="business_type" maxlength="120" required></label>
+    <label>責任者<input name="responsible" maxlength="120" required></label>
+    <label>タイムゾーン<input name="timezone" value="Asia/Tokyo" required></label>
+    <label>営業日の締め時刻<input name="cutoff" type="time" value="06:00" required></label>
+  </template>
+  <template id="channel-fields">
+    <label>公式アカウント名<input name="label" required></label>
+    <label>用途<select name="purpose"><option value="customer">顧客</option><option value="recruitment">採用</option><option value="shared">顧客・採用兼用</option></select></label>
+    <label>所有法人<input name="owner_name" required></label>
+    <label>管理権限の確認記録<input name="management_authority" required></label>
+    <label>プロバイダーID<input name="provider_id" required></label>
+    <label>Messaging API チャネルID<input name="messaging_id" inputmode="numeric" required></label>
+    <label>LINEログイン チャネルID<input name="login_id" inputmode="numeric" required></label>
+    <label>LIFF ID<input name="liff_id" required></label>
+    <label>ボットユーザーID<input name="bot_user_id" required></label>
+    <label>認証種別<select name="account_type"><option value="unverified">未認証</option><option value="verified">認証済み</option><option value="premium">プレミアム</option></select></label>
+    <label>既存Webhook URL<input name="existing_webhook" type="url" placeholder="任意"></label>
+    <label>利用中のツール<input name="existing_tools" placeholder="任意"></label>
+  </template>
+  <template id="credentials-fields">
+    <label>トークン種別<select name="token_type"><option value="console">長期・短期</option><option value="v2.1">v2.1</option></select></label>
+    <label>チャネルアクセストークン<input name="access_token" type="password" autocomplete="off" required></label>
+    <label>チャネルシークレット<input name="channel_secret" type="password" autocomplete="off" required></label>
+  </template>
+</body>
+</html>
