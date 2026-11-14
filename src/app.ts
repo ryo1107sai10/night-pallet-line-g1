@@ -12,6 +12,7 @@ import {
   channel, channelCredentials, connectionSchema, consoleSchema, createChannel, evidence, issueTester, LineAPI,
   queueTest, receiveWebhook, replaceCredentials, replaceCredentialsSchema, summary, verifyLiff, verifyLiffSchema,
 } from './line.js'
+import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop } from './jobs.js'
 
 const storeFields = {
@@ -49,6 +50,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     if (cfg.origin.startsWith('https:')) res.set('Strict-Transport-Security','max-age=31536000')
     next()
   })
+  app.get('/studio',(_req,res)=>res.redirect(302,'/studio/'))
+  app.use('/studio',express.static(here('../public/studio')))
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
   app.use('/static',express.static(here('../public'),{index:false}))
@@ -179,6 +182,22 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     return { disabled:true }
   }))
 
+  const scenarios = '/stores/:store/scenarios'
+  const scenario = scenarios+'/:scenario'
+  const scenarioContext = (db:DB,actor:Actor,req:Request) => ({db,actor,store:idOf(req,'store')})
+  api.get(scenarios,inStore((db,actor,req)=>scenarioList(scenarioContext(db,actor,req))))
+  api.post(scenarios,inStore((db,actor,req)=>createScenario(scenarioContext(db,actor,req),cfg,req,keyOf(req)),true,201))
+  api.get(scenario,inStore((db,actor,req)=>scenarioDetail(scenarioContext(db,actor,req),idOf(req,'scenario'))))
+  api.patch(scenario,inStore((db,actor,req)=>saveScenario(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
+  api.get(scenario+'/versions/:version',inStore((db,actor,req)=>versionDetail(scenarioContext(db,actor,req),
+    idOf(req,'scenario'),z.coerce.number().int().positive().parse(req.params.version))))
+  api.post(scenario+'/transition',inStore((db,actor,req)=>transitionScenario(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
+
+  api.get(scenario+'/testers',inStore((db,actor,req)=>scenarioTesters(scenarioContext(db,actor,req),idOf(req,'scenario'))))
+  api.get(scenario+'/test-sends',inStore((db,actor,req)=>scenarioTestStatus(scenarioContext(db,actor,req),idOf(req,'scenario'))))
+  api.post(scenario+'/test-sends',inStore((db,actor,req)=>queueScenarioTest(scenarioContext(db,actor,req),cfg,
+    idOf(req,'scenario'),keyOf(req),req.body),true,202))
+
   const channels = '/stores/:store/connections'
   const connection = channels + '/:connection'
   api.get(channels,inStore(async(db,_actor,req)=>{
@@ -243,7 +262,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
         AND e.kind IN ('follow','message') AND e.generation=t.generation
         AND e.received_at BETWEEN t.verified_at AND t.expires_at
         AND e.occurred_at BETWEEN t.verified_at AND t.expires_at) AS received
-      FROM tester t LEFT JOIN test_send j ON j.tester_id=t.id
+      FROM tester t LEFT JOIN test_send j ON j.tester_id=t.id AND j.scenario_id IS NULL
       WHERE t.channel_id=$1 AND t.generation=$2 ORDER BY t.expires_at DESC LIMIT 50`,[c.id,c.generation])
     return rows
   }))

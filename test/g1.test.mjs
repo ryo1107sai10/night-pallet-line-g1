@@ -12,6 +12,7 @@ import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
 import { bootstrap, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 import { workOnce } from '../dist/jobs.js'
+import { starter } from '../public/studio/engine.mjs'
 
 const origin = 'https://example.test'
 const cfg = { origin, master:randomBytes(32), external:true }
@@ -24,7 +25,7 @@ const ids = { messaging:'1234567890', login:'1234567891' }
 const endpoint = id => '/api/v1/webhooks/line/'+id
 const signup = {}
 let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line
-let intendedId, remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
+let intendedId, pushedBody, remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
 let managerId
 const code = (key, steps = 0) => new TOTP({ secret:Secret.fromBase32(key) })
   .generate({timestamp:Date.now()+30000*steps})
@@ -101,6 +102,7 @@ before(async ()=>{
           aud:options.body.get('id_token').includes('bad')?'9999999999':ids.login})
       case '/v2/bot/message/push': {
         assert.equal(JSON.parse(options.body).to,user)
+        pushedBody=JSON.parse(options.body).messages[0].text
         intendedId = options.headers['X-Line-Retry-Key']
         remoteEntered?.()
         if (releaseRemote) await releaseRemote.result
@@ -272,4 +274,59 @@ test('AT03 退職後の既存セッション失効',async ()=>{
   expect(await post('/staff/'+managerId+'/disable',admin,{reason:'退職確認'}),200)
   expect(await request('/session',{cookie:manager}),401)
   assert.equal((await read('SELECT 1 FROM staff_session WHERE staff_id=$1',[managerId])).rowCount,0)
+})
+
+
+test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を拒否する',async ()=>{
+  const base='/stores/'+storeId+'/scenarios'
+  const graph=starter()
+  graph.channel=c
+  expect(await post('/stores/'+otherStore+'/scenarios',admin,graph,idempotency()),404)
+  const key=idempotency()
+  const first=expect(await post(base,admin,graph,key),201)
+  assert.equal(expect(await post(base,admin,graph,key),201).id,first.id)
+  const url=base+'/'+first.id
+  expect(await request(url,{cookie:other}),404)
+  expect(await request('/stores/'+otherStore+'/scenarios/'+first.id,{cookie:admin}),404)
+  expect(await post(url+'/transition',admin,{action:'test',revision:first.revision},undefined),422)
+  const fixture={start:'2026-11-14T12:00',bookingAt:'',dayCount:0,weekCount:0,booked:false,consent:true,adult:true,
+    responded:false,assigned:true,stopped:false,marketingStopped:false,blocked:false,human:false,cancelled:false,
+    bookingLinkValid:true,tags:[],values:{name:'検証',store:'青店',staff:'',booking:'',price:'',booking_url:''}}
+  const tested=expect(await post(url+'/transition',admin,{action:'test',revision:first.revision,fixture}),200)
+  const approved=expect(await post(url+'/transition',admin,{action:'approve',revision:tested.revision}),200)
+  const published=expect(await post(url+'/transition',admin,{action:'publish',revision:approved.revision}),200)
+  expect(await patch(url,admin,{revision:approved.revision,graph}),409)
+  const draft=expect(await patch(url,admin,{revision:published.revision,graph:{...graph,name:'新しい下書き'}}),200)
+  assert.equal(draft.state,'draft')
+  assert.equal(draft.published_version,1)
+  const version=expect(await request(url+'/versions/1',{cookie:admin}),200)
+  assert.equal(version.graph.name,graph.name)
+})
+
+
+test('AT34 適合するテスト利用者にだけ差し込み済み本文を1通送る',async ()=>{
+  const base='/stores/'+storeId+'/scenarios'
+  const graph=starter()
+  graph.channel=c
+  const scenario=expect(await post(base,admin,graph,idempotency()),201)
+  const path=base+'/'+scenario.id
+  const wrongPurpose=await prepareTester('recruitment')
+  const verified=await prepareTester('customer')
+  const candidates=expect(await request(path+'/testers',{cookie:admin}),200)
+  assert.ok(!candidates.some(item=>item.id===wrongPurpose.id))
+  assert.ok(candidates.some(item=>item.id===verified.id))
+  const fixture={start:'2026-11-14T12:00',bookingAt:'',dayCount:0,weekCount:0,booked:false,consent:true,adult:true,
+    responded:false,assigned:true,stopped:false,marketingStopped:false,blocked:false,human:false,cancelled:false,
+    bookingLinkValid:true,tags:[],values:{name:'テスト利用者',store:'青店',staff:'',booking:'',price:'',booking_url:''}}
+  const input={revision:scenario.revision,node:'welcome',tester:verified.id,fixture}
+  expect(await post(path+'/test-sends',admin,{...input,tester:wrongPurpose.id},idempotency()),404)
+  expect(await post(path+'/test-sends',admin,{...input,fixture:{...fixture,stopped:true}},idempotency()),422)
+  const key=idempotency()
+  const accepted=expect(await post(path+'/test-sends',admin,input,key),202)
+  assert.equal(expect(await post(path+'/test-sends',admin,input,key),202).id,accepted.id)
+  expect(await post(path+'/test-sends',admin,input,idempotency()),404)
+  await workOnce(pool,cfg,line)
+  assert.equal(intendedId,accepted.id)
+  assert.match(pushedBody,/^【接続テスト】\nテスト利用者さん/)
+  assert.equal(expect(await request(path+'/test-sends',{cookie:admin}),200)[0].status,'accepted')
 })

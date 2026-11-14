@@ -6,14 +6,15 @@ import { createInvite } from './auth.js'
 
 export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
-  const migration = await readFile(new URL('../db/001_g1.sql',import.meta.url),'utf8')
+  const versions = ['001_g1','002_scenarios']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
     await db.query('CREATE TABLE IF NOT EXISTS night.schema_migration(version text PRIMARY KEY)')
-    if (!(await db.query("SELECT 1 FROM night.schema_migration WHERE version='001_g1'")).rowCount) {
-      await db.query(migration)
-      await db.query("INSERT INTO night.schema_migration VALUES('001_g1')")
+    for (const version of versions) {
+      if ((await db.query('SELECT 1 FROM night.schema_migration WHERE version=$1',[version])).rowCount) continue
+      await db.query(await readFile(new URL('../db/'+version+'.sql',import.meta.url),'utf8'))
+      await db.query('INSERT INTO night.schema_migration VALUES($1)',[version])
     }
     await db.query(`GRANT USAGE ON SCHEMA night TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.staff,night.staff_session,night.invite,
@@ -21,6 +22,8 @@ export async function migrate(pool: pg.Pool, role: string) {
       night.webhook_event,night.store_grant,night.channel,night.store TO ${role}`)
     await db.query(`GRANT SELECT ON night.tenant_route TO ${role}`)
     await db.query(`GRANT SELECT,UPDATE ON night.tenant TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE ON night.scenario TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT ON night.scenario_version TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.channel_route,night.audit TO ${role}`)
     await db.query(`GRANT USAGE ON SEQUENCE night.audit_id_seq TO ${role}`)
   })

@@ -49,3 +49,5 @@ pre { padding: 12px; background: #edf1f9; white-space: pre-wrap; overflow-wrap: 
   main { padding: 0 16px; margin-top: 18px; }
   .header-inner, .panel { padding: 14px 16px; }
 }
+
+.studio-link { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 14px; border: 1px solid #adbbd4; border-radius: 8px; text-decoration: none; color: #223d72; background: #fff; font-weight: 650; }

@@ -66,3 +66,17 @@ LINEイベントは署名とbotの宛先を確認し、重複を排除して永�
 - `test/g1.test.mjs` — 実PostgreSQLを使う結合試験6件
 
 参照仕様は要件定義書のS05、S08、S09、S11です。 [Webhook署名の検証](https://developers.line.biz/ja/docs/messaging-api/verify-webhook-signature/) · [LIFFのユーザー情報](https://developers.line.biz/ja/docs/liff/using-user-profile/) · [Messaging APIリファレンス](https://developers.line.biz/ja/reference/messaging-api/nojs/) · [APIリクエストの再試行](https://developers.line.biz/ja/docs/messaging-api/retrying-api-request/)
+
+## シナリオスタジオ
+
+管理画面でログイン後、「シナリオスタジオを開く」から作業します。スタジオのURLは `/studio/` です。既存環境の更新では `npm run build` と `npm run setup` を行い、002マイグレーションを適用してからアプリとワーカーを再起動します。
+
+- 店舗・公式アカウント・顧客用途/採用用途を選び、開始イベント、待機、メッセージ、条件分岐、タグ、担当タスク、終了を編集できます。
+- LINEプレビューでは差し込み後の本文を確認できます。配信前テストでは架空日時と条件を入力し、時刻調整、通数、分岐と除外理由を確認できます。日次・週次の既送件数はテスト条件として入力します。
+- 下書きを保存してテストを記録すると、承認と公開版保存に進めます。公開版は更新・削除権限を付与しないテーブルに保存し、後続の下書きと分離します。
+- 公開HTTPS環境で、同じ店舗・OA・用途の認証済みテスト利用者がいる場合は、シミュレーションで送信予定となった1ステップの本文を「接続テスト」表示付きでキューに登録できます。既存の緊急停止とテスト送信ワーカーを使います。
+- シナリオの本番配信実行、契約通数・業務データと連動する送信判定、受信箱、顧客台帳・予約連携と実LINE検収は未完了です。公開版の保存はLINE実配信を開始しません。
+
+[GitHub Pagesの操作デモ](https://ryo1107sai10.github.io/night-pallet-line-demo/) では架空データを使用し、変更は現在のブラウザにだけ保存されます。
+
+公開資料から、シナリオ登録、待機、アクションでの分岐を参考にしました。 [プロラインのシナリオ作成](https://autosns.co.jp/manual/use/scenarios/create-scenario) · [ボタンによる分岐](https://autosns.co.jp/manual/use/scenarios/exec-measurement-tag-button) · [Appleのマテリアル指針](https://developer.apple.com/design/human-interface-guidelines/materials)

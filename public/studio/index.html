@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ja" data-mode="server" data-settings="/">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101025">
+  <title>シナリオスタジオ | NIGHT pallet LINE</title>
+  <link rel="stylesheet" href="./studio.css">
+  <script type="module" src="./studio.mjs"></script>
+</head>
+<body>
+  <a class="skip" href="#work">編集画面へ移動</a>
+  <header class="top glass">
+    <a class="logo" href="./" aria-label="NIGHT pallet LINE"><span class="mark" aria-hidden="true">◒</span><span>NIGHT <b>pallet</b><small>LINE STUDIO</small></span></a>
+    <nav aria-label="メインメニュー"><a href="./" aria-current="page">シナリオ</a><a id="settings-link">店舗・LINE接続 <span aria-hidden="true">↗</span></a></nav>
+    <div class="righthead"><span id="mode" class="pill" hidden>公開デモ</span><label class="sr" for="store">店舗</label><select id="store"></select></div>
+  </header>
+  <main id="work">
+    <header class="hero">
+      <div>
+        <h1>シナリオ<span>スタジオ</span></h1>
+        <p>LINE配信の流れを設計し、配信前に分岐と除外条件を確認。</p>
+      </div>
+      <button id="new" class="primary" type="button"><b aria-hidden="true">＋</b> 新規シナリオ</button>
+    </header>
+    <div id="message" role="status" aria-live="polite" hidden></div>
+    <nav class="mobile glass" aria-label="作業画面"><button data-part="library">シナリオ</button><button data-part="workspace" aria-current="true">フロー</button><button data-part="inspector">設定・プレビュー</button></nav>
+    <div id="layout" class="layout" data-part="workspace">
+      <aside id="library" class="panel glass" aria-label="シナリオ一覧"></aside>
+      <section id="workspace" class="panel glass" aria-label="配信フロー"></section>
+      <aside id="inspector" class="panel glass" aria-label="編集と配信確認"></aside>
+    </div>
+    <footer><span>NIGHT pallet LINE</span><span id="foot"></span></footer>
+  </main>
+  <dialog id="dialog" class="glass"></dialog>
+</body>
+</html>

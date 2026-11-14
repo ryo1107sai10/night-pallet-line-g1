@@ -59,6 +59,8 @@ async function sendCandidate(db: DB, r: Route, id?: string) {
     (f.role='admin' OR (f.role='manager' AND EXISTS(SELECT 1 FROM store_grant g
       WHERE g.store_id=j.store_id AND g.staff_id=j.actor_id))) AS may_send,
     n.stopped AS tenant_stopped,
+    (j.scenario_id IS NOT NULL AND (q.id IS NULL OR q.stopped OR q.revision<>j.scenario_revision OR q.channel_id<>j.channel_id))
+      AS scenario_unavailable,
     EXISTS(SELECT 1 FROM channel_relationship WHERE channel_id=$1 AND user_key=t.user_key
       AND following=false) AS blocked,
     coalesce((SELECT e.kind='unfollow' FROM webhook_event e
@@ -66,6 +68,7 @@ async function sendCandidate(db: DB, r: Route, id?: string) {
       ORDER BY e.occurred_at DESC, (e.kind='unfollow') DESC LIMIT 1),false) AS pending_block
     FROM test_send j JOIN tester t ON t.id=j.tester_id JOIN store s ON s.id=j.store_id
     JOIN staff f ON f.id=j.actor_id JOIN tenant n ON n.id=j.tenant_id
+    LEFT JOIN scenario q ON q.id=j.scenario_id
     WHERE j.channel_id=$1 AND ($2::uuid IS NULL OR j.id=$2) AND j.status IN ('queued','unknown','submitting')
       AND ($2 IS NOT NULL OR j.next_at<=now() OR (j.status='submitting' AND j.attempted_at<now()-interval '45 seconds'))
     ORDER BY j.next_at LIMIT 1 FOR UPDATE OF j SKIP LOCKED`,[r.id,id ?? null])
@@ -76,7 +79,7 @@ function mustHold(c: Awaited<ReturnType<typeof channel>>, job: NonNullable<Await
   const expired = new Date(job.expires_at).getTime() <= Date.now()
   const interrupted = job.next_at === Infinity
   return expired || interrupted || c.stopped || job.store_stopped || job.tenant_stopped || job.blocked || job.pending_block || job.disabled_at
-    || !job.may_send || !c.checks.token_verified || !c.checks.webhook_verified
+    || job.scenario_unavailable || !job.may_send || !c.checks.token_verified || !c.checks.webhook_verified
     || !c.checks.ownership_verified || !c.checks.provider_verified || !c.checks.login_published
     || !c.checks.redelivery_enabled || !c.checks.auto_reply_checked || !c.checks.non_developer
     || c.generation !== job.generation
@@ -120,7 +123,8 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI) {
         return
       }
       const to = unseal(cfg,'tester:' + current.code_hash,current.recipient)
-      return { promise: api.push(channelCredentials(cfg,fresh),to,job.id)
+      const message = current.test_body ? unseal(cfg,'test-body:' + job.id,current.test_body) : undefined
+      return { promise: api.push(channelCredentials(cfg,fresh),to,job.id,message)
         .catch(()=>({ status:'unknown',requestId:null,authError:false })) }
     })
     if (!submission) continue

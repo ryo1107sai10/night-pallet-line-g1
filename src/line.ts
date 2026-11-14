@@ -89,7 +89,7 @@ export async function evidence(db: DB, c: Channel) {
         AND t.generation=$2 AND t.verified_at IS NOT NULL
         AND e.received_at BETWEEN t.verified_at AND t.expires_at
         AND e.occurred_at BETWEEN t.verified_at AND t.expires_at) AS receive_verified,
-    EXISTS(SELECT 1 FROM test_send WHERE channel_id=$1 AND generation=$2 AND status='accepted') AS send_accepted`,
+    EXISTS(SELECT 1 FROM test_send WHERE channel_id=$1 AND generation=$2 AND status='accepted' AND scenario_id IS NULL) AS send_accepted`,
     [c.id,c.generation])
   return result as { liff_verified: boolean; receive_verified: boolean; send_accepted: boolean }
 }
@@ -155,11 +155,11 @@ export class LineAPI {
     return verified.data.sub
   }
 
-  async push(cred: Credentials, recipient: string, attemptID: string) {
+  async push(cred: Credentials, recipient: string, attemptID: string, testBody='NIGHT pallet LINEの接続テストです。') {
     const response = await this.call('/v2/bot/message/push', { method: 'POST',
       headers: { Authorization: 'Bearer ' + cred.access_token, 'Content-Type': 'application/json',
         'X-Line-Retry-Key': attemptID },
-      body: JSON.stringify({ to: recipient, messages: [{type:'text',text:'NIGHT pallet LINEの接続テストです。'}] }),
+      body: JSON.stringify({ to: recipient, messages: [{type:'text',text:testBody}] }),
     })
     const acceptedId = response.headers.get('x-line-accepted-request-id')
     const requestId = response.headers.get('x-line-request-id')
@@ -249,7 +249,7 @@ export async function verifyLiff(pool: pg.Pool, cfg: Config, api: LineAPI, data:
 
 export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: string, key: string) {
   const { rows: [previous] } = await db.query(`SELECT id,tester_id,status FROM test_send
-    WHERE channel_id=$1 AND actor_id=$2 AND operation_key=$3`,[c.id,actor.id,key])
+    WHERE scenario_id IS NULL AND channel_id=$1 AND actor_id=$2 AND operation_key=$3`,[c.id,actor.id,key])
   if (previous) {
     if (previous.tester_id !== testerId) throw conflict()
     return { id: previous.id, status: previous.status }
@@ -257,8 +257,9 @@ export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: stri
   const { rows: [tester] } = await db.query(`SELECT * FROM tester WHERE id=$1 AND channel_id=$2
     AND generation=$3 AND verified_at IS NOT NULL AND expires_at>now() FOR UPDATE`,[testerId,c.id,c.generation])
   if (!tester) throw missing()
-  const existing = await db.query('SELECT id,status FROM test_send WHERE tester_id=$1', [testerId])
-  if (existing.rowCount) return existing.rows[0]
+  const existing = await db.query('SELECT id,status,scenario_id FROM test_send WHERE tester_id=$1', [testerId])
+  if (existing.rows[0]?.scenario_id) throw conflict()
+  if (existing.rowCount) return {id:existing.rows[0].id,status:existing.rows[0].status}
   const { rows: [e] } = await db.query(`SELECT EXISTS(SELECT 1 FROM webhook_event WHERE channel_id=$1
     AND generation=$2 AND user_key=$3 AND received_at BETWEEN $4 AND now()
     AND occurred_at BETWEEN $4 AND now() AND kind IN ('follow','message')) AS heard,
