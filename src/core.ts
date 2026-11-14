@@ -13,7 +13,7 @@ export const userId = z.string().regex(/^U[0-9a-f]{32}$/i)
 export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 export type DB = PoolClient
 export type Actor = { id: string; tenant_id: string; role: string; email: string }
-export type Config = { origin: string; master: Buffer; external: boolean }
+export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean }
 
 export class Fault extends Error {
   constructor(public status: number, public code: string, message: string, public retryable = false) {
@@ -42,7 +42,8 @@ export function configFromEnvironment(): Config {
   }
   const master = Buffer.from(process.env.MASTER_KEY ?? '', 'base64')
   if (master.length !== 32) throw new Error('MASTER_KEY must contain 32 bytes in base64.')
-  return { origin: parsed.origin, master, external: parsed.protocol === 'https:' && !loopback }
+  return { origin: parsed.origin, master, external: parsed.protocol === 'https:' && !loopback,
+    automation: process.env.AUTO_SEND_ENABLED === 'true' }
 }
 
 export function seal(cfg: Config, context: string, value: string) {

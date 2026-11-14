@@ -6,7 +6,7 @@ import { createInvite } from './auth.js'
 
 export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
-  const versions = ['001_g1','002_scenarios']
+  const versions = ['001_g1','002_scenarios','003_operations']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -25,7 +25,11 @@ export async function migrate(pool: pg.Pool, role: string) {
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.scenario TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.scenario_version TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.channel_route,night.audit TO ${role}`)
-    await db.query(`GRANT USAGE ON SEQUENCE night.audit_id_seq TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE ON night.customer,night.booking_slot,night.visit_booking,
+      night.delivery_event,night.enrollment,night.automatic_send TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,DELETE ON night.customer_session TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT ON night.preference_event,night.delivery_note TO ${role}`)
+    await db.query(`GRANT USAGE ON SEQUENCE night.audit_id_seq,night.delivery_note_id_seq TO ${role}`)
   })
 }
 

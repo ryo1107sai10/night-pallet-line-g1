@@ -14,6 +14,12 @@ import {
 } from './line.js'
 import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop } from './jobs.js'
+import { customerFields, consentVersion, updateProfile, profileInput, openCustomerSession, authenticateCustomer,
+  customerSessionCookie, setPreferences, customerById, selfPreferenceInput, emitDelivery } from './customer.js'
+import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBookingChange, ownBookingInput,
+  requestBooking, slotInput, bookingChange, staffBooking } from './booking.js'
+import { endScope, locationOf, updateAutomation } from './automation.js'
+
 
 const storeFields = {
   name: text(100), address: text(240), business_type: text(120), responsible: text(120),
@@ -52,6 +58,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
   })
   app.get('/studio',(_req,res)=>res.redirect(302,'/studio/'))
   app.use('/studio',express.static(here('../public/studio')))
+  app.use('/operations',express.static(here('../public/operations')))
+  app.get('/healthz',async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
   app.use('/static',express.static(here('../public'),{index:false}))
@@ -89,7 +97,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
       if (!cfg.external || !c.checks.login_published || !c.checks.provider_verified) {
         throw new Fault(409,'LIFF_NOT_READY','LINE内画面の公開準備中です。')
       }
-      return { liff_id:c.liff_id,purposes:c.purpose==='shared' ? ['customer','recruitment'] : [c.purpose] }
+      return { liff_id:c.liff_id,customer:c.purpose!=='recruitment',purposes:c.purpose==='shared' ? ['customer','recruitment'] : [c.purpose] }
     })
     res.json(data)
   })
@@ -97,6 +105,45 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境で本人確認を行ってください。')
     await gate(pool,cfg,'liff-verify:' + address(req),50)
     res.json(await verifyLiff(pool,cfg,line,verifyLiffSchema.parse(req.body)))
+  })
+
+  const localCustomerSession = (req:Request) => req.headers.cookie?.split(';').map(value=>value.trim())
+    .find(value=>value.startsWith('night_customer='))?.slice('night_customer='.length)
+  api.post('/customer/login',async(req,res)=>{
+    await gate(pool,cfg,'customer-login:'+address(req),60)
+    const value=await openCustomerSession(pool,cfg,line,req.body)
+    res.set('Set-Cookie',customerSessionCookie(cfg,value)).json({signed_in:true})
+  })
+  api.get('/customer/account',async(req,res)=>{
+    res.json(await tx(pool,async db=>{
+      const c=await authenticateCustomer(db,localCustomerSession(req))
+      const location=await locationOf(db,c.store_id)
+      return {revision:c.revision,service_consent:c.service_consent,marketing_consent:c.marketing_consent,
+        all_stop:c.all_stop,policy_version:consentVersion,store:location.name,timezone:location.timezone,
+        slots:await listSlots(db,true),bookings:(await listBookings(db,c.id)).map(({customer_id,display_name,...booking})=>booking)}
+    }))
+  })
+  api.patch('/customer/preferences',async(req,res)=>{
+    const p=selfPreferenceInput.parse(req.body)
+    res.json(await tx(pool,async db=>{
+      const c=await authenticateCustomer(db,localCustomerSession(req))
+      await lockDispatch(db,c.tenant_id)
+      return setPreferences(db,await customerById(db,c.id),p.preferences,p.revision)
+    }))
+  })
+  api.post('/customer/bookings',async(req,res)=>{
+    const p=ownBookingInput.parse(req.body)
+    res.status(201).json(await tx(pool,async db=>{
+      const c=await authenticateCustomer(db,localCustomerSession(req))
+      return requestBooking(db,c,p.slot,p.party,false,true)
+    }))
+  })
+  api.patch('/customer/bookings/:booking',async(req,res)=>{
+    const p=ownBookingChange.parse(req.body)
+    res.json(await tx(pool,async db=>{
+      const c=await authenticateCustomer(db,localCustomerSession(req))
+      return changeBooking(db,null,idOf(req,'booking'),{...p,reason:'LIFFの本人操作'},c)
+    }))
   })
 
   type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
@@ -141,8 +188,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
   api.patch('/stores/:store',inStore(async (db,actor,req)=>{
     const id = idOf(req,'store')
     const data = storeUpdate.parse(req.body)
+    await lockDispatch(db,actor.tenant_id)
     const updated = await db.query(`UPDATE store SET name=$2,address=$3,business_type=$4,responsible=$5,
-      timezone=$6,cutoff=$7,revision=revision+1,eligible_at=CASE WHEN address=$3 AND business_type=$4
+      timezone=$6,cutoff=$7,revision=revision+1,
+      auto_enabled=CASE WHEN address=$3 AND business_type=$4 THEN auto_enabled ELSE false END,eligible_at=CASE WHEN address=$3 AND business_type=$4
       THEN eligible_at ELSE NULL END,eligibility_reference=CASE WHEN address=$3 AND business_type=$4
       THEN eligibility_reference ELSE NULL END WHERE id=$1 AND revision=$8 RETURNING revision`,
     [id,data.name,data.address,data.business_type,data.responsible,data.timezone,data.cutoff,data.revision])
@@ -154,10 +203,13 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     requireAdmin(actor)
     const id = idOf(req,'store')
     const data = eligibilitySchema.parse(req.body)
+    await lockDispatch(db,actor.tenant_id)
     const updated = await db.query(`UPDATE store SET eligible_at=CASE WHEN $2 THEN now() ELSE NULL END,
+      auto_enabled=CASE WHEN $2 THEN auto_enabled ELSE false END,
       eligibility_reference=$3,revision=revision+1 WHERE id=$1 AND revision=$4 RETURNING revision`,
       [id,data.verified,data.reference,data.revision])
     if (!updated.rowCount) throw conflict()
+    if (!data.verified) await endScope(db,'store_id=$1',[id],'店舗の適格性確認を解除')
     await audit(db,actor.tenant_id,id,actor.id,'store.eligibility',id,data.reference,{verified:data.verified})
     return updated.rows[0]
   }))
@@ -180,6 +232,53 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     const data = z.strictObject({ reason:text(200) }).parse(req.body)
     await disableStaff(db,actor,idOf(req,'staff'),data.reason)
     return { disabled:true }
+  }))
+
+  api.get('/stores/:store/staff-options',inStore(async(db)=>{
+    const {rows}=await db.query(`SELECT f.id,f.email FROM staff f WHERE f.disabled_at IS NULL AND f.password_hash IS NOT NULL
+      AND (f.role='admin' OR EXISTS(SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=scope_store()))
+      ORDER BY f.email LIMIT 150`)
+    return rows
+  }))
+  api.get('/stores/:store/customers',inStore(async(db)=>{
+    const {rows}=await db.query(`SELECT c.*,ch.label AS channel_label FROM (
+      SELECT ${customerFields} FROM customer ORDER BY updated_at DESC,id LIMIT 150) c
+      JOIN channel ch ON ch.id=c.channel_id`)
+    return rows
+  }))
+  api.patch('/stores/:store/customers/:customer',inStore(async(db,actor,req)=>
+    updateProfile(db,actor,idOf(req,'customer'),profileInput.parse(req.body))))
+  api.post('/stores/:store/customers/:customer/enroll',inStore(async(db,actor,req)=>{
+    const reason=z.strictObject({reason:text(200)}).parse(req.body).reason
+    const c=await customerById(db,idOf(req,'customer'))
+    return once(db,cfg,actor,'customer.manual-enroll',keyOf(req),{id:c.id,reason},async()=>{
+      await lockDispatch(db,actor.tenant_id)
+      const key=newId()
+      await emitDelivery(db,await customerById(db,c.id),'manual:'+key,'manual')
+      await audit(db,c.tenant_id,c.store_id,actor.id,'customer.manual_enroll',c.id,reason,{key})
+      return {registered:true}
+    })
+  },true,202))
+  api.get('/stores/:store/slots',inStore(db=>listSlots(db)))
+  api.post('/stores/:store/slots',inStore((db,actor,req)=>
+    createSlot(db,cfg,actor,idOf(req,'store'),keyOf(req),slotInput.parse(req.body)),true,201))
+  api.get('/stores/:store/bookings',inStore(db=>listBookings(db)))
+  api.post('/stores/:store/bookings',inStore((db,actor,req)=>
+    staffBooking(db,cfg,actor,idOf(req,'store'),keyOf(req),bookingInput.parse(req.body)),true,201))
+  api.patch('/stores/:store/bookings/:booking',inStore((db,actor,req)=>
+    changeBooking(db,actor,idOf(req,'booking'),bookingChange.parse(req.body))))
+  api.get('/stores/:store/automation',inStore(async(db,_actor,req)=>{
+    const settings=await locationOf(db,idOf(req,'store'))
+    const {rows:jobs}=await db.query(`SELECT j.id,j.status,j.reason,j.line_request_id,j.first_attempt_at,
+      j.node_id,j.category FROM automatic_send j ORDER BY first_attempt_at DESC LIMIT 60`)
+    const {rows:notes}=await db.query(`SELECT kind,node_id,detail,occurred_at FROM delivery_note ORDER BY id DESC LIMIT 60`)
+    return {...settings,process_enabled:cfg.automation===true&&cfg.external,jobs,notes}
+  }))
+  api.patch('/stores/:store/automation',inStore(async(db,actor,req)=>{
+    requireAdmin(actor)
+    const settings=z.strictObject({revision,enabled:z.boolean(),contract:z.boolean(),
+      monthly_limit:z.int().min(1).max(1000000),reason:text(200)}).parse(req.body)
+    return updateAutomation(db,cfg,actor,idOf(req,'store'),settings)
   }))
 
   const scenarios = '/stores/:store/scenarios'

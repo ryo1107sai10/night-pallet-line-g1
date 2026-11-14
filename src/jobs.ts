@@ -2,9 +2,9 @@ import type pg from 'pg'
 import { type Actor, type Config, type DB, type Route, audit, conflict, scope, tx, unseal } from './core.js'
 import { channel, channelCredentials, LineAPI } from './line.js'
 
-export async function lockDispatch(db: DB, tenant: string) {
-  await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,117))', [tenant])
-}
+import { lockDispatch } from './dispatch-lock.js'
+import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
+export { lockDispatch } from './dispatch-lock.js'
 
 const targets = {
   tenant: { table: 'tenant', constraint: 'true' },
@@ -16,19 +16,20 @@ export async function setStop(db: DB, actor: Actor, level: keyof typeof targets,
   stopped: boolean, revision: number, reason: string, storeId: string | null) {
   await lockDispatch(db, actor.tenant_id)
   const target = targets[level]
-  const updated = await db.query(`UPDATE ${target.table} SET stopped=$2,revision=revision+1
+  const updated = await db.query(`UPDATE ${target.table} SET stopped=$2,revision=revision+1,delivery_version=delivery_version+1
     WHERE id=$1 AND revision=$3 RETURNING revision`,[id,stopped,revision])
   if (!updated.rowCount) throw conflict()
   let inFlight = 0
   let cancelled = 0
   if (stopped) {
     const args = level === 'tenant' ? [] : [id]
+    const automatic = await endScope(db,target.constraint,args,'緊急停止')
     const active = await db.query(`SELECT count(*)::int AS count FROM test_send
       WHERE status='submitting' AND ${target.constraint}`,args)
-    inFlight = active.rows[0].count
+    inFlight = active.rows[0].count + automatic.inFlight
     const pending = await db.query(`UPDATE test_send SET status='cancelled'
       WHERE status='queued' AND ${target.constraint}`,args)
-    cancelled = pending.rowCount ?? 0
+    cancelled = (pending.rowCount ?? 0) + automatic.ended
     // Ambiguous prior attempts stay visible as unknown and are never resumed after this stop.
     await db.query(`UPDATE test_send SET next_at='infinity'
       WHERE status IN ('unknown','submitting') AND ${target.constraint}`,args)
@@ -37,18 +38,22 @@ export async function setStop(db: DB, actor: Actor, level: keyof typeof targets,
   return { stopped, revision: updated.rows[0].revision, in_flight: inFlight, cancelled }
 }
 
-async function processEvents(db: DB, channelId: string) {
+async function processEvents(db: DB,cfg:Config,r:Route) {
+  await lockDispatch(db,r.tenant_id)
+  const c=await channel(db,r.id)
+  const channelId=r.id
   const { rows } = await db.query(`SELECT * FROM webhook_event WHERE channel_id=$1 AND processed_at IS NULL
     ORDER BY occurred_at,event_id LIMIT 100 FOR UPDATE SKIP LOCKED`,[channelId])
   for (const event of rows) {
-    if (event.user_key && ['follow','unfollow'].includes(event.kind)) {
+    if (event.user_key && ['follow','refollow','unfollow'].includes(event.kind)) {
       await db.query(`INSERT INTO channel_relationship VALUES($1,$2,$3,$4,$5,$6)
         ON CONFLICT(channel_id,user_key) DO UPDATE SET event_at=excluded.event_at,following=excluded.following
         WHERE excluded.event_at>channel_relationship.event_at OR
           (excluded.event_at=channel_relationship.event_at AND excluded.following=false)`,
-      [event.tenant_id,event.store_id,event.channel_id,event.user_key,event.occurred_at,event.kind==='follow'])
+      [event.tenant_id,event.store_id,event.channel_id,event.user_key,event.occurred_at,event.kind!=='unfollow'])
     }
-    await db.query('UPDATE webhook_event SET processed_at=now() WHERE channel_id=$1 AND event_id=$2',
+    await processCustomerWebhook(db,cfg,c,event)
+    await db.query('UPDATE webhook_event SET processed_at=now(),recipient_box=NULL WHERE channel_id=$1 AND event_id=$2',
       [channelId,event.event_id])
   }
 }
@@ -64,7 +69,7 @@ async function sendCandidate(db: DB, r: Route, id?: string) {
     EXISTS(SELECT 1 FROM channel_relationship WHERE channel_id=$1 AND user_key=t.user_key
       AND following=false) AS blocked,
     coalesce((SELECT e.kind='unfollow' FROM webhook_event e
-      WHERE e.channel_id=$1 AND e.user_key=t.user_key AND e.kind IN ('follow','unfollow')
+      WHERE e.channel_id=$1 AND e.user_key=t.user_key AND e.kind IN ('follow','refollow','unfollow')
       ORDER BY e.occurred_at DESC, (e.kind='unfollow') DESC LIMIT 1),false) AS pending_block
     FROM test_send j JOIN tester t ON t.id=j.tester_id JOIN store s ON s.id=j.store_id
     JOIN staff f ON f.id=j.actor_id JOIN tenant n ON n.id=j.tenant_id
@@ -104,7 +109,8 @@ async function claim(db: DB, r: Route) {
 export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI) {
   const { rows } = await pool.query<Route>('SELECT * FROM channel_route ORDER BY id')
   for (const r of rows) {
-    await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,r.id) })
+    await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,cfg,r) })
+    await runAutomation(pool,cfg,api,r)
     if (!cfg.external) continue
     const pending = await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); return claim(db,r) })
     if (!pending) continue

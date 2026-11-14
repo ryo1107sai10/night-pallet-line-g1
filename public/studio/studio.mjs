@@ -625,7 +625,7 @@ function publication() {
   }
   wrap.append(pill(steps[scenario.state]),node('p',scenario.published_version?'公開版 v'+scenario.published_version+
     (scenario.stopped?' · 停止中':''):'公開版はまだありません。','empty'))
-  if (!demo) wrap.append(node('p','現在は公開版を保存する段階です。LINE自動配信は検証環境の接続と配信エンジンが必要です。','field-hint'))
+  if (!demo) wrap.append(node('p','顧客向けの対応イベントが発生すると、有効な店舗で対象者と最新の配信条件を照合します。','field-hint'))
   const row=node('div',null,'controls')
   if (scenario.state==='draft') row.append(button('配信前テストへ',()=>{tab='test';show()}))
   if (scenario.state==='tested') row.append(button('下書きを承認',()=>transition('approve'),'primary'))

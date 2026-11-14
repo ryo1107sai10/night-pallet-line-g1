@@ -37,7 +37,7 @@ async function verifyPassword(pass: string, hash?: string | null) {
 }
 
 function otp(secret: string, label = '') {
-  return new TOTP({ issuer: 'NIGHT pallet LINE', label, secret: Secret.fromBase32(secret) })
+  return new TOTP({ issuer: 'Night PRO LINE', label, secret: Secret.fromBase32(secret) })
 }
 
 function consumeFactor(cfg: Config, staff: StaffRow, value: string) {

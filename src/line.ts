@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { lockDispatch } from './dispatch-lock.js'
 import type pg from 'pg'
 import { z } from 'zod'
 import {
@@ -155,7 +156,20 @@ export class LineAPI {
     return verified.data.sub
   }
 
-  async push(cred: Credentials, recipient: string, attemptID: string, testBody='NIGHT pallet LINEの接続テストです。') {
+  async quota(cred: Credentials) {
+    const headers = { Authorization: 'Bearer '+cred.access_token }
+    const [limit,consumption] = await Promise.all([
+      this.call('/v2/bot/message/quota',{headers}), this.call('/v2/bot/message/quota/consumption',{headers}),
+    ])
+    if (!limit.ok || !consumption.ok) throw lineUnavailable()
+    const ceiling = z.discriminatedUnion('type',[
+      z.object({type:z.literal('none')}),z.object({type:z.literal('limited'),value:z.int().nonnegative()}),
+    ]).parse(await limit.json())
+    const used = z.object({totalUsage:z.int().nonnegative()}).parse(await consumption.json()).totalUsage
+    return ceiling.type==='none'?Infinity:Math.max(0,ceiling.value-used)
+  }
+
+  async push(cred: Credentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。') {
     const response = await this.call('/v2/bot/message/push', { method: 'POST',
       headers: { Authorization: 'Bearer ' + cred.access_token, 'Content-Type': 'application/json',
         'X-Line-Retry-Key': attemptID },
@@ -175,10 +189,12 @@ const lineUnavailable = () => new Fault(502,'LINE_UNAVAILABLE','LINEとの通信
 const invalidLiff = () => new Fault(401,'INVALID_LIFF','LINEの本人確認またはテストコードを確認してください。')
 const signatureError = () => new Fault(401,'INVALID_WEBHOOK','Webhookを確認できません。')
 const eventSchema = z.object({ webhookEventId: text(100), type: text(100), timestamp: z.int().min(0).max(8640000000000000),
+  follow:z.object({isUnblocked:z.boolean().optional()}).optional(),
+  message:z.object({type:z.string(),text:z.string().optional()}).optional(),
   source: z.object({ type: z.string(), userId: userId.optional() }).optional(),
 })
 const webhookSchema = z.object({ destination: userId, events: z.array(eventSchema).max(500) })
-const userKey = (cfg: Config, c: Channel, user: string) => keyed(cfg,`line-user:${c.id}:${user}`)
+export const userKey = (cfg: Config, c: Channel, user: string) => keyed(cfg,`line-user:${c.id}:${user}`)
 
 export async function receiveWebhook(pool: pg.Pool, cfg: Config, id: string, raw: Buffer, signature: string) {
   if (!/^[A-Za-z0-9+/]{43}=$/.test(signature)) throw signatureError()
@@ -193,14 +209,21 @@ export async function receiveWebhook(pool: pg.Pool, cfg: Config, id: string, raw
     try { payload = JSON.parse(raw.toString('utf8')) } catch { throw signatureError() }
     const parsed = webhookSchema.safeParse(payload)
     if (!parsed.success || parsed.data.destination !== c.bot_user_id) throw signatureError()
+    await lockDispatch(db,c.tenant_id)
+    if ((await channel(db,id)).generation!==c.generation) throw signatureError()
     for (const event of parsed.data.events) {
       const key = event.source?.type === 'user' && event.source.userId
         ? userKey(cfg,c,event.source.userId) : null
+      const kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
+      const phrase=event.message?.type==='text'?event.message.text?.trim():null
+      const stopSignal=phrase==='全配信停止'?'all':phrase==='販促停止'?'marketing':null
+      const recipient=key&&event.source?.userId&&c.purpose==='customer'&&['follow','refollow'].includes(kind)
+        ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,event.source.userId) : null
       const eventPurpose = c.purpose === 'shared' ? 'unclassified' : c.purpose
       await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
-        occurred_at,kind,purpose,user_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        occurred_at,kind,purpose,user_key,recipient_box,stop_signal) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT(channel_id,event_id) DO NOTHING`,
-        [c.tenant_id,c.store_id,id,event.webhookEventId,c.generation,new Date(event.timestamp),event.type,eventPurpose,key])
+        [c.tenant_id,c.store_id,id,event.webhookEventId,c.generation,new Date(event.timestamp),kind,eventPurpose,key,recipient,stopSignal])
     }
   })
 }

@@ -101,7 +101,7 @@ export function validate(flow, publish=false) {
   return errors
 }
 
-function localPart(instant, timezone) {
+export function localPart(instant, timezone) {
   const formatter = new Intl.DateTimeFormat('en-GB',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',
     hour:'2-digit',minute:'2-digit',hourCycle:'h23'})
   const {year,month,day,hour,minute} = Object.fromEntries(formatter.formatToParts(instant).map(p=>[p.type,p.value]))
@@ -125,7 +125,7 @@ export function localInstant(dateTime, zone) {
   return matches.length===1 ? matches[0] : null
 }
 
-function nextWindow(at, flow, zone) {
+export function nextWindow(at, flow, zone) {
   const local = localPart(at,zone)
   const closed = date => flow.holidays.includes(new Date(date+'T00:00Z').getUTCDay())
   if (!closed(local.date) && local.time>=flow.windowStart && local.time<flow.windowEnd) return at
@@ -159,6 +159,20 @@ export function renderMessage(body,person) {
   return {message}
 }
 
+export function waitUntil(node,at,zone,cutoff,bookingAt) {
+  if (node.mode==='delay') return at+node.minutes*60000
+  if (node.mode==='fixed') return localInstant(node.time,zone)
+  if (node.mode==='booking') return bookingAt===null?null:bookingAt-node.minutes*60000
+  if (node.mode==='business') {
+    const local=localPart(at,zone)
+    const first=local.time<cutoff?-1:0
+    const business=shiftDate(local.date,first+node.days)
+    const calendar=shiftDate(business,node.time<cutoff?1:0)
+    return localInstant(calendar+'T'+node.time,zone)
+  }
+  return null
+}
+
 export function simulate(flow, person) {
   const errors = validate(flow)
   if (errors.length) return {errors,events:[],count:0}
@@ -181,17 +195,7 @@ export function simulate(flow, person) {
     events.push(line)
     id = node.next
     if (node.type==='wait') {
-      let next = null
-      if (node.mode==='delay') next=at+node.minutes*60000
-      if (node.mode==='fixed') next=localInstant(node.time,person.zone)
-      if (node.mode==='business') {
-        const local=localPart(at,person.zone)
-        const first=local.time<person.cutoff?-1:0
-        const business=shiftDate(local.date,first+node.days)
-        const calendar=shiftDate(business,node.time<person.cutoff?1:0)
-        next=localInstant(calendar+'T'+node.time,person.zone)
-      }
-      if (node.mode==='booking' && bookingAt!==null) next=bookingAt-node.minutes*60000
+      const next=waitUntil(node,at,person.zone,person.cutoff,bookingAt)
       if (next===null || next<at) {
         line.state='held'; line.detail='待機時刻が無効か、基準時刻を過ぎています。'; break
       }

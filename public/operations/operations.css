@@ -1,0 +1,10 @@
+#tabs{padding:8px;border-radius:15px;margin-bottom:15px}
+#tabs button[aria-current]{background:#ccb7ff33;border-color:#cbb7ff73}
+#content{padding:19px;margin-bottom:30px}
+#content h2{margin-bottom:12px;font-size:18px}
+#content .record{border-top:1px solid var(--stroke);padding:10px 0;overflow-wrap:anywhere}
+#content .record:nth-child(1){border-top:0}
+#content details{margin:.4rem 0}
+#content .fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+#content .section{margin:18px 0 5px}
+@media(max-width:720px){#content .fields{grid-template-columns:1fr}#content{padding:12px}}

@@ -15,9 +15,10 @@ import { workOnce } from '../dist/jobs.js'
 import { starter } from '../public/studio/engine.mjs'
 
 const origin = 'https://example.test'
-const cfg = { origin, master:randomBytes(32), external:true }
+const cfg = { origin, master:randomBytes(32), external:true, automation:true }
 const bot = 'U'+'1'.repeat(32)
 const user = 'U'+'2'.repeat(32)
+const user2 = 'U'+'3'.repeat(32)
 const channelSecret = 'a'.repeat(32)
 const accessToken = 'test-channel-token'
 const pass = 'Only used in local tests!'
@@ -25,7 +26,7 @@ const ids = { messaging:'1234567890', login:'1234567891' }
 const endpoint = id => '/api/v1/webhooks/line/'+id
 const signup = {}
 let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line
-let intendedId, pushedBody, remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
+let remainingQuota=200, intendedId, pushedBody, attemptedKeys=[], remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
 let managerId
 const code = (key, steps = 0) => new TOTP({ secret:Secret.fromBase32(key) })
   .generate({timestamp:Date.now()+30000*steps})
@@ -98,12 +99,15 @@ before(async ()=>{
         return Response.json({success:true})
       case '/oauth2/v2.1/verify':
         assert.equal(options.body.get('client_id'),ids.login)
-        return Response.json({iss:'https://access.line.me',sub:user,exp:Date.now()/1000+600,
+        return Response.json({iss:'https://access.line.me',sub:options.body.get('id_token').includes('second')?user2:user,exp:Date.now()/1000+600,
           aud:options.body.get('id_token').includes('bad')?'9999999999':ids.login})
+      case '/v2/bot/message/quota': return Response.json({type:'limited',value:200})
+      case '/v2/bot/message/quota/consumption': return Response.json({totalUsage:200-remainingQuota})
       case '/v2/bot/message/push': {
-        assert.equal(JSON.parse(options.body).to,user)
+        assert.ok([user,user2].includes(JSON.parse(options.body).to))
         pushedBody=JSON.parse(options.body).messages[0].text
         intendedId = options.headers['X-Line-Retry-Key']
+        attemptedKeys.push(intendedId)
         remoteEntered?.()
         if (releaseRemote) await releaseRemote.result
         if (nextPush==='transient') return new Response('{}',{status:503})
@@ -195,6 +199,7 @@ test('AT01/04 接続台帳とWebhookの署名・destination・再送',async ()=>
   await workOnce(pool,cfg,line)
   assert.deepEqual((await read('SELECT following FROM channel_relationship')).rows,[{following:false}])
   assert.equal((await read('SELECT event_id FROM webhook_event')).rowCount,2)
+  assert.equal((await read('SELECT id FROM customer')).rowCount,0,'兼用OAの友だち追加で顧客に用途を推定しない')
   expect(await request('/stores/'+otherStore+'/connections/'+c+'/tests',{cookie:admin}),404)
 })
 
@@ -329,4 +334,140 @@ test('AT34 適合するテスト利用者にだけ差し込み済み本文を1�
   assert.equal(intendedId,accepted.id)
   assert.match(pushedBody,/^【接続テスト】\nテスト利用者さん/)
   assert.equal(expect(await request(path+'/test-sends',{cookie:admin}),200)[0].status,'accepted')
+})
+
+async function publish(flow) {
+  const root='/stores/'+storeId+'/scenarios'
+  const start=expect(await post(root,admin,flow,idempotency()),201)
+  const url=root+'/'+start.id+'/transition'
+  const fixture={start:'2026-11-14T12:00',bookingAt:'',dayCount:0,weekCount:0,booked:true,consent:true,adult:true,
+    responded:false,assigned:true,stopped:false,marketingStopped:false,blocked:false,human:false,cancelled:false,
+    bookingLinkValid:true,tags:[],values:{name:'テスト利用者',store:'青店',staff:'',booking:'11月18日 22:00',
+      price:'',booking_url:'https://example.test/booking'}}
+  const next=expect(await post(url,admin,{revision:start.revision,action:'test',fixture}),200)
+  const approved=expect(await post(url,admin,{revision:next.revision,action:'approve'}),200)
+  return expect(await post(url,admin,{revision:approved.revision,action:'publish'}),200)
+}
+async function terminal(cookie,consent=true) {
+  const account=expect(await request('/customer/account',{cookie}),200)
+  expect(await patch('/customer/preferences',cookie,{revision:account.revision,version:account.policy_version,
+    preferences:{service_consent:consent,marketing_consent:false,all_stop:!consent}}),200)
+}
+const flushWorker=async (iterations=3)=>{
+  for(let i=0;i<iterations;i++) await workOnce(pool,cfg,line)
+}
+
+test('CRM-01/BOOK-02–05 署名付きLINE・本人同意・予約競合とLINE自動送信を通しで確認',async ()=>{
+  const root='/stores/'+storeId
+  const flow=starter()
+  Object.assign(flow,{name:'予約確定通知',channel:c,trigger:'booking_created',entry:'update',nodes:[
+    {id:'update',type:'message',name:'確定のお知らせ',category:'service',body:'{{store}}で{{booking}}のご予約が確定しました。',next:'wait'},
+    {id:'wait',type:'wait',name:'予約1時間前まで待機',mode:'booking',minutes:60,next:'remind'},
+    {id:'remind',type:'message',name:'来店リマインド',category:'service',body:'ご来店のご案内 {{booking}}',next:'end'},
+    {id:'end',type:'end',name:'完了'},
+  ]})
+  const confirmed=await publish(flow)
+  const current=expect(await request('/session',{cookie:admin}),200).stores[0]
+  expect(await patch(root+'/automation',admin,{revision:current.revision,enabled:true,contract:true,monthly_limit:25,reason:'検証承認'}),409)
+  const eligible=expect(await patch(root+'/eligibility',admin,{revision:current.revision,verified:true,reference:'検証済み'}),200)
+  expect(await patch(root+'/automation',admin,{revision:eligible.revision,enabled:true,contract:true,monthly_limit:25,reason:'検証承認'}),200)
+  const original=await post('/customer/login',null,{connection:c,id_token:'signed-token-first-user'})
+  const second=await post('/customer/login',null,{connection:c,id_token:'signed-token-second-user'})
+  expect(original,200);expect(second,200)
+  const created=await request(root+'/customers',{cookie:admin})
+  const people=expect(created,200)
+  assert.equal(people.length,2)
+  assert.ok(people.every(person=>!person.service_consent&&!person.marketing_consent))
+  assert.doesNotMatch(JSON.stringify(people),/line_address|user_key/)
+  expect(await request(root+'/customers',{cookie:other}),404)
+  const now=Date.now()
+  assert.equal((await web({destination:bot,events:[{...event('friend-second','follow',now),
+    source:{type:'user',userId:user2}}]})).status,200)
+  await flushWorker()
+  const tomorrow=now+2*86400000
+  const makeSlot=(name,at)=>({label:name,starts_at:new Date(at).toISOString(),ends_at:new Date(at+3600000).toISOString(),capacity:2,published:true})
+  const a=expect(await post(root+'/slots',admin,makeSlot('夜の部',tomorrow),idempotency()),201).id
+  expect(await post(root+'/slots',admin,makeSlot('重複',tomorrow+900000),idempotency()),409)
+  const b=expect(await post(root+'/slots',admin,makeSlot('翌日',tomorrow+86400000),idempotency()),201).id
+  await terminal(original.cookie);await terminal(second.cookie)
+  const first=expect(await post('/customer/bookings',original.cookie,{slot:a,party:2}),201)
+  const rival=expect(await post('/customer/bookings',second.cookie,{slot:a,party:2}),201)
+  assert.equal(first.status,'pending')
+  expect(await patch('/customer/bookings/'+first.id,second.cookie,{revision:1,slot:a,party:2,status:'cancelled'}),404)
+  const pushes=()=>remoteCalls.filter(path=>path.endsWith('/push')).length
+  const before=pushes()
+  await flushWorker()
+  assert.equal(pushes(),before)
+  const confirmedChange={revision:1,slot:a,party:2,status:'confirmed',reason:'店舗が確認'}
+  const race=await Promise.all([
+    patch(root+'/bookings/'+first.id,admin,confirmedChange),patch(root+'/bookings/'+rival.id,admin,confirmedChange),
+  ])
+  assert.deepEqual(race.map(result=>result.status).sort(),[200,409])
+  const winner=race[0].status===200?first:rival
+  const winnerCookie=race[0].status===200?original.cookie:second.cookie
+  nextPush='accepted'
+  await flushWorker()
+  assert.equal(pushes(),before+1)
+  assert.match(pushedBody,/青店で.*のご予約が確定しました。/)
+  const schedule=(await read('SELECT booking_id,wait_node,due_at,version FROM enrollment WHERE scenario_id=$1',[confirmed.id])).rows
+  assert.deepEqual(schedule.map(value=>[value.booking_id,value.wait_node,+value.due_at,value.version]),
+    [[winner.id,'wait',tomorrow-3600000,1]])
+  const requestChange=expect(await patch('/customer/bookings/'+winner.id,winnerCookie,{revision:2,slot:b,party:2,status:'pending'}),200)
+  expect(await patch(root+'/bookings/'+winner.id,admin,confirmedChange),409)
+  const changed=expect(await patch(root+'/bookings/'+winner.id,admin,{revision:requestChange.revision,slot:b,party:2,
+    status:'confirmed',reason:'日時変更を確認'}),200)
+  assert.equal(changed.revision,4)
+  const eventLog=(await read('SELECT kind FROM delivery_event WHERE booking_id=$1 ORDER BY booking_revision',[winner.id])).rows
+  assert.deepEqual(eventLog.map(row=>row.kind),['booking_created','booking_changed'])
+  assert.match((await read('SELECT end_reason FROM enrollment WHERE scenario_id=$1',[confirmed.id])).rows[0].end_reason,/旧版/)
+  assert.equal(pushes(),before+1)
+  const history=expect(await request(root+'/automation',{cookie:admin}),200)
+  assert.ok(history.jobs.some(job=>job.status==='accepted'&&job.line_request_id==='line-id'))
+  expect(await patch('/customer/bookings/'+winner.id,winnerCookie,{revision:changed.revision,slot:b,party:2,status:'cancelled'}),200)
+  assert.equal(expect(await request(root+'/slots',{cookie:admin}),200).find(slot=>slot.id===b).remaining,2)
+})
+
+test('AT25/29/48 自動配信の同一開始防止、即時撤回、LINE枠不足、同一キーでの再試行',async ()=>{
+  const root='/stores/'+storeId
+  const graph=starter()
+  Object.assign(graph,{name:'手動案内',channel:c,trigger:'manual',entry:'single',rejoin:true,
+    nodes:[{id:'single',type:'message',name:'案内',category:'service',body:'{{store}}からの案内です。',next:'end'},
+      {id:'end',type:'end',name:'完了'}]})
+  const flow=await publish(graph)
+  const first=await post('/customer/login',null,{connection:c,id_token:'signed-token-first-user'})
+  const second=await post('/customer/login',null,{connection:c,id_token:'signed-token-second-user'})
+  await terminal(first.cookie);await terminal(second.cookie)
+  // One person withdraws after a signed LINE stop message, independent of delivery-event processing order.
+  const stopPayload={destination:bot,events:[{...event('stop-automatic','message',Date.now()),message:{type:'text',text:'全配信停止'}}]}
+  for(let i=0;i<2;i++) assert.equal((await web(stopPayload)).status,200)
+  const previousPushes=remoteCalls.filter(path=>path.endsWith('/push')).length
+  await flushWorker()
+  const stopped=expect(await request('/customer/account',{cookie:first.cookie}),200)
+  assert.equal(stopped.all_stop,true)
+  const key=idempotency()
+  const {rows:[withdrawn]}=await read('SELECT id FROM customer WHERE all_stop')
+  const {rows:[active]}=await read('SELECT id FROM customer WHERE service_consent AND NOT all_stop')
+  for(let i=0;i<2;i++)expect(await post(root+'/customers/'+withdrawn.id+'/enroll',admin,{reason:'登録試験'},key),202)
+  assert.equal((await read("SELECT count(*)::int AS count FROM delivery_event WHERE kind='manual'")).rows[0].count,1)
+  expect(await post(root+'/customers/'+active.id+'/enroll',admin,{reason:'配信上限の確認'},idempotency()),202)
+  remainingQuota=0
+  await flushWorker()
+  const calls=()=>remoteCalls.filter(path=>path.endsWith('/push')).length
+  assert.equal(calls(),previousPushes)
+  assert.match((await read(`SELECT reason FROM automatic_send WHERE status='cancelled' ORDER BY first_attempt_at DESC LIMIT 1`)).rows[0].reason,/LINEの月間通数/)
+  const otherScenario=await publish({...graph,name:'再送試験'})
+  expect(await post(root+'/customers/'+active.id+'/enroll',admin,{reason:'再送確認'},idempotency()),202)
+  remainingQuota=200
+  nextPush='transient'
+  await flushWorker(1)
+  const {rows:[ambiguous]}=await read(`SELECT s.id,s.status FROM automatic_send s
+    JOIN enrollment e ON e.id=s.enrollment_id WHERE e.scenario_id=$1 AND s.status='unknown'`,[otherScenario.id])
+  assert.ok(ambiguous)
+  const retryKey=ambiguous.id
+  await read('UPDATE automatic_send SET next_at=now() WHERE id=$1',[ambiguous.id])
+  nextPush='duplicate'
+  await flushWorker()
+  assert.equal(attemptedKeys.filter(key=>key===retryKey).length,2)
+  assert.equal((await read('SELECT status FROM automatic_send WHERE id=$1',[ambiguous.id])).rows[0].status,'accepted')
+  assert.ok(flow.id)
 })

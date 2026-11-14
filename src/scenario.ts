@@ -4,7 +4,7 @@ import { simulate, validate } from '../public/studio/engine.mjs'
 import { audit, conflict, Fault, missing, keyed, newId, once, purpose, revision, seal, text, uuid, type Actor, type Config, type DB } from './core.js'
 
 import { channel } from './line.js'
-import { lockDispatch } from './jobs.js'
+import { lockDispatch } from './dispatch-lock.js'
 
 const nodeId = z.string().regex(/^[a-zA-Z0-9_-]{1,50}$/)
 const base = { id:nodeId, name:z.string().max(100) }
@@ -34,7 +34,14 @@ const fixture = z.strictObject({
   values:z.strictObject({ name:z.string().max(100),store:z.string().max(120),staff:z.string().max(100),
     booking:z.string().max(120),price:z.string().max(400),booking_url:z.string().max(1000) }),
 })
-type Graph = z.infer<typeof graph>
+export type Graph = z.infer<typeof graph>
+const customerTriggers = new Set(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'])
+function canPublish(graph:Graph) {
+  if (graph.purpose!=='customer' || !customerTriggers.has(graph.trigger)) {
+    throw new Fault(422,'TRIGGER_UNAVAILABLE','この用途・開始イベントの実配信は未対応です。下書きと配信前テストを利用できます。')
+  }
+}
+
 type Scenario = { id:string; channel_id:string; graph:Graph; revision:number; state:string;
   published_version:number|null; stopped:boolean; updated_at:Date }
 type Context = { db:DB; actor:Actor; store:string }
@@ -110,6 +117,7 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
       break
     case 'publish':
       if (state!=='approved') throw conflict()
+      canPublish(current.graph)
       complete(current.graph)
       await allowedChannel(db,current.graph)
       version=(version??0)+1
@@ -121,10 +129,18 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
     case 'resume':
       if (!version || !data.reason || stopped===(data.action==='stop')) throw conflict()
       stopped=data.action==='stop'
+      if (stopped) {
+        await db.query(`UPDATE enrollment SET ended_at=now(),end_reason='シナリオ停止'
+          WHERE scenario_id=$1 AND ended_at IS NULL`,[id])
+        await db.query(`UPDATE automatic_send SET next_at='infinity',reason='シナリオ停止' WHERE
+          enrollment_id IN (SELECT id FROM enrollment WHERE scenario_id=$1)
+          AND status IN ('submitting','unknown')`,[id])
+      }
       break
   }
-  await db.query(`UPDATE scenario SET state=$2,stopped=$3,published_version=$4,revision=revision+1,updated_at=now()
-    WHERE id=$1`,[id,state,stopped,version])
+  await db.query(`UPDATE scenario SET state=$2,stopped=$3,published_version=$4,revision=revision+1,updated_at=now(),
+    delivery_floor=CASE WHEN $5 THEN clock_timestamp() ELSE delivery_floor END
+    WHERE id=$1`,[id,state,stopped,version,data.action==='resume'])
   await audit(db,actor.tenant_id,store,actor.id,'scenario.'+data.action,id,data.reason??null,{version,...evidence})
   return scenarioDetail({db,actor,store},id)
 }
