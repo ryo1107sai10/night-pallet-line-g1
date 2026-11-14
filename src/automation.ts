@@ -166,10 +166,11 @@ async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer
   booking:Booking|undefined,category:'service'|'marketing') {
   if (!isEnabled(cfg,s,c) || !channelReady(c)) return '店舗またはLINE接続の配信条件が未成立'
   if (run.stopped||run.ended_at) return 'シナリオ停止'
+  if (run.event_kind==='booking_cancelled' && category!=='service') return '予約取消では業務案内だけを送信できます'
   if (run.booking_id && (!booking||booking.revision!==run.booking_revision)) return '予約が更新されました'
   if (cst.all_stop) return '全配信停止'
   const {rows:[last]}=await db.query(`SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2
-    AND kind IN ('follow','refollow','unfollow') ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,cst.user_key])
+    AND occurred_at<=now() AND kind IN ('follow','refollow','unfollow') ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,cst.user_key])
   if (!last||last.kind==='unfollow') return '友だち状態を確認できないかブロックされています'
   const pending=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND stop_signal IS NOT NULL
     AND processed_at IS NULL AND occurred_at>= $3 AND ($4 OR stop_signal='all') LIMIT 1`,

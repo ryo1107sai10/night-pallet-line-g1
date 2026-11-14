@@ -212,6 +212,7 @@ export async function receiveWebhook(pool: pg.Pool, cfg: Config, id: string, raw
     await lockDispatch(db,c.tenant_id)
     if ((await channel(db,id)).generation!==c.generation) throw signatureError()
     for (const event of parsed.data.events) {
+      if (event.timestamp>Date.now()+5*60000) continue
       const key = event.source?.type === 'user' && event.source.userId
         ? userKey(cfg,c,event.source.userId) : null
       const kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
