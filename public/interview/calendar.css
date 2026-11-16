@@ -65,6 +65,7 @@ body.interview-page{margin:0;background:radial-gradient(ellipse at 14% 0,#e9dbf6
 .interview-page .interview-header{width:min(1120px,calc(100% - 40px));margin:15px auto 0;padding:10px 15px;border:1px solid #e4d9f1;border-radius:16px;background:#ffffffc9;backdrop-filter:blur(14px);display:flex;justify-content:space-between;gap:10px;align-items:center;font-family:system-ui,sans-serif}
 .interview-header a{color:#53367b;font-weight:750;text-decoration:none;min-height:44px;display:flex;align-items:center}
 body.has-interviews main.auth{max-width:min(1120px,calc(100vw - 30px))}
+.guest-booking .interview-app .hero{background:transparent;color:var(--ink)}
 @media(max-width:760px){.interview-app .columns{grid-template-columns:1fr;gap:10px}.interview-app .box{padding:13px;border-radius:16px}.interview-app .desktop-calendar{display:none}.interview-app .mobile-calendar{display:block}.interview-app .hero{padding:19px 0 12px}.interview-page #interview,.interview-page .interview-header{width:calc(100% - 24px)}}
 
 .interview-app input.inline-check{width:auto;min-height:0}
