@@ -10,7 +10,7 @@ import {
 import { accept, authenticate, createInvite, disableStaff, gate, login, logout, memberRole,
   requireAdmin, sessionCookie, storeAccess, storeList } from './auth.js'
 import {
-  channel, channelCredentials, connectionSchema, consoleSchema, createChannel, evidence, issueTester, LineAPI,
+  channel, channelCredentials, connectionTestEvent, connectionSchema, consoleSchema, createChannel, evidence, issueTester, LineAPI,
   queueTest, receiveModuleWebhook, receiveWebhook, replaceCredentials, replaceCredentialsSchema, summary, verifyLiff, verifyLiffSchema,
 } from './line.js'
 import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, moduleReturnPath,
@@ -768,10 +768,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(connection+'/tests',withChannel(async(db,_actor,_req,c)=>{
     const { rows } = await db.query(`SELECT t.id,t.purpose,t.verified_at,t.expires_at,
       j.status AS send_status,j.line_request_id,
-      EXISTS(SELECT 1 FROM webhook_event e WHERE e.channel_id=t.channel_id AND e.user_key=t.user_key
-        AND e.kind IN ('follow','message') AND e.generation=t.generation
-        AND e.received_at BETWEEN t.verified_at AND t.expires_at
-        AND e.occurred_at BETWEEN t.verified_at AND t.expires_at) AS received
+      EXISTS(SELECT 1 FROM webhook_event e WHERE ${connectionTestEvent}) AS received
       FROM tester t LEFT JOIN test_send j ON j.tester_id=t.id AND j.scenario_id IS NULL
       WHERE t.channel_id=$1 AND t.generation=$2 ORDER BY t.expires_at DESC LIMIT 50`,[c.id,c.generation])
     return rows

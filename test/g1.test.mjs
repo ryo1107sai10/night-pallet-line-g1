@@ -1615,12 +1615,14 @@ test('接続確認中の採用通知は検収済みのテスト利用者への�
   expect(await patch(connectionPath+'/console',admin,{...consoleChecks,non_developer:false,
     reason:'開発者のテスト端末で確認',revision:await channelRevision()}),200)
   const tester=expect(await post(connectionPath+'/tests',admin,{purpose:'recruitment'},idempotency()),201)
-  expect(await post('/auth/line/verify',null,{connection,purpose:'recruitment',code:tester.code,
-    id_token:'signed-token-first-user',allow_test_message:true}),200)
   assert.equal((await inbound([
     {...event(randomUUID(),'message',Date.now()),message:{id:'21801',type:'text',text:'検収の受信確認'}},
     {...event(randomUUID(),'follow',Date.now()),source:{type:'user',userId:user2}},
   ])).status,200)
+  expect(await post(connectionPath+'/tests/'+tester.id+'/send',admin,{},idempotency()),404)
+  expect(await post('/auth/line/verify',null,{connection,purpose:'recruitment',code:tester.code,
+    id_token:'signed-token-first-user',allow_test_message:true}),200)
+  assert.equal(expect(await request(connectionPath+'/tests',{cookie:admin}),200)[0].received,true)
   expect(await post(connectionPath+'/tests/'+tester.id+'/send',admin,{},idempotency()),202)
   await worker()
   const confirmed=expect(await patch(connectionPath+'/console',admin,{...consoleChecks,non_developer:false,

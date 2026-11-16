@@ -100,13 +100,20 @@ export async function replaceCredentials(db: DB, cfg: Config, actor: Actor, c: C
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.rotate_credentials',c.id,reason)
 }
 
+const testerLifetime = "interval '2 hours'"
+
+// A signed chat message can arrive before LIFF verification, within the same invitation.
+export const connectionTestEvent = `e.channel_id=t.channel_id AND e.user_key=t.user_key AND e.generation=t.generation
+  AND t.verified_at IS NOT NULL
+  AND ((e.kind='message' AND e.received_at>=t.expires_at-${testerLifetime}
+      AND e.occurred_at>=t.expires_at-${testerLifetime})
+    OR (e.kind='follow' AND e.received_at>=t.verified_at AND e.occurred_at>=t.verified_at))
+  AND e.received_at<=least(t.expires_at,now()) AND e.occurred_at<=least(t.expires_at,now())`
+
 type Evidence = {liff_verified:boolean;receive_verified:boolean;send_accepted:boolean}
 const evidenceColumns = `EXISTS(SELECT 1 FROM tester WHERE channel_id=c.id AND generation=c.generation AND verified_at IS NOT NULL) AS liff_verified,
-    EXISTS(SELECT 1 FROM webhook_event e JOIN tester t ON e.channel_id=t.channel_id AND e.user_key=t.user_key
-      WHERE e.channel_id=c.id AND e.generation=c.generation AND e.kind IN ('follow','message')
-        AND t.generation=c.generation AND t.verified_at IS NOT NULL
-        AND e.received_at BETWEEN t.verified_at AND t.expires_at
-        AND e.occurred_at BETWEEN t.verified_at AND t.expires_at) AS receive_verified,
+    EXISTS(SELECT 1 FROM tester t JOIN webhook_event e ON ${connectionTestEvent}
+      WHERE t.channel_id=c.id AND t.generation=c.generation) AS receive_verified,
     EXISTS(SELECT 1 FROM test_send WHERE channel_id=c.id AND generation=c.generation AND status='accepted' AND scenario_id IS NULL) AS send_accepted`
 
 export async function evidence(db:DB,c:Channel) {
@@ -375,7 +382,7 @@ export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.inf
   const id = newId()
   const code = token()
   const result = await db.query(`INSERT INTO tester (id,tenant_id,store_id,channel_id,generation,purpose,
-    code_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+interval '2 hours') RETURNING expires_at`,
+    code_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+${testerLifetime}) RETURNING expires_at`,
     [id,c.tenant_id,c.store_id,c.id,c.generation,usage,digest(code)])
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.tester_invite',id,null,{purpose:usage})
   return { id, code, expires_at: result.rows[0].expires_at, liff_url: c.liff_id ? 'https://liff.line.me/' + c.liff_id : null }
@@ -422,11 +429,9 @@ export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: stri
   const existing = await db.query('SELECT id,status,scenario_id FROM test_send WHERE tester_id=$1', [testerId])
   if (existing.rows[0]?.scenario_id) throw conflict()
   if (existing.rowCount) return {id:existing.rows[0].id,status:existing.rows[0].status}
-  const { rows: [e] } = await db.query(`SELECT EXISTS(SELECT 1 FROM webhook_event WHERE channel_id=$1
-    AND generation=$2 AND user_key=$3 AND received_at BETWEEN $4 AND now()
-    AND occurred_at BETWEEN $4 AND now() AND kind IN ('follow','message')) AS heard,
-    EXISTS(SELECT 1 FROM channel_relationship WHERE channel_id=$1 AND user_key=$3 AND following=false) AS blocked`,
-    [c.id,c.generation,tester.user_key,tester.verified_at])
+  const { rows: [e] } = await db.query(`SELECT EXISTS(SELECT 1 FROM webhook_event e WHERE ${connectionTestEvent}) AS heard,
+    EXISTS(SELECT 1 FROM channel_relationship WHERE channel_id=t.channel_id AND user_key=t.user_key AND following=false) AS blocked
+    FROM tester t WHERE t.id=$1`,[tester.id])
   if (!e.heard || e.blocked || !c.checks.token_verified || !c.checks.webhook_verified ||
     (c.module_channel_id && !channelTestReady(c))) {
     throw new Fault(409,'TEST_NOT_READY','疎通確認後、認証したテスト利用者から公式アカウントへメッセージを送ってください。')
