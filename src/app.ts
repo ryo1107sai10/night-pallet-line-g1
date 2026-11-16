@@ -10,8 +10,10 @@ import { accept, authenticate, createInvite, disableStaff, gate, login, logout, 
   requireAdmin, sessionCookie, storeAccess, storeList } from './auth.js'
 import {
   channel, channelCredentials, connectionSchema, consoleSchema, createChannel, evidence, issueTester, LineAPI,
-  queueTest, receiveWebhook, replaceCredentials, replaceCredentialsSchema, summary, verifyLiff, verifyLiffSchema,
+  queueTest, receiveModuleWebhook, receiveWebhook, replaceCredentials, replaceCredentialsSchema, summary, verifyLiff, verifyLiffSchema,
 } from './line.js'
+import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, moduleReturnPath,
+  moduleStart, rememberModuleBot, requireModule} from './line-module.js'
 import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, openCustomerSession, authenticateCustomer,
@@ -84,6 +86,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.use('/workflows',express.static(here('../public/workflows')))
   app.get(['/api/health','/healthz'],async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
+  app.get(moduleReturnPath,(_req,res)=>res.sendFile(here('../public/line-module-return.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
   app.get('/book/:connection',(req,res)=>{
     idOf(req,'connection')
@@ -99,6 +102,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
         Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),req.get('X-Line-Signature') ?? '')
       res.status(200).json({ received:true })
     })
+  api.post('/webhooks/line-module',express.raw({type:'application/json',limit:'1mb',inflate:false}),async(req,res)=>{
+    await receiveModuleWebhook(pool,cfg,Buffer.isBuffer(req.body)?req.body:Buffer.alloc(0),req.get('X-Line-Signature')??'')
+    res.json({received:true})
+  })
 
   api.use((req,_res,next)=>{
     const mutable = !['GET','HEAD','OPTIONS'].includes(req.method)
@@ -121,7 +128,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       const r = await route(db,idOf(req,'connection'))
       await scope(db,r.tenant_id,r.store_id)
       const c = await channel(db,r.id)
-      if (!cfg.external || !c.checks.login_published || !c.checks.provider_verified) {
+      if (!cfg.external || !c.liff_id || !c.checks.login_published || !c.checks.provider_verified) {
         throw new Fault(409,'LIFF_NOT_READY','LINE内画面の公開準備中です。')
       }
       return { liff_id:c.liff_id,customer:c.purpose!=='recruitment',recruitment:c.purpose!=='customer',purposes:c.purpose==='shared' ? ['customer','recruitment'] : [c.purpose] }
@@ -533,6 +540,25 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
 
   const channels = '/stores/:store/connections'
   const connection = channels + '/:connection'
+  const moduleLink = '/stores/:store/line-module'
+  api.get(moduleLink,inStore(async()=>({configured:moduleConfigured(cfg)})))
+  api.post(moduleLink,inStore((db,actor,req)=>beginModuleLink(db,cfg,actor,idOf(req,'store'),
+    credential(req)!,moduleStart.parse(req.body).purpose)))
+  api.post(moduleLink+'/complete',async(req,res)=>{
+    const data=moduleReturn.parse(req.body),store=idOf(req,'store'),session=credential(req)
+    const authorized=async(db:DB)=>{
+      const actor=await authenticate(db,session)
+      await storeAccess(db,actor,store,true)
+      return actor
+    }
+    const pending=await tx(pool,async db=>rememberModuleBot(db,line.modules,cfg,await authorized(db),store,session!,data))
+    if (pending.connection_id) {
+      res.json({id:pending.connection_id})
+      return
+    }
+    const bot=await line.modules.bot(requireModule(cfg),pending.bot_user_id!)
+    res.json(await tx(pool,async db=>finishModuleLink(db,cfg,await authorized(db),store,session!,data.state,bot)))
+  })
   api.get(channels,inStore(async(db,_actor,req)=>{
     const { rows } = await db.query<{id:string}>('SELECT id FROM channel WHERE store_id=$1 ORDER BY label',[idOf(req,'store')])
     return Promise.all(rows.map(async row=>summary(db,cfg,await channel(db,row.id))))
@@ -553,6 +579,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   }))
   api.patch(connection+'/console',withChannel(async(db,actor,req,c)=>{
     const { revision,reason,...checks } = consoleSchema.parse(req.body)
+    if (c.module_channel_id) throw new Fault(409,'LINE_MODULE_MANAGED','かんたん連携では設定情報を自動で確認します。')
     await lockDispatch(db,actor.tenant_id)
     if (checks.delivery_confirmed && !(await evidence(db,c)).send_accepted) {
       throw new Fault(409,'SEND_NOT_ACCEPTED','LINEがテスト送信を受け付けた後に、実機の受信を記録してください。')
@@ -570,6 +597,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
         const actor = await authenticate(db,credential(req))
         await storeAccess(db,actor,idOf(req,'store'),true)
         const c = await channel(db,idOf(req,'connection'))
+        if (c.module_channel_id && item==='webhook') throw new Fault(409,'LINE_MODULE_MANAGED','公式LINEへのテストメッセージで受信を確認してください。')
         if (c.revision !== required.revision) throw conflict()
         return { actor,c }
       }
@@ -592,6 +620,20 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       res.json(response)
     })
   }
+  api.post(connection+'/module-delivery',withChannel(async(db,actor,req,c)=>{
+    if (!c.module_channel_id) throw conflict()
+    const data=z.strictObject({revision}).parse(req.body)
+    await lockDispatch(db,actor.tenant_id)
+    const current=await channel(db,c.id)
+    if (current.revision!==data.revision) throw conflict()
+    if (current.module_status!=='active' || !current.checks.token_verified || !current.checks.webhook_verified ||
+      !(await evidence(db,current)).send_accepted) {
+      throw new Fault(409,'SEND_NOT_ACCEPTED','端末へテストメッセージが届いてから確認してください。')
+    }
+    await db.query(`UPDATE channel SET checks=checks || '{"delivery_confirmed":true}'::jsonb,revision=revision+1 WHERE id=$1`,[c.id])
+    await audit(db,c.tenant_id,c.store_id,actor.id,'line.module_delivery_confirmed',c.id)
+    return summary(db,cfg,await channel(db,c.id))
+  }))
   api.get(connection+'/tests',withChannel(async(db,_actor,_req,c)=>{
     const { rows } = await db.query(`SELECT t.id,t.purpose,t.verified_at,t.expires_at,
       j.status AS send_status,j.line_request_id,

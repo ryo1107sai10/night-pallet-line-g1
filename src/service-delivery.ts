@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import { newId, scope, seal, tx, unseal, type Config, type DB, type Route } from './core.js'
-import { channel, channelCredentials, channelReady, type LineAPI } from './line.js'
+import { channel, channelCredentials, channelReady, messagingReady, type LineAPI } from './line.js'
 import { deliveryScope, messageBudget } from './delivery-budget.js'
 import { locationOf } from './automation.js'
 import { lockDispatch } from './dispatch-lock.js'
@@ -32,7 +32,7 @@ export async function interruptService(db:DB,clause:'object_id'|'subject'|'chann
     AND status IN ('queued','submitting','unknown')`,[value,reason,kinds])
 }
 
-async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId:string){
+async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId:string|null){
   if(job.kind==='chat_reply'){
     const {rows:[thread]}=await db.query<{address_box:string;user_key:string}>(`
       SELECT t.address_box,t.user_key FROM inbox_thread t JOIN staff f ON f.id=t.assigned_to
@@ -48,6 +48,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId
     return {to:unseal(cfg,'inbox-recipient:'+job.channel_id+':'+thread.user_key,thread.address_box),
       body:unseal(cfg,'service:'+job.id,job.body_box)}
   }
+  if(!liffId)return
   const {rows:[contact]}=await db.query<{user_key:string;recipient_box:string;notices:boolean}>(`
     SELECT user_key,recipient_box,notices FROM workflow_contact WHERE channel_id=$1 AND purpose=$2 AND subject=$3`,
   [job.channel_id,job.purpose,job.subject])
@@ -127,7 +128,8 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     const enabled=job.kind==='chat_reply'?features.inbox_enabled:
       job.kind==='interview_waitlist'?features.waitlist_enabled&&features.interviews_enabled:features.reminders_enabled
     const belongs=connection.purpose==='shared'||connection.purpose===job.purpose
-    const ready=enabled&&belongs&&channelReady(connection)&&job.generation===connection.generation&&
+    const connected=job.kind==='chat_reply'?messagingReady(connection):channelReady(connection)
+    const ready=enabled&&belongs&&connected&&job.generation===connection.generation&&
       !connection.stopped&&!location.stopped&&!location.tenant_stopped&&location.contract_active&&!!location.eligible_at
     if(fresh.next_at===Infinity||+job.expires_at<=Date.now()||!ready||job.scope_version!==await deliveryScope(db,r.id)){
       await markStopped(db,fresh,'店舗設定・停止状態・認証が変更されました')

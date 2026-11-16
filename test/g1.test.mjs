@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHmac, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -31,6 +31,11 @@ const signup = {}
 let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line, google
 let remainingQuota=200, intendedId, pushedBody, attemptedKeys=[], remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
 let managerId, fakeBusy=[], fakeGoogleError=false, googleCalls=[]
+const moduleConfig={id:'9012345678',secret:'d'.repeat(32),botHeader:'X-Test-Line-Bot'}
+const moduleBot='U'+'e'.repeat(32), moduleUser='L'+user+'-'+moduleBot
+const moduleToken='sample-stateless-token'
+let exchangedCode, botInfoUnavailable=false
+const moduleChallenges=new Map(), modulePushes=[]
 const menus=[],pushesLog=[],remoteEvents=new Map()
 const hostCalendar='host-a@example.test'
 let hostBusy=[]
@@ -150,6 +155,19 @@ before(async ()=>{
   await assertAppRole(pool)
   const fetchLine = async (url, options) => {
     const address = new URL(url)
+    if (address.href==='https://manager.line.biz/module/auth/v1/token') {
+      const fields=options.body
+      assert.equal(fields.get('client_id'),moduleConfig.id)
+      assert.equal(fields.get('client_secret'),moduleConfig.secret)
+      assert.equal(fields.get('grant_type'),'authorization_code')
+      assert.equal(fields.get('redirect_uri'),origin+'/line-module/return')
+      assert.equal(fields.get('region'),'JP')
+      assert.equal(fields.get('scope'),'message:send message:receive')
+      const code=fields.get('code')
+      assert.equal(createHash('sha256').update(fields.get('code_verifier')).digest('base64url'),moduleChallenges.get(code))
+      exchangedCode=code
+      return Response.json({bot_id:moduleBot,scope:'message:send message:receive'})
+    }
     assert.equal(address.origin,'https://api.line.me')
     remoteCalls.push(address.pathname)
     if(address.pathname.startsWith('/v2/bot/richmenu/')){
@@ -163,7 +181,18 @@ before(async ()=>{
       case '/v2/oauth/verify':
         assert.equal(options.body.get('access_token'),accessToken)
         return Response.json({client_id:ids.messaging})
-      case '/v2/bot/info': return Response.json({userId:bot})
+      case '/oauth2/v3/token':
+        assert.equal(options.body.get('grant_type'),'client_credentials')
+        assert.equal(options.body.get('client_id'),moduleConfig.id)
+        assert.equal(options.body.get('client_secret'),moduleConfig.secret)
+        return Response.json({access_token:moduleToken,expires_in:900})
+      case '/v2/bot/info': {
+        if (!options.headers[moduleConfig.botHeader]) return Response.json({userId:bot})
+        assert.equal(options.headers.Authorization,'Bearer '+moduleToken)
+        assert.equal(options.headers[moduleConfig.botHeader],moduleBot)
+        if (botInfoUnavailable) return new Response(null,{status:503})
+        return Response.json({userId:moduleBot,basicId:'@testshop',displayName:'かんたん連携テスト'})
+      }
       case '/v2/bot/channel/webhook/endpoint':
         return Response.json({endpoint:origin+endpoint(c),active:true})
       case '/v2/bot/channel/webhook/test':
@@ -178,6 +207,14 @@ before(async ()=>{
       case '/v2/bot/message/quota': return Response.json({type:'limited',value:200})
       case '/v2/bot/message/quota/consumption': return Response.json({totalUsage:200-remainingQuota})
       case '/v2/bot/message/push': {
+        if (options.headers[moduleConfig.botHeader]) {
+          assert.equal(options.headers[moduleConfig.botHeader],moduleBot)
+          assert.equal(options.headers.Authorization,'Bearer '+moduleToken)
+          const message=JSON.parse(options.body)
+          assert.equal(message.to,moduleUser)
+          modulePushes.push(message)
+          return new Response('{}',{status:200,headers:{'x-line-request-id':'module-test-line-id'}})
+        }
         assert.ok([user,user2].includes(JSON.parse(options.body).to))
         pushedBody=JSON.parse(options.body).messages[0].text
         pushesLog.push(JSON.parse(options.body))
@@ -1122,4 +1159,98 @@ test('ログイン不要の面談は対面のみ、予約時もGoogleの重複�
     expect(await patch(api+'/bookings/'+booking.id,stranger.cookie,{action:'cancel',revision:1}),404)
     expect(await patch(api+'/bookings/'+booking.id,session.cookie,{action:'cancel',revision:1}),200)
   }finally{fakeBusy=[]}
+})
+
+test('LINEモジュールの許可を開始した店舗に戻し、署名付き受信から端末へのテスト送信まで行える',async()=>{
+  const store=expect(await post('/stores',admin,storeData('かんたん連携店舗'),idempotency()),201).id
+  const basePath='/stores/'+store
+  const start=basePath+'/line-module'
+  const remoteWebhook='/api/v1/webhooks/line-module'
+  const moduleWeb=(destination,events,secret=moduleConfig.secret)=>{
+    const raw=JSON.stringify({destination,events})
+    return send(remoteWebhook,{method:'POST',headers:{'Content-Type':'application/json',
+      'X-Line-Signature':createHmac('sha256',secret).update(raw).digest('base64')},body:raw})
+  }
+  const message=(content,mode='active')=>({
+    webhookEventId:randomUUID(),type:'message',mode,timestamp:Date.now(),
+    source:{type:'user',userId:moduleUser},message:{id:randomUUID(),type:'text',text:content},
+  })
+  assert.equal(expect(await request(start,{cookie:admin}),200).configured,false)
+  expect(await post(start,admin,{purpose:'recruitment'}),409)
+  cfg.lineModule=moduleConfig
+  try {
+    assert.equal(expect(await request(start,{cookie:admin}),200).configured,true)
+    expect(await post(start,null,{purpose:'recruitment'}),401)
+    const result=expect(await post(start,admin,{purpose:'recruitment'}),200)
+    const authURL=new URL(result.url)
+    assert.equal(authURL.origin+authURL.pathname,'https://manager.line.biz/module/auth/v1/authorize')
+    const params=authURL.searchParams
+    assert.equal(params.get('client_id'),moduleConfig.id)
+    assert.equal(params.get('redirect_uri'),origin+'/line-module/return')
+    assert.equal(params.get('scope'),'message:send message:receive')
+    assert.equal(params.get('code_challenge_method'),'S256')
+    assert.ok(!result.url.includes(moduleConfig.secret))
+    const data={state:params.get('state'),code:'module-test-code'}
+    moduleChallenges.set(data.code,params.get('code_challenge'))
+    expect(await post(start+'/complete',null,data),401)
+    expect(await post('/stores/'+storeId+'/line-module/complete',admin,data),409)
+    expect(await post(start+'/complete',admin,{...data,state:data.state.slice(0,32)+'e'.repeat(64)}),409)
+    assert.equal(exchangedCode,undefined)
+    const landing=await send('/line-module/return')
+    assert.equal(landing.status,200)
+    assert.match(await landing.text(),/公式LINEの連携/)
+
+    botInfoUnavailable=true
+    expect(await post(start+'/complete',admin,data),502)
+    assert.equal(exchangedCode,data.code)
+    assert.deepEqual(expect(await request(basePath+'/connections',{cookie:admin}),200),[])
+    botInfoUnavailable=false
+    const done=expect(await post(start+'/complete',admin,{...data,code:'exchange-must-not-repeat'}),200)
+    assert.equal(exchangedCode,data.code)
+    assert.deepEqual(expect(await post(start+'/complete',admin,data),200),done)
+    const path=basePath+'/connections/'+done.id
+    const summary=async()=>expect(await request(basePath+'/connections',{cookie:admin}),200)[0]
+    const linked=await summary()
+    assert.equal(linked.module_status,'attached')
+    assert.equal(linked.label,'かんたん連携テスト')
+    assert.equal(linked.basic_id,'@testshop')
+    assert.equal(linked.liff_url,null)
+    assert.equal(linked.status,'pending')
+    assert.ok(!JSON.stringify(linked).includes(moduleConfig.secret))
+    assert.ok(!JSON.stringify(linked).includes(moduleToken))
+    assert.ok(!expect(await request('/stores/'+storeId+'/connections',{cookie:admin}),200).find(c=>c.id===done.id))
+    expect(await request('/liff/'+done.id),409)
+    assert.equal((await moduleWeb(moduleBot,[])).status,200)
+    assert.equal((await moduleWeb(moduleBot,[message('偽の受信')],channelSecret)).status,401)
+    assert.equal((await moduleWeb(bot,[message('別のチャネル')])).status,200)
+    assert.equal((await summary()).module_status,'attached')
+    assert.equal((await moduleWeb(moduleBot,[message('待機中','standby')])).status,200)
+    assert.equal((await summary()).module_status,'standby')
+
+    const tester=expect(await post(path+'/tests',admin,{purpose:'recruitment'},idempotency()),201)
+    const verify=message('接続テスト '+tester.code)
+    assert.equal((await moduleWeb(moduleBot,[verify])).status,200)
+    assert.equal((await moduleWeb(moduleBot,[verify])).status,200)
+    assert.equal((await moduleWeb(moduleBot,[message('動作確認')])).status,200)
+    const ready=await summary()
+    assert.equal(ready.module_status,'active')
+    assert.equal(ready.checks.receive_verified,true)
+    expect(await post(path+'/module-delivery',admin,{revision:ready.revision}),409)
+    expect(await post(path+'/tests/'+tester.id+'/send',admin,{},idempotency()),202)
+    await workOnce(pool,cfg,line,google)
+    const sent=await summary()
+    assert.equal(sent.checks.send_accepted,true)
+    assert.equal(modulePushes.length,1)
+    const confirmed=expect(await post(path+'/module-delivery',admin,{revision:sent.revision}),200)
+    assert.equal(confirmed.status,'connected')
+    assert.equal((await moduleWeb(moduleBot,[{
+      webhookEventId:randomUUID(),type:'module',mode:'active',timestamp:Date.now(),
+      module:{type:'detached',botId:moduleBot},
+    }])).status,200)
+    assert.equal((await summary()).module_status,'detached')
+    assert.equal((await summary()).checks.delivery_confirmed,undefined)
+  } finally {
+    delete cfg.lineModule
+    botInfoUnavailable=false
+  }
 })

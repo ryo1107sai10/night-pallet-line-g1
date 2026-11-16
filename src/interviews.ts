@@ -58,8 +58,8 @@ export async function startInterviewSession(pool:pg.Pool,cfg:Config,api:LineAPI,
     const target=await route(db,data.connection)
     await scope(db,target.tenant_id,target.store_id)
     const c=await recruitmentConnection(db,target.id)
-    if (!c.checks.provider_verified || !c.checks.login_published) throw unauthorized()
-    return c
+    if (!c.login_id || !c.checks.provider_verified || !c.checks.login_published) throw unauthorized()
+    return {...c,login_id:c.login_id}
   })
   const user=await api.verifyID(connection.login_id,data.id_token)
   const raw=token()

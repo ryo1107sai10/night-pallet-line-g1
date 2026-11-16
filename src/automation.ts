@@ -169,7 +169,7 @@ async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,cst:Customer,boo
   }
   const display=booking?new Intl.DateTimeFormat('ja-JP',{timeZone:s.timezone,dateStyle:'long',timeStyle:'short'}).format(booking.starts_at):''
   return {values:{name:cst.display_name??'',store:s.name,staff,booking:display,price:'',
-    booking_url:booking?'https://liff.line.me/'+c.liff_id:''},bookingLinkValid:!!booking&&cfg.external}
+    booking_url:booking&&c.liff_id?'https://liff.line.me/'+c.liff_id:''},bookingLinkValid:!!booking&&!!c.liff_id&&cfg.external}
 }
 
 async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer,

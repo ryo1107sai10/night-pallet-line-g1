@@ -1,5 +1,5 @@
 import type { Config, DB } from './core.js'
-import { channel, channelReady } from './line.js'
+import { channel, channelReady, messagingReady } from './line.js'
 import { storeFeatures } from './store-features.js'
 import type { WorkflowSubject } from './forms.js'
 
@@ -7,8 +7,13 @@ export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowS
   const flags=await storeFeatures(db,store)
   const checks:{section:string;text:string}[]=[]
   const {rows:channels}=await db.query<{id:string}>(`SELECT id FROM channel WHERE purpose IN ($1,'shared')`,[use])
+  const needsLiff=use==='customer'?flags.campaigns_enabled||flags.rich_menus_enabled:
+    flags.rich_menus_enabled||flags.reminders_enabled||flags.waitlist_enabled
   let connected=0
-  for(const row of channels)if(channelReady(await channel(db,row.id)))connected++
+  for(const row of channels){
+    const connection=await channel(db,row.id)
+    if(needsLiff?channelReady(connection):messagingReady(connection))connected++
+  }
   const maySend=flags.inbox_enabled||flags.rich_menus_enabled||
     (use==='customer'?flags.campaigns_enabled:flags.reminders_enabled||flags.waitlist_enabled)
   if(!channels.length)checks.push({section:'connection',text:'この用途の公式LINEが登録されていません。'})

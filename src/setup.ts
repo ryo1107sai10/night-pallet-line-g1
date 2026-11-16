@@ -8,7 +8,7 @@ export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
   const versions = ['001_g1','002_scenarios','003_operations','004_interviews','005_interview_hours',
     '006_interview_availability','007_store_features','008_forms_sources','009_campaigns','010_contact_menus','011_inbox',
-    '012_interviewer_calendar','013_guest_interviews']
+    '012_interviewer_calendar','013_guest_interviews','014_line_modules']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -39,6 +39,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.inbox_thread,night.inbox_message TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.interview_host,night.interview_google_sync TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.interview_google_session,night.interview_google_calendar TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.line_module_session TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,DELETE ON night.interview_block TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.interview_slot,night.interview_booking TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,DELETE ON night.interview_session TO ${role}`)

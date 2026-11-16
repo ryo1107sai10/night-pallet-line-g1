@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import { type Actor, type Config, type DB, type Route, audit, conflict, scope, tx, unseal } from './core.js'
-import { channel, channelCredentials, LineAPI } from './line.js'
+import { channel, channelCredentials, channelTestReady, LineAPI } from './line.js'
 
 import { lockDispatch } from './dispatch-lock.js'
 import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
@@ -104,9 +104,7 @@ function mustHold(c: Awaited<ReturnType<typeof channel>>, job: NonNullable<Await
   const expired = new Date(job.expires_at).getTime() <= Date.now()
   const interrupted = job.next_at === Infinity
   return expired || interrupted || c.stopped || job.store_stopped || job.tenant_stopped || job.blocked || job.pending_block || job.disabled_at
-    || job.scenario_unavailable || !job.may_send || !c.checks.token_verified || !c.checks.webhook_verified
-    || !c.checks.ownership_verified || !c.checks.provider_verified || !c.checks.login_published
-    || !c.checks.redelivery_enabled || !c.checks.auto_reply_checked || !c.checks.non_developer
+    || job.scenario_unavailable || !job.may_send || !channelTestReady(c)
     || c.generation !== job.generation
 }
 
@@ -129,6 +127,7 @@ async function claim(db: DB, r: Route) {
 export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=googleFromEnvironment(cfg)) {
   const { rows } = await pool.query<Route>('SELECT * FROM channel_route ORDER BY id')
   for (const r of rows) {
+    if (r.module_channel_id && (!cfg.external || r.module_channel_id!==cfg.lineModule?.id)) continue
     await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,cfg,r) })
     await runAutomation(pool,cfg,api,r)
     await deliverCampaign(pool,cfg,api,r)
@@ -139,6 +138,10 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
     const pending = await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); return claim(db,r) })
     if (!pending) continue
     const { c, job, attempt } = pending
+    if (r.module_channel_id) {
+      const credentials=channelCredentials(cfg,c)
+      if ('module' in credentials) await api.modules.headers(credentials.module,credentials.bot).catch(()=>undefined)
+    }
     // Persist the attempt first. Start the call while holding the same lock as stop;
     // release the lock without waiting for LINE's response.
     const submission = await tx(pool,async db=>{
@@ -168,8 +171,9 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
         [job.id,attempt,result.status,result.requestId])
       if (!updated.rowCount) return
       if (result.authError) {
-        await db.query(`UPDATE channel SET checks=checks-'token_verified'-'webhook_verified',
-          revision=revision+1 WHERE id=$1 AND generation=$2`,[c.id,c.generation])
+        await db.query(`UPDATE channel SET checks=checks-$3::text[],
+          revision=revision+1 WHERE id=$1 AND generation=$2`,
+        [c.id,c.generation,c.module_channel_id?['token_verified','webhook_verified','delivery_confirmed']:['token_verified','webhook_verified']])
       }
       await audit(db,r.tenant_id,r.store_id,null,'line.test_' + result.status,job.id)
     })

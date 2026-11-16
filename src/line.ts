@@ -3,8 +3,9 @@ import { lockDispatch } from './dispatch-lock.js'
 import { recordInboxEvent } from './inbox.js'
 import type pg from 'pg'
 import { z } from 'zod'
+import { LineModuleAPI, moduleWebhookPath, requireModule } from './line-module.js'
 import {
-  type Actor, type Config, type DB, type Route, Fault, audit, conflict, digest, keyed,
+  type Actor, type Config, type DB, type Route, type LineModuleConfig, Fault, audit, conflict, digest, keyed,
   looseId, missing, newId, opaque, purpose, revision, route, scope, seal, text, token,
   tx, unseal, userId, uuid,
 } from './core.js'
@@ -33,36 +34,46 @@ export const consoleSchema = z.strictObject({ revision, reason: text(200),
   auto_reply_checked: z.boolean(), login_published: z.boolean(), non_developer: z.boolean(), delivery_confirmed: z.boolean(),
 })
 type Credentials = z.infer<typeof credentialsSchema>
+type SendCredentials = Credentials | {module:LineModuleConfig;bot:string}
 type Checks = {
   ownership_verified?: boolean; provider_verified?: boolean; redelivery_enabled?: boolean;
   auto_reply_checked?: boolean; login_published?: boolean; non_developer?: boolean; delivery_confirmed?: boolean;
   token_verified?: boolean; webhook_verified?: boolean;
 }
 export type Channel = Route & {
-  label: string; purpose: 'customer' | 'recruitment' | 'shared'; owner_name: string; provider_id: string;
-  login_id: string; liff_id: string; bot_user_id: string; account_type: string;
+  label: string; purpose: 'customer' | 'recruitment' | 'shared'; owner_name: string; provider_id: string | null;
+  login_id: string | null; liff_id: string | null; bot_user_id: string; account_type: string | null;
   existing_tools: string | null; existing_webhook: string | null; management_authority: string;
-  credentials: string; checks: Checks; stopped: boolean; revision: number; generation: number;
+  credentials: string | null; checks: Checks; stopped: boolean; revision: number; generation: number;
+  basic_id:string|null; module_status:'attached'|'active'|'standby'|'detached'|'suspended'|null; module_status_at:Date|null;
 }
-export const channelReady=(c:Channel)=>['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked','login_published',
-  'non_developer','token_verified','webhook_verified','delivery_confirmed'].every(key=>c.checks[key as keyof Channel['checks']]===true)
+export const channelTestReady = (c:Channel) => !!(c.checks.ownership_verified && c.checks.token_verified && c.checks.webhook_verified &&
+  (c.module_channel_id ? c.module_status==='active' :
+    c.checks.provider_verified && c.checks.redelivery_enabled && c.checks.auto_reply_checked && c.checks.login_published && c.checks.non_developer))
+export const messagingReady = (c:Channel) => channelTestReady(c) && c.checks.delivery_confirmed===true
+export const channelReady = (c:Channel) => !!c.liff_id && messagingReady(c)
 
 export async function channel(db: DB, id: string) {
-  const { rows: [row] } = await db.query<Channel>(`SELECT c.*,r.messaging_id FROM channel c
+  const { rows: [row] } = await db.query<Channel>(`SELECT c.*,r.messaging_id,r.module_channel_id,r.module_bot_id FROM channel c
     JOIN channel_route r ON c.id=r.id WHERE c.id=$1`, [id])
   if (!row) throw missing()
   return row
 }
 
-const secretContext = (c: Route) => `line:${c.tenant_id}:${c.store_id}:${c.id}`
-export function channelCredentials(cfg: Config, c: Channel) {
-  return credentialsSchema.parse(JSON.parse(unseal(cfg, secretContext(c), c.credentials)))
+const secretContext = (c: Pick<Route,'tenant_id'|'store_id'|'id'>) => `line:${c.tenant_id}:${c.store_id}:${c.id}`
+export function channelCredentials(cfg: Config, c: Channel):SendCredentials {
+  if (c.module_channel_id) {
+    const module = requireModule(cfg)
+    if (c.module_channel_id!==module.id) throw lineUnavailable()
+    return {module,bot:c.bot_user_id}
+  }
+  return credentialsSchema.parse(JSON.parse(unseal(cfg, secretContext(c), c.credentials!)))
 }
 
 export async function createChannel(db: DB, cfg: Config, actor: Actor, store: string,
   data: z.infer<typeof connectionSchema> & {bot_user_id:string}) {
   const c = { id: newId(), tenant_id: actor.tenant_id, store_id: store, messaging_id: data.messaging_id }
-  await db.query('INSERT INTO channel_route VALUES($1,$2,$3,$4)',
+  await db.query('INSERT INTO channel_route(id,tenant_id,store_id,messaging_id) VALUES($1,$2,$3,$4)',
     [c.id,c.tenant_id,c.store_id,c.messaging_id])
   const { access_token, channel_secret, token_type } = data
   await db.query(`INSERT INTO channel(id,tenant_id,store_id,label,purpose,owner_name,provider_id,
@@ -77,6 +88,7 @@ export async function createChannel(db: DB, cfg: Config, actor: Actor, store: st
 
 export async function replaceCredentials(db: DB, cfg: Config, actor: Actor, c: Channel,
   data: z.infer<typeof replaceCredentialsSchema>) {
+  if (c.module_channel_id) throw missing()
   const { access_token, channel_secret, token_type, reason } = data
   const update = await db.query(`UPDATE channel SET credentials=$2, generation=generation+1,
     checks=checks-'token_verified'-'webhook_verified'-'delivery_confirmed', revision=revision+1 WHERE id=$1 AND revision=$3`,
@@ -99,19 +111,28 @@ export async function evidence(db: DB, c: Channel) {
 }
 
 export async function summary(db: DB, cfg: Config, c: Channel) {
-  const { credentials, ...safe } = c
+  const { credentials, module_bot_id, ...safe } = c
   const checks = { ...c.checks, ...await evidence(db,c) }
-  const complete = ['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked',
+  if (c.module_channel_id) checks.liff_verified = false
+  const complete = c.module_channel_id ? messagingReady(c) && checks.receive_verified && checks.send_accepted :
+    ['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked',
     'login_published','non_developer','token_verified','webhook_verified','liff_verified','receive_verified',
     'send_accepted','delivery_confirmed'].every(check => checks[check as keyof typeof checks] === true)
   return { ...safe, checks, status: complete ? 'connected' : 'pending',
-    webhook_url: cfg.origin + '/api/v1/webhooks/line/' + c.id,
-    liff_url: cfg.origin + '/liff/' + c.id,
+    webhook_url: cfg.origin + (c.module_channel_id ? moduleWebhookPath : '/api/v1/webhooks/line/' + c.id),
+    liff_url: c.liff_id ? cfg.origin + '/liff/' + c.id : null,
   }
 }
 
 export class LineAPI {
-  constructor(private request: typeof fetch = fetch) {}
+  readonly modules:LineModuleAPI
+  constructor(private request: typeof fetch = fetch) {
+    this.modules = new LineModuleAPI(request)
+  }
+
+  private async headers(cred:SendCredentials) {
+    return 'module' in cred ? this.modules.headers(cred.module,cred.bot) : { Authorization:'Bearer '+cred.access_token }
+  }
   private async call(path: string, options: RequestInit = {}) {
     try {
       return await this.request('https://api.line.me' + path, {
@@ -136,11 +157,13 @@ export class LineAPI {
     return identity.success ? identity.data : null
   }
 
-  async checkToken(c: Channel, cred: Credentials) {
-    return await this.botIdForChannel(c.messaging_id,cred) === c.bot_user_id
+  async checkToken(c: Channel, cred: SendCredentials) {
+    if ('module' in cred) return (await this.modules.bot(cred.module,cred.bot)).userId===c.bot_user_id
+    return !!c.messaging_id && await this.botIdForChannel(c.messaging_id,cred) === c.bot_user_id
   }
 
-  async checkWebhook(cred: Credentials, expected: string) {
+  async checkWebhook(cred: SendCredentials, expected: string) {
+    if ('module' in cred) return false
     const authorization = { Authorization: 'Bearer ' + cred.access_token }
     const settings = await this.call('/v2/bot/channel/webhook/endpoint', { headers: authorization })
     if (settings.status === 429 || settings.status >= 500) throw lineUnavailable()
@@ -165,8 +188,8 @@ export class LineAPI {
     return verified.data.sub
   }
 
-  async quota(cred: Credentials) {
-    const headers = { Authorization: 'Bearer '+cred.access_token }
+  async quota(cred: SendCredentials) {
+    const headers = await this.headers(cred)
     const [limit,consumption] = await Promise.all([
       this.call('/v2/bot/message/quota',{headers}), this.call('/v2/bot/message/quota/consumption',{headers}),
     ])
@@ -178,24 +201,25 @@ export class LineAPI {
     return ceiling.type==='none'?Infinity:Math.max(0,ceiling.value-used)
   }
 
-  async richMenuExists(cred:Credentials,id:string){
+  async richMenuExists(cred:SendCredentials,id:string){
     const response=await this.call('/v2/bot/richmenu/'+encodeURIComponent(id),
-      {headers:{Authorization:'Bearer '+cred.access_token}})
+      {headers:await this.headers(cred)})
     if(response.status>=500||response.status===429)throw lineUnavailable()
     return response.ok
   }
 
-  async bindRichMenu(cred:Credentials,user:string,id:string|null){
+  async bindRichMenu(cred:SendCredentials,user:string,id:string|null){
     const endpoint='/v2/bot/user/'+encodeURIComponent(user)+'/richmenu'
     const response=await this.call(id?endpoint+'/'+encodeURIComponent(id):endpoint,{
-      method:id?'POST':'DELETE',headers:{Authorization:'Bearer '+cred.access_token},
+      method:id?'POST':'DELETE',headers:await this.headers(cred),
     })
     return {ok:response.ok||!id&&response.status===404,retry:response.status>=500||response.status===429}
   }
 
-  async push(cred: Credentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。') {
+  async push(cred: SendCredentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。') {
+    const authorization = 'module' in cred ? await this.headers(cred) : {Authorization:'Bearer '+cred.access_token}
     const response = await this.call('/v2/bot/message/push', { method: 'POST',
-      headers: { Authorization: 'Bearer ' + cred.access_token, 'Content-Type': 'application/json',
+      headers: { ...authorization, 'Content-Type': 'application/json',
         'X-Line-Retry-Key': attemptID },
       body: JSON.stringify({ to: recipient, messages: [{type:'text',text:testBody}] }),
     })
@@ -212,56 +236,123 @@ export class LineAPI {
 const lineUnavailable = () => new Fault(502,'LINE_UNAVAILABLE','LINEとの通信結果を確認できません。',true)
 const invalidLiff = () => new Fault(401,'INVALID_LIFF','LINEの本人確認またはテストコードを確認してください。')
 const signatureError = () => new Fault(401,'INVALID_WEBHOOK','Webhookを確認できません。')
+const moduleUserId = z.union([userId,z.string().regex(/^LU[0-9a-f]{32}-U[0-9a-f]{32}$/i)])
 const eventSchema = z.object({ webhookEventId: text(100), type: text(100), timestamp: z.int().min(0).max(8640000000000000),
+  mode:z.enum(['active','standby']).optional(),
+  module:z.object({type:z.string(),botId:userId}).optional(),
   follow:z.object({isUnblocked:z.boolean().optional()}).optional(),
   message:z.object({type:z.string().max(100),id:z.string().max(100).optional(),text:z.string().optional()}).optional(),
   unsend:z.object({messageId:z.string().max(100)}).optional(),
-  source: z.object({ type: z.string(), userId: userId.optional() }).optional(),
+  source: z.object({ type: z.string(), userId: moduleUserId.optional() }).optional(),
 })
 const webhookSchema = z.object({ destination: userId, events: z.array(eventSchema).max(500) })
 export const userKey = (cfg: Config, c: Channel, user: string) => keyed(cfg,`line-user:${c.id}:${user}`)
 
-export async function receiveWebhook(pool: pg.Pool, cfg: Config, id: string, raw: Buffer, signature: string) {
+function decodeWebhook(raw:Buffer,signature:string,secret:string) {
   if (!/^[A-Za-z0-9+/]{43}=$/.test(signature)) throw signatureError()
-  await tx(pool, async db => {
-    const r = await route(db,id)
+  const expected = createHmac('sha256',secret).update(raw).digest()
+  if (!timingSafeEqual(expected,Buffer.from(signature,'base64'))) throw signatureError()
+  let payload:unknown
+  try { payload=JSON.parse(raw.toString('utf8')) } catch { throw signatureError() }
+  const parsed=webhookSchema.safeParse(payload)
+  if (!parsed.success) throw signatureError()
+  return parsed.data
+}
+
+export async function receiveWebhook(pool:pg.Pool,cfg:Config,id:string,raw:Buffer,signature:string) {
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(signature)) throw signatureError()
+  await tx(pool,async db=>{
+    const r=await route(db,id)
+    if (r.module_channel_id) throw missing()
     await scope(db,r.tenant_id,r.store_id)
-    const c = await channel(db,id)
-    const actual = Buffer.from(signature,'base64')
-    const expected = createHmac('sha256',channelCredentials(cfg,c).channel_secret).update(raw).digest()
-    if (!timingSafeEqual(expected,actual)) throw signatureError()
-    let payload: unknown
-    try { payload = JSON.parse(raw.toString('utf8')) } catch { throw signatureError() }
-    const parsed = webhookSchema.safeParse(payload)
-    if (!parsed.success || parsed.data.destination !== c.bot_user_id) throw signatureError()
-    await lockDispatch(db,c.tenant_id)
-    if ((await channel(db,id)).generation!==c.generation) throw signatureError()
-    const {rows:[store]}=await db.query<{inbox_enabled:boolean}>('SELECT inbox_enabled FROM store WHERE id=$1',[c.store_id])
-    for (const event of parsed.data.events) {
-      if (event.timestamp>Date.now()+5*60000) continue
-      const key = event.source?.type === 'user' && event.source.userId
-        ? userKey(cfg,c,event.source.userId) : null
-      const kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
-      const phrase=event.message?.type==='text'?event.message.text?.trim():null
-      const stopSignal=phrase==='全配信停止'?'all':phrase==='販促停止'?'marketing':null
-      const recipient=key&&event.source?.userId&&c.purpose==='customer'&&['follow','refollow'].includes(kind)
-        ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,event.source.userId) : null
-      const eventPurpose = c.purpose === 'shared' ? 'unclassified' : c.purpose
-      const written=await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
-        occurred_at,kind,purpose,user_key,recipient_box,stop_signal) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT(channel_id,event_id) DO NOTHING`,
-        [c.tenant_id,c.store_id,id,event.webhookEventId,c.generation,new Date(event.timestamp),kind,eventPurpose,key,recipient,stopSignal])
-      if(written.rowCount&&key&&event.source?.userId&&(kind==='message'&&store.inbox_enabled||kind==='unsend')){
-        await recordInboxEvent(db,cfg,c,key,event.source.userId,{kind,messageId:event.message?.id,messageType:event.message?.type,
-          body:event.message?.type==='text'?event.message.text:undefined,unsent:event.unsend?.messageId,when:new Date(event.timestamp)},store.inbox_enabled)
+    await lockDispatch(db,r.tenant_id)
+    const c=await channel(db,id)
+    const cred=channelCredentials(cfg,c)
+    if ('module' in cred) throw signatureError()
+    const payload=decodeWebhook(raw,signature,cred.channel_secret)
+    if (payload.destination!==c.bot_user_id) throw signatureError()
+    await recordWebhookEvents(db,cfg,c,payload.events,await inboxEnabled(db,c.store_id))
+  })
+}
+
+export async function receiveModuleWebhook(pool:pg.Pool,cfg:Config,raw:Buffer,signature:string) {
+  const module=requireModule(cfg)
+  const payload=decodeWebhook(raw,signature,module.secret)
+  if (!payload.events.length) return
+  await tx(pool,async db=>{
+    const {rows:[r]}=await db.query<Route>('SELECT * FROM channel_route WHERE module_channel_id=$1 AND module_bot_id=$2',
+      [module.id,payload.destination])
+    if (!r) return
+    await scope(db,r.tenant_id,r.store_id)
+    await lockDispatch(db,r.tenant_id)
+    const c=await channel(db,r.id)
+    const inbox=await inboxEnabled(db,c.store_id)
+    const events=payload.events.sort((a,b)=>a.timestamp-b.timestamp)
+    for (const event of events) {
+      if (event.timestamp>Date.now()+5*60000 || !event.mode || event.timestamp<+(c.module_status_at ?? 0)) continue
+      if (event.module && event.module.botId!==c.bot_user_id) continue
+      const state=event.module?.type==='detached'?'detached':
+        event.type==='botSuspended'?'suspended':
+        event.type==='deactivated'||event.mode==='standby'?'standby':'active'
+      if (c.module_status==='detached' || c.module_status==='suspended' && state!=='detached' && event.type!=='botResumed') continue
+      if (state!==c.module_status) {
+        const interrupted=state!=='active'
+        const {rows:[updated]}=await db.query<Pick<Channel,'checks'|'generation'|'module_status_at'>>(`UPDATE channel
+          SET module_status=$2,module_status_at=$3,revision=revision+1,generation=generation+CASE WHEN $4 THEN 1 ELSE 0 END,
+            checks=CASE WHEN $4 THEN checks-'webhook_verified'-'delivery_confirmed'
+              ELSE checks || '{"webhook_verified":true}'::jsonb END WHERE id=$1 RETURNING checks,generation,module_status_at`,
+        [r.id,state,new Date(event.timestamp),interrupted])
+        Object.assign(c,updated,{module_status:state})
+      } else if (state==='active' && !c.checks.webhook_verified) {
+        await db.query(`UPDATE channel SET checks=checks || '{"webhook_verified":true}'::jsonb,revision=revision+1 WHERE id=$1`,[r.id])
+        c.checks.webhook_verified=true
+      }
+      if ((state==='active' && !['module','activated','botResumed'].includes(event.type)) ||
+        (state==='standby' && event.type==='unsend')) {
+        await recordWebhookEvents(db,cfg,c,[event],inbox)
       }
     }
   })
 }
 
+async function inboxEnabled(db:DB,store:string) {
+  const {rows:[row]}=await db.query<{inbox_enabled:boolean}>('SELECT inbox_enabled FROM store WHERE id=$1',[store])
+  return row.inbox_enabled
+}
+
+async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typeof eventSchema>[],inbox:boolean) {
+  for (const event of events) {
+    if (event.timestamp>Date.now()+5*60000) continue
+    const source=event.source?.type==='user' ? event.source.userId : undefined
+    const user=source && (c.module_channel_id || userId.safeParse(source).success) ? source : undefined
+    const key=user ? userKey(cfg,c,user) : null
+    const kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
+    const phrase=event.message?.type==='text'?event.message.text?.trim():null
+    const stopSignal=phrase==='全配信停止'?'all':phrase==='販促停止'?'marketing':null
+    const recipient=key&&user&&c.purpose==='customer'&&['follow','refollow'].includes(kind)
+      ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,user) : null
+    const eventPurpose=c.purpose==='shared'?'unclassified':c.purpose
+    const test=c.module_channel_id && phrase?.match(/^接続テスト ([A-Za-z0-9_-]{43})$/)
+    const written=await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
+      occurred_at,kind,purpose,user_key,recipient_box,stop_signal) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      ON CONFLICT(channel_id,event_id) DO NOTHING`,
+    [c.tenant_id,c.store_id,c.id,event.webhookEventId,c.generation,new Date(event.timestamp),test?'test_link':kind,eventPurpose,key,recipient,stopSignal])
+    if (!written.rowCount || !key || !user) continue
+    if (test) {
+      const hash=digest(test[1])
+      await db.query(`UPDATE tester SET verified_at=now(),user_key=$2,recipient=$3 WHERE code_hash=$1 AND channel_id=$4
+        AND generation=$5 AND expires_at>now() AND verified_at IS NULL`,[hash,key,seal(cfg,'tester:'+hash,user),c.id,c.generation])
+    } else if (kind==='message'&&inbox||kind==='unsend') {
+      await recordInboxEvent(db,cfg,c,key,user,{kind,messageId:event.message?.id,messageType:event.message?.type,
+        body:event.message?.type==='text'?event.message.text:undefined,unsent:event.unsend?.messageId,when:new Date(event.timestamp)},inbox)
+    }
+  }
+}
+
 export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.infer<typeof purpose>) {
   if (c.purpose !== 'shared' && c.purpose !== usage) throw missing()
-  if (!c.checks.ownership_verified || !c.checks.provider_verified || !c.checks.login_published) {
+  if (!c.checks.ownership_verified || (c.module_channel_id ? c.module_status==='detached'||c.module_status==='suspended' :
+    !c.liff_id || !c.checks.provider_verified || !c.checks.login_published)) {
     throw new Fault(409,'CONSOLE_CHECKS_REQUIRED','所有権、プロバイダーおよびLINEログインの公開を確認してください。')
   }
   const id = newId()
@@ -270,7 +361,7 @@ export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.inf
     code_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+interval '2 hours') RETURNING expires_at`,
     [id,c.tenant_id,c.store_id,c.id,c.generation,usage,digest(code)])
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.tester_invite',id,null,{purpose:usage})
-  return { id, code, expires_at: result.rows[0].expires_at, liff_url: 'https://liff.line.me/' + c.liff_id }
+  return { id, code, expires_at: result.rows[0].expires_at, liff_url: c.liff_id ? 'https://liff.line.me/' + c.liff_id : null }
 }
 
 export const verifyLiffSchema = z.strictObject({
@@ -285,8 +376,8 @@ export async function verifyLiff(pool: pg.Pool, cfg: Config, api: LineAPI, data:
     const c = await channel(db,r.id)
     const result = await db.query(`SELECT id FROM tester WHERE channel_id=$1 AND code_hash=$2 AND generation=$3
       AND purpose=$4 AND expires_at>now() AND verified_at IS NULL`,[c.id,digest(data.code),c.generation,data.purpose])
-    if (!result.rowCount) throw invalidLiff()
-    return c
+    if (!result.rowCount || !c.login_id) throw invalidLiff()
+    return {...c,login_id:c.login_id}
   })
   const recipient = await api.verifyID(setup.login_id,data.id_token)
   await tx(pool, async db => {
@@ -319,7 +410,8 @@ export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: stri
     AND occurred_at BETWEEN $4 AND now() AND kind IN ('follow','message')) AS heard,
     EXISTS(SELECT 1 FROM channel_relationship WHERE channel_id=$1 AND user_key=$3 AND following=false) AS blocked`,
     [c.id,c.generation,tester.user_key,tester.verified_at])
-  if (!e.heard || e.blocked || !c.checks.token_verified || !c.checks.webhook_verified) {
+  if (!e.heard || e.blocked || !c.checks.token_verified || !c.checks.webhook_verified ||
+    (c.module_channel_id && !channelTestReady(c))) {
     throw new Fault(409,'TEST_NOT_READY','疎通確認後、認証したテスト利用者から公式アカウントへメッセージを送ってください。')
   }
   const id = newId()

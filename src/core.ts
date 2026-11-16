@@ -13,7 +13,8 @@ export const userId = z.string().regex(/^U[0-9a-f]{32}$/i)
 export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 export type DB = PoolClient
 export type Actor = { id: string; tenant_id: string; role: string; email: string }
-export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean }
+export type LineModuleConfig = { id: string; secret: string; botHeader: string }
+export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; lineModule?: LineModuleConfig }
 
 export class Fault extends Error {
   constructor(public status: number, public code: string, message: string, public retryable = false) {
@@ -42,8 +43,15 @@ export function configFromEnvironment(): Config {
   }
   const master = Buffer.from(process.env.MASTER_KEY ?? '', 'base64')
   if (master.length !== 32) throw new Error('MASTER_KEY must contain 32 bytes in base64.')
+  const module = z.object({
+    id: looseId,
+    secret: z.string().regex(/^[0-9a-f]{32}$/i),
+    botHeader: z.string().regex(/^[a-zA-Z][a-zA-Z0-9-]{1,79}$/)
+      .refine(value => !['authorization','host','cookie','content-type','content-length','x-line-retry-key'].includes(value.toLowerCase())),
+  }).safeParse({id:process.env.LINE_MODULE_CHANNEL_ID,secret:process.env.LINE_MODULE_CHANNEL_SECRET,
+    botHeader:process.env.LINE_MODULE_BOT_HEADER})
   return { origin: parsed.origin, master, external: parsed.protocol === 'https:' && !loopback,
-    automation: process.env.AUTO_SEND_ENABLED === 'true' }
+    automation: process.env.AUTO_SEND_ENABLED === 'true',lineModule:module.success?module.data:undefined }
 }
 
 export function seal(cfg: Config, context: string, value: string) {
@@ -100,7 +108,8 @@ export async function scope(db: DB, tenant: string, store?: string, allStores = 
     [tenant, store ?? '', allStores ? 'yes' : 'no'])
 }
 
-export type Route = { id: string; tenant_id: string; store_id: string; messaging_id: string }
+export type Route = { id: string; tenant_id: string; store_id: string; messaging_id: string | null;
+  module_channel_id: string | null; module_bot_id: string | null }
 export async function route(db: DB, channelId: string): Promise<Route> {
   const result = await db.query<Route>('SELECT * FROM channel_route WHERE id=$1', [channelId])
   if (!result.rows[0]) throw missing()

@@ -1,5 +1,14 @@
 # Night PRO LINE 実LINE検収手順
 
+## 公式LINEのかんたん連携
+
+1. 運営法人が [LINEマーケットプレイス](https://line-marketplace.com/jp/inquiry) に申請し、モジュールチャネルを用意します。メッセージ送受信の権限とチャットの主導権の設定をLINE側で確認してください。
+2. モジュールチャネルにリダイレクトURL `PUBLIC_ORIGIN/line-module/return` とWebhook URL `PUBLIC_ORIGIN/api/v1/webhooks/line-module` を登録します。`PUBLIC_ORIGIN` は管理画面を開く公開HTTPSのオリジンです。
+3. Webサービスとワーカーに `LINE_MODULE_CHANNEL_ID`、`LINE_MODULE_CHANNEL_SECRET`、`LINE_MODULE_BOT_HEADER` を設定します。シークレットはSecret Managerに保存します。ボットを指定するヘッダー名はLINEから参画時に案内された値を使います。DBには `014_line_modules` のマイグレーションを適用します。
+4. 管理画面で店舗と用途を選び、［公式LINEを連携］を押します。LINE側で対象のアカウントを確認して［連携］を押すと店舗に登録されます。［送受信テスト］で公式LINEへの受信とテスト端末への配送を確認します。ワーカージョブの実行後に結果が更新されます。
+
+初回は未登録の検証用公式アカウントを使います。登録済みのアカウントは、元の店舗へのひも付けを保持します。LIFFを使う本人確認、応募フォーム、本人確認付き予約にはLINEログインの設定が必要です。
+
 対象は顧客向け来店予約と1対1のステップ配信です。採用面談は [採用面談の実機検収手順](LIVE-INTERVIEW.md) を参照してください。GitHub Pagesは画面デモとして利用できます。実LINEは公開HTTPSのアプリ、PostgreSQL、常時動作するワーカーに接続します。
 
 ## 用意するもの

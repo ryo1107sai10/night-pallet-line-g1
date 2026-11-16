@@ -132,8 +132,8 @@ export async function openCustomerSession(pool:pg.Pool,cfg:Config,line:LineAPI,i
     const r=await route(db,p.connection)
     await scope(db,r.tenant_id,r.store_id)
     const found=await channel(db,r.id)
-    if (found.purpose==='recruitment'||!found.checks.provider_verified||!found.checks.login_published) throw missing()
-    return found
+    if (found.purpose==='recruitment'||!found.login_id||!found.checks.provider_verified||!found.checks.login_published) throw missing()
+    return {...found,login_id:found.login_id}
   })
   const user=await line.verifyID(c.login_id,p.id_token)
   const raw=token()

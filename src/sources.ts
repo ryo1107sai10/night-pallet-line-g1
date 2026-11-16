@@ -22,7 +22,8 @@ export async function recordSource(db:DB,identity:WorkflowSubject,source:string|
 
 export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpose'],days:number) {
   await requireFeature(db,store,'sources_enabled')
-  const {rows:channels}=await db.query(`SELECT id,label FROM channel WHERE purpose IN ($1,'shared') ORDER BY label,id`,[use])
+  const {rows:channels}=await db.query(`SELECT id,label FROM channel WHERE purpose IN ($1,'shared')
+    AND liff_id IS NOT NULL ORDER BY label,id`,[use])
   const {rows}=await db.query<{id:string;liff_id:string}>(`
     SELECT w.id,w.label,w.active,c.label AS channel_label,c.liff_id,
       coalesce(stats.opened,0) AS opened,coalesce(stats.forms,0) AS forms,
@@ -56,7 +57,7 @@ export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpo
 export async function sourceQr(db:DB,store:string,use:WorkflowSubject['purpose'],id:string){
   await requireFeature(db,store,'sources_enabled')
   const {rows:[entry]}=await db.query<{liff_id:string}>(`SELECT c.liff_id FROM workflow_source s JOIN channel c ON c.id=s.channel_id
-    WHERE s.id=$1 AND s.purpose=$2`,[id,use])
+    WHERE s.id=$1 AND s.purpose=$2 AND c.liff_id IS NOT NULL`,[id,use])
   if(!entry)throw missing()
   return {image:await QRCode.toDataURL(sourceLink(id,entry.liff_id,use),{width:420,errorCorrectionLevel:'M'})}
 }
@@ -65,7 +66,7 @@ export async function saveSource(db:DB,actor:Actor,store:string,use:WorkflowSubj
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'sources_enabled')
   const connection=await channel(db,data.channel)
-  if(connection.store_id!==store||!['shared',use].includes(connection.purpose))throw missing()
+  if(!connection.liff_id||connection.store_id!==store||!['shared',use].includes(connection.purpose))throw missing()
   const {rows:[entry]}=await db.query(`INSERT INTO workflow_source (id,tenant_id,store_id,channel_id,purpose,label)
     VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,[newId(),actor.tenant_id,store,data.channel,use,data.label])
   await audit(db,actor.tenant_id,store,actor.id,'source.create',entry.id,null,{purpose:use})

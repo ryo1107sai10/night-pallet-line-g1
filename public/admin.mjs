@@ -306,6 +306,7 @@ function teamPanel(staff) {
 }
 
 function connectedPanel(base, c, testers) {
+  if (c.module_channel_id) return moduleConnection(base,c,testers)
   const prefix = base + '/connections/' + c.id
   const box = el('div')
   box.id = 'line-connection'
@@ -376,6 +377,77 @@ function connectedPanel(base, c, testers) {
   return box
 }
 
+function moduleConnect(base, configured) {
+  const box = el('section',null,'line-setting')
+  box.id = 'line-setup'
+  box.append(el('h3','公式LINEのかんたん連携'))
+  if (!configured) {
+    const start = el('button','公式LINEを連携')
+    start.disabled = true
+    box.append(el('p','かんたん連携は準備中です。手動設定から公式LINEを登録できます。','muted'),start)
+    return box
+  }
+  const purpose = field('この店舗での用途','purpose',{choices:types,value:'recruitment'})
+  box.append(el('p','LINEの画面で、対象の公式アカウントへの接続を許可してください。','muted'),
+    formOf([purpose],'公式LINEを連携',async data=>{
+      const result = await api(base+'/line-module','POST',data)
+      location.assign(result.url)
+    }))
+  return box
+}
+
+function moduleConnection(base,c,testers) {
+  const prefix = base+'/connections/'+c.id
+  const box = el('div')
+  box.id = 'line-connection'
+  const states = {attached:'連携済み・受信確認待ち',active:'連携済み',
+    standby:'LINE側で待機中',detached:'LINE側で連携解除済み',suspended:'LINE側で利用停止中'}
+  box.append(status(states[c.module_status],['attached','active'].includes(c.module_status)),
+    el('p',types[c.purpose]+' · '+c.basic_id,'muted'))
+  if (c.module_status==='standby') {
+    box.append(el('p','運営者に、LINE側でこのサービスがメッセージを送信できる状態か確認を依頼してください。','muted'))
+  }
+  if (c.module_status==='detached' || c.module_status==='suspended') return box
+  box.append(status(c.checks.webhook_verified?'受信確認済み':'受信確認待ち',c.checks.webhook_verified),
+    status(c.checks.delivery_confirmed?'端末での受信確認済み':'端末での受信確認待ち',c.checks.delivery_confirmed))
+  if (!c.checks.token_verified) box.append(button('LINEとの接続を確認',async()=>{
+    const updated = await api(prefix+'/check-token','POST',{revision:c.revision})
+    await refresh()
+    feedback(updated.checks.token_verified?'LINEとの接続を確認しました。':'LINEとの接続を確認できませんでした。',
+      !updated.checks.token_verified)
+  }))
+  const invitation = el('pre')
+  invitation.hidden = true
+  const usage = c.purpose==='shared'?{customer:types.customer,recruitment:types.recruitment}:{[c.purpose]:types[c.purpose]}
+  const invite = formOf([field('テスト用途','purpose',{choices:usage})],'テスト用メッセージを発行',async(data,key)=>{
+    const result = await api(prefix+'/tests','POST',data,key)
+    invitation.textContent = '公式アカウントに次の1行を送信してください。\n接続テスト '+result.code
+    invitation.hidden = false
+  })
+  const tests = details('送受信テスト',el('p','テスト用メッセージを公式LINEに送り、続けて「動作確認」と送信してください。'),
+    lineLink('公式LINEを開く','https://line.me/R/ti/p/'+encodeURIComponent(c.basic_id)),invite,invitation,
+    button('テストの進捗を更新',refresh))
+  tests.open = !c.checks.delivery_confirmed
+  for (const tester of testers) {
+    const row = el('div',null,'record')
+    row.append(el('p',(tester.received?'受信済み':'受信待ち')+' · '+(sendStatus[tester.send_status]??'未送信')))
+    if (!tester.send_status && tester.received && Date.parse(tester.expires_at)>Date.now() && c.module_status==='active') {
+      row.append(button('テストを1通送る',async()=>{
+        await change(prefix+'/tests/'+tester.id+'/send','POST',{},'テストメッセージを送信待ちにしました。',true)
+      }))
+    }
+    tests.append(row)
+  }
+  if (c.checks.send_accepted && !c.checks.delivery_confirmed && c.module_status==='active') {
+    tests.append(button('端末に届いたことを確認',async()=>{
+      await change(prefix+'/module-delivery','POST',{revision:c.revision},'送受信の確認を記録しました。')
+    }))
+  }
+  box.append(tests,el('p','LINE内の本人確認を使う応募・予約には、LIFFの設定が別途必要です。','muted'),
+    stopForm(prefix+'/stop',c,'公式アカウントの配信'))
+  return box
+}
+
 function connectionSetting(label,value,linkLabel,href) {
   const row = el('section',null,'line-setting')
   const actions = el('div',null,'actions')
@@ -395,14 +467,18 @@ async function render() {
   const base = store ? '/stores/'+store.id : ''
   const staffPromise = admin ? api('/staff') : Promise.resolve([])
   const connectionPromise = manage && store ? api(base+'/connections') : Promise.resolve([])
+  const modulePromise = manage && store ? api(base+'/line-module') : Promise.resolve(null)
   const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
-  const [staff,connections,features] = await Promise.all([staffPromise,connectionPromise,featurePromise])
+  const [staff,connections,features,module] = await Promise.all([staffPromise,connectionPromise,featurePromise,modulePromise])
   if (generation!==view) return
+  const url = new URL(location.href)
+  const linked = connections.find(item=>item.id===url.searchParams.get('line_connected')&&item.module_channel_id)
+  url.searchParams.delete('line_connected')
+  if (linked) channelId = linked.id
   if (!connections.some(item=>item.id===channelId)) channelId = connections[0]?.id
   const current = connections.find(item=>item.id===channelId)
   const testers = current ? await api(base+'/connections/'+current.id+'/tests') : []
   if (generation!==view) return
-  const url = new URL(location.href)
   if (store) url.searchParams.set('store',store.id)
   else url.searchParams.delete('store')
   history.replaceState(null,'',url)
@@ -468,7 +544,7 @@ async function render() {
     })))
   main.append(storePanel)
   if (manage && store) {
-    const line = panel('LINE接続')
+    const line = panel('LINE接続',moduleConnect(base,module.configured))
     if (current) {
       const picker = field('公式アカウント','channel',{
         choices:Object.fromEntries(connections.map(item=>[item.id,item.label])),value:current.id,
@@ -479,9 +555,8 @@ async function render() {
       }
       line.append(picker,connectedPanel(base,current,testers))
     } else line.append(el('p','この店舗に公式アカウントが登録されていません。'))
-    const registration = details('公式LINEを連携する',lineRegistration(base))
-    registration.id = 'line-setup'
-    registration.open = !current || location.hash==='#line-setup'
+    const registration = details('手動で設定する',lineRegistration(base))
+    registration.open = !module.configured && (!current || location.hash==='#line-setup')
     line.append(registration)
     main.append(line)
   }
@@ -490,6 +565,7 @@ async function render() {
     stopForm('/tenant/stop',session.tenant,'法人の配信'),auditPanel('/tenant/audit')))
   layout.append(main,side)
   content.replaceChildren(layout)
+  if (linked) feedback(linked.label+'を連携しました。')
   if (['#line-setup','#line-connection'].includes(location.hash)) $(location.hash)?.scrollIntoView()
 }
 
