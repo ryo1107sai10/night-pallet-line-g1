@@ -9,7 +9,7 @@ import EmbeddedPostgres from 'embedded-postgres'
 import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
-import { bootstrap, migrate } from '../dist/setup.js'
+import { bootstrap, designateMaster, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
@@ -1329,4 +1329,80 @@ test('法人マスターだけが店舗別のLINE初期設定を管理し、店�
     await db.query("UPDATE line_onboarding SET guide_expires_at=now()-interval '1 minute' WHERE store_id=$1",[store])
   })
   expect(await lookup(active),404)
+})
+
+test('公開入口からマスターを分離し、指定した法人管理者の二段階認証と割り当てを毎回確認する',async()=>{
+  const tenant='master-guard'
+  const email='master@example.test'
+  const first=await bootstrap(owner,cfg,{slug:tenant,name:'マスター試験法人',email})
+  const open=async (path,cookie)=>send(path,{redirect:'manual',headers:cookie?{Cookie:cookie}:{}})
+  const guest=await open('/')
+  const homepage=await guest.text()
+  assert.equal(guest.status,200)
+  assert.match(homepage,/応募・面談予約/)
+  assert.doesNotMatch(homepage,/マスター|管理画面|admin\.mjs/)
+  cfg.publicBookingConnection=c
+  try {
+    assert.equal((await open('/')).headers.get('location'),'/book/'+c)
+    assert.equal((await open('/book/'+c)).status,200)
+  } finally {
+    delete cfg.publicBookingConnection
+  }
+  const signIn=await open('/master/')
+  assert.equal(signIn.status,200)
+  assert.equal(signIn.headers.get('x-robots-tag'),'noindex, nofollow')
+  const form=await signIn.text()
+  assert.match(form,/認証アプリ/)
+  assert.doesNotMatch(form,/id="workspace"/)
+  assert.equal((await open('/static/index.html')).status,404)
+  assert.equal((await open('/interview/staff.html')).status,302)
+  assert.equal((await open('/studio/')).status,302)
+  expect(await request('/line-onboarding'),401)
+  expect(await request('/staff'),401)
+
+  expect(await post('/auth/activate',null,{invite:first.invite_code,password:pass,code:code(first.setup_key,-1)}),200)
+  expect(await post('/auth/master/login',null,{tenant,email,password:pass}),400)
+  const master=await post('/auth/master/login',null,{tenant,email,password:pass,code:code(first.setup_key)})
+  expect(master,200)
+  const workspace=await open('/master/',master.cookie)
+  assert.equal(workspace.status,200)
+  assert.match(await workspace.text(),/id="workspace"/)
+  expect(await request('/line-onboarding',{cookie:master.cookie}),200)
+  assert.equal((await open('/studio/',master.cookie)).status,200)
+  assert.equal((await open('/interview/staff.html',master.cookie)).status,200)
+  assert.equal((await open('/staff/?store='+storeId,master.cookie)).headers.get('location'),'/master/?store='+storeId)
+  expect(await post('/staff/invites',master.cookie,{email:'extra@example.test',role:'admin',stores:[]},idempotency()),400)
+
+  const store=expect(await post('/stores',master.cookie,storeData('権限試験店'),idempotency()),201).id
+  const alternateEmail='alternate@example.test'
+  const invite=expect(await post('/staff/invites',master.cookie,{email:alternateEmail,role:'manager',stores:[store]},idempotency()),201)
+  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)}),200)
+  const alternateLogin={tenant,email:alternateEmail,password:pass,code:code(invite.setup_key)}
+  expect(await post('/auth/master/login',null,alternateLogin),401)
+  const staff=await post('/auth/login',null,alternateLogin)
+  expect(staff,200)
+  assert.equal((await open('/master/',staff.cookie)).headers.get('location'),'/')
+  expect(await request('/line-onboarding',{cookie:staff.cookie}),403)
+  expect(await request('/stores/'+store+'/connections',{cookie:staff.cookie}),200)
+
+  const {tenant:identity}=expect(await request('/session',{cookie:master.cookie}),200)
+  await tx(owner,async db=>{
+    await scope(db,identity.id,undefined,true)
+    await db.query("UPDATE staff SET role='admin' WHERE id=$1",[invite.id])
+  })
+  const nextCode={...alternateLogin,code:code(invite.setup_key,1)}
+  expect(await post('/auth/login',null,nextCode),401)
+  expect(await post('/auth/master/login',null,nextCode),401)
+  expect(await request('/session',{cookie:staff.cookie}),401)
+  expect(await request('/line-onboarding',{cookie:staff.cookie}),401)
+  assert.doesNotMatch(await (await open('/master/',staff.cookie)).text(),/id="workspace"/)
+  await assert.rejects(designateMaster(pool,tenant,alternateEmail),{code:'42501'})
+
+  await designateMaster(owner,tenant,alternateEmail)
+  expect(await request('/session',{cookie:master.cookie}),401)
+  expect(await request('/line-onboarding',{cookie:master.cookie}),401)
+  assert.doesNotMatch(await (await open('/master/',master.cookie)).text(),/id="workspace"/)
+  const newMaster=await post('/auth/master/login',null,nextCode)
+  expect(newMaster,200)
+  expect(await request('/line-onboarding',{cookie:newMaster.cookie}),200)
 })

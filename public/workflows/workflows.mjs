@@ -400,7 +400,7 @@ async function render(){
   const path=base+'/workflows/'+use
   const query=new URLSearchParams({store:store.id,use})
   history.replaceState(null,'','?'+query)
-  $('#back').href='/?store='+store.id
+  $('#back').href='/staff/?store='+store.id
   $('#interviews').href='/interview/staff.html?store='+store.id
   $('#customers').href='/operations/?store='+store.id
   const content=$('#content')

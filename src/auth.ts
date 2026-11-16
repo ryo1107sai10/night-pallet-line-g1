@@ -69,19 +69,20 @@ export function sessionCookie(cfg: Config, value = '') {
     (cfg.origin.startsWith('https:') ? '; Secure' : '')
 }
 
-export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: string) {
+export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: string, masterOnly = false) {
   const data = loginSchema.parse(input)
   await gate(pool, cfg, 'login-ip:' + ip, 40)
   await gate(pool, cfg, 'login-account:' + data.tenant + ':' + data.email, 8)
   const result = await tx(pool, async db => {
     const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE slug=$1', [data.tenant])
     if (directory) await scope(db, directory.tenant_id)
-    const { rows: [staff] } = await db.query<StaffRow>(
-      'SELECT * FROM staff WHERE email=$1 FOR UPDATE', [data.email])
+    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean}>(`SELECT f.*,
+      EXISTS(SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_master
+      FROM staff f WHERE f.email=$1 FOR UPDATE OF f`, [data.email])
     const passOk = await verifyPassword(data.password, staff?.password_hash)
     if (!staff || staff.disabled_at || !passOk) return null
     const step = consumeFactor(cfg, staff, data.code)
-    if (step === null) return null
+    if (step === null || (staff.role==='admin' ? !staff.designated_master : masterOnly)) return null
     const raw = token()
     await db.query('UPDATE staff SET last_totp_step=$2 WHERE id=$1', [staff.id, step])
     await db.query(`INSERT INTO staff_session VALUES ($1,$2,$3,now()+ interval '8 hours')`,
@@ -102,7 +103,9 @@ export async function authenticate(db: DB, credential: string | undefined) {
   await scope(db, tenantId)
   const { rows: [actor] } = await db.query<Actor>(`SELECT f.id,f.tenant_id,f.role,f.email
     FROM staff_session s JOIN staff f ON (s.tenant_id,s.staff_id)=(f.tenant_id,f.id)
-    WHERE s.token_hash=$1 AND s.expires_at>now() AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL FOR SHARE OF f`,
+    WHERE s.token_hash=$1 AND s.expires_at>now() AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL
+      AND (f.role<>'admin' OR EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)))
+    FOR SHARE OF f`,
     [digest(raw)])
   if (!actor) throw unauthenticated()
   return actor
@@ -182,7 +185,9 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
     const { rows: [staff] } = await db.query<StaffRow>(`SELECT f.* FROM invite i JOIN staff f
       ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND f.disabled_at IS NULL
-        AND f.password_hash IS NULL FOR UPDATE OF f`, [hash])
+        AND f.password_hash IS NULL
+        AND (f.role<>'admin' OR EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)))
+      FOR UPDATE OF f`, [hash])
     if (!staff) throw invalid()
     const step = consumeFactor(cfg, staff, data.code)
     if (step === null) throw invalid()

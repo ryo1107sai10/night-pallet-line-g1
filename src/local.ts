@@ -62,7 +62,7 @@ try {
   for (const signal of ['SIGINT','SIGTERM'] as const) process.once(signal,stop)
   const server = createApp(appDb,cfg,engine).listen(port,'127.0.0.1')
   server.on('error',error=>{ console.error(error.message); stop() })
-  server.on('listening',()=>console.log('管理画面  ' + cfg.origin))
+  server.on('listening',()=>console.log('マスター管理画面  ' + cfg.origin + '/master/'))
   let finished = false
   const worker = (async ()=>{
     while (!finished) {

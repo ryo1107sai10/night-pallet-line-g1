@@ -57,9 +57,8 @@ const storeSchema = z.strictObject(storeFields)
 const storeUpdate = storeSchema.extend({ revision })
 const stopSchema = z.strictObject({ revision, stopped: z.boolean(), reason: text(200) })
 const eligibilitySchema = z.strictObject({ revision, verified:z.boolean(), reference:text(200) })
-const inviteSchema = z.strictObject({ email, role:memberRole, stores:z.array(uuid).max(100) })
-  .refine(data => new Set(data.stores).size === data.stores.length
-    && (data.role==='admin' ? data.stores.length===0 : data.stores.length>0),{path:['stores']})
+const inviteSchema = z.strictObject({ email, role:memberRole.exclude(['admin']), stores:z.array(uuid).min(1).max(100) })
+  .refine(data => new Set(data.stores).size === data.stores.length,{path:['stores']})
 
 const credential = (req: Request) => req.headers.cookie?.split(';').map(value=>value.trim())
   .find(value=>value.startsWith('night_session='))?.slice('night_session='.length)
@@ -81,13 +80,61 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     if (cfg.origin.startsWith('https:')) res.set('Strict-Transport-Security','max-age=31536000')
     next()
   })
-  app.get('/studio',(_req,res)=>res.redirect(302,'/studio/'))
-  app.use('/studio',express.static(here('../public/studio')))
-  app.use('/interview',express.static(here('../public/interview')))
-  app.use('/operations',express.static(here('../public/operations')))
-  app.use('/workflows',express.static(here('../public/workflows')))
+  const pageActor = async(req:Request) => {
+    const session=credential(req)
+    if (!session) return
+    try { return await tx(pool,db=>authenticate(db,session)) }
+    catch (error) {
+      if (error instanceof Fault && error.status===401) return
+      throw error
+    }
+  }
+  const staffPage = async(req:Request,res:Response,next:NextFunction) => {
+    if (await pageActor(req)) next()
+    else res.redirect(302,'/staff/')
+  }
+  for (const section of ['studio','operations','workflows']) {
+    const path='/'+section
+    app.get(path+'/',staffPage,(req,res)=>{
+      if (!req.path.endsWith('/')) res.redirect(302,path+'/')
+      else res.sendFile(here('../public/'+section+'/index.html'))
+    })
+    app.use(path,staffPage,express.static(here('../public/'+section),{index:false,redirect:false}))
+  }
+  app.get('/interview/staff.html',staffPage,(_req,res)=>res.sendFile(here('../public/interview/staff.html')))
+  for (const page of ['google-return.html','guest.html']) {
+    app.get('/interview/'+page,(_req,res)=>res.sendFile(here('../public/interview/'+page)))
+  }
+  const interviewAssets=express.static(here('../public/interview'),{index:false,redirect:false})
+  app.use('/interview',(req,res,next)=>{
+    if (/\.(mjs|css)$/i.test(req.path)) interviewAssets(req,res,next)
+    else next()
+  })
   app.get(['/api/health','/healthz'],async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
-  app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
+  app.get('/',(_req,res)=>{
+    if (cfg.publicBookingConnection) res.redirect(302,'/book/'+cfg.publicBookingConnection)
+    else res.sendFile(here('../public/home.html'))
+  })
+  for (const area of ['master','staff']) {
+    app.get('/'+area+'/',async(req,res)=>{
+      res.set('X-Robots-Tag','noindex, nofollow')
+      const actor=await pageActor(req)
+      if (!actor) {
+        res.sendFile(here('../public/staff-login.html'))
+      } else if (area==='master' && actor.role!=='admin') {
+        res.redirect(302,'/')
+      } else if (area==='staff' && actor.role==='admin') {
+        const params=new URLSearchParams()
+        for (const name of ['store','line_connected','line_channel']) {
+          const value=uuid.safeParse(req.query[name])
+          if (value.success) params.set(name,value.data)
+        }
+        res.redirect(302,'/master/'+(params.size?'?'+params:''))
+      } else {
+        res.sendFile(here('../public/index.html'))
+      }
+    })
+  }
   app.get(guidePath,(_req,res)=>res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/line-invite.html')))
   app.get(moduleReturnPath,(_req,res)=>res.sendFile(here('../public/line-module-return.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
@@ -95,7 +142,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.sendFile(here('../public/interview/guest.html'))
   })
-  app.use('/static',express.static(here('../public'),{index:false}))
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs'])
+  app.get('/static/:asset',(req,res,next)=>{
+    if (staticAssets.has(req.params.asset)) res.sendFile(here('../public/'+req.params.asset))
+    else next()
+  })
   app.use('/assets',express.static(here('./assets'),{index:false}))
   app.use('/api/v1',api)
 
@@ -121,9 +172,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     next()
   })
   api.use(express.json({ limit:'32kb',strict:true }))
-  api.post('/auth/login',async (req,res)=>{
-    res.set('Set-Cookie',sessionCookie(cfg,await login(pool,cfg,req.body,address(req)))).json({ signed_in:true })
-  })
+  for (const path of ['/auth/login','/auth/master/login']) {
+    api.post(path,async(req,res)=>{
+      const session=await login(pool,cfg,req.body,address(req),path==='/auth/master/login')
+      res.set('Set-Cookie',sessionCookie(cfg,session)).json({signed_in:true})
+    })
+  }
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
   api.get('/liff/:connection',async (req,res)=>{
     await gate(pool,cfg,'liff-config:' + address(req),120)

@@ -92,4 +92,4 @@ gcloud run jobs deploy "$worker" --image "$image" --project "$project" --region 
   --command=node --args=dist/worker.js,--once --tasks=1 --max-retries=0 --task-timeout=5m --quiet
 
 curl --fail --silent --show-error --max-time 45 "$origin/api/health"
-printf '\nManagement: %s/\nGoogle redirect: %s/interview/google-return.html\n' "$origin" "$origin"
+printf '\nManagement: %s/master/\nGoogle redirect: %s/interview/google-return.html\n' "$origin" "$origin"

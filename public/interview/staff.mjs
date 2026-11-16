@@ -196,7 +196,7 @@ try{
   if(stores.some(store=>store.id===query.get('store')))$('#stores').value=query.get('store')
   function storeNavigation(){
     const store=$('#stores').value
-    $('#back-to-admin').href=store?'/?store='+encodeURIComponent(store):'/'
+    $('#back-to-admin').href=store?'/staff/?store='+encodeURIComponent(store):'/staff/'
     $('#back-to-operations').href='/operations/'+(store?'?store='+encodeURIComponent(store):'')
     $('#recruitment-operations').href='/workflows/?'+new URLSearchParams({store,use:'recruitment'})
     const url=new URL(location.href)

@@ -14,7 +14,7 @@ export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 export type DB = PoolClient
 export type Actor = { id: string; tenant_id: string; role: string; email: string }
 export type LineModuleConfig = { id: string; secret: string; botHeader: string }
-export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; lineModule?: LineModuleConfig }
+export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; lineModule?: LineModuleConfig; publicBookingConnection?: string }
 
 export class Fault extends Error {
   constructor(public status: number, public code: string, message: string, public retryable = false) {
@@ -50,7 +50,9 @@ export function configFromEnvironment(): Config {
       .refine(value => !['authorization','host','cookie','content-type','content-length','x-line-retry-key'].includes(value.toLowerCase())),
   }).safeParse({id:process.env.LINE_MODULE_CHANNEL_ID,secret:process.env.LINE_MODULE_CHANNEL_SECRET,
     botHeader:process.env.LINE_MODULE_BOT_HEADER})
-  return { origin: parsed.origin, master, external: parsed.protocol === 'https:' && !loopback,
+  const booking=process.env.PUBLIC_BOOKING_CONNECTION
+  const publicBookingConnection=booking ? uuid.parse(booking) : undefined
+  return { origin: parsed.origin, master, publicBookingConnection, external: parsed.protocol === 'https:' && !loopback,
     automation: process.env.AUTO_SEND_ENABLED === 'true',lineModule:module.success?module.data:undefined }
 }
 

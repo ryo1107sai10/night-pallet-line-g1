@@ -1,10 +1,13 @@
 import {liffAppId,lineSetupLinks} from './line-setup.mjs'
 
 const $ = selector => document.querySelector(selector)
+const masterEntry = /^\/master\/?$/i.test(location.pathname)
+const loginPath = masterEntry ? '/auth/master/login' : '/auth/login'
 const content = $('#content')
 const notice = $('#notice')
 const types = { customer:'顧客',recruitment:'採用',shared:'顧客・採用兼用' }
 const roles = { admin:'法人管理者',manager:'店舗責任者',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
+const staffRoles = Object.fromEntries(Object.entries(roles).filter(([role])=>role!=='admin'))
 const featureNames = {
   tags_enabled:'顧客タグ', visits_enabled:'来店予約',
   guest_interviews_enabled:'ログイン不要の対面面談予約',
@@ -51,7 +54,7 @@ async function api(path, method = 'GET', data, idem = false) {
   if (data !== undefined) headers['Content-Type'] = 'application/json'
   if (idem) headers['Idempotency-Key'] = idem === true ? crypto.randomUUID() : idem
   const response = await fetch('/api/v1' + path,{ method,headers,body:data === undefined ? undefined : JSON.stringify(data) })
-  if (response.status===401 && session && path!=='/auth/login') signedOut()
+  if (response.status===401 && session && path!==loginPath) signedOut()
   const result = await response.json()
   if (!response.ok) {
     const fields = Object.keys(result.field_errors ?? {})
@@ -277,7 +280,7 @@ function teamPanel(staff) {
   const result = el('pre')
   result.hidden = true
   const form = formOf([field('メールアドレス','email',{type:'email'}),
-    field('役割','role',{choices:roles,value:'manager'}),storeOptions],'招待コードを発行',async (data,key)=>{
+    field('役割','role',{choices:staffRoles,value:'manager'}),storeOptions],'招待コードを発行',async (data,key)=>{
     const response = await api('/staff/invites','POST',{
       email:data.email,role:data.role,stores:session.stores.filter(store=>data[store.id]==='on').map(store=>store.id),
     },key)
@@ -291,7 +294,9 @@ function teamPanel(staff) {
   function appendStaff(records) {
     list.replaceChildren(...records.map(member=>{
       const row = el('div',null,'record')
-      const state = member.disabled_at ? '無効' : member.activated ? '有効' : '招待中'
+      const state = member.disabled_at ? '無効' :
+        member.role==='admin' && member.id!==session.actor.id ? 'マスター権限なし' :
+        member.activated ? '有効' : '招待中'
       row.append(el('p',member.email+' · '+roles[member.role]+' · '+state))
       if (member.id!==session.actor.id && !member.disabled_at) row.append(details('アカウントを無効化',
         formOf([field('無効化の理由','reason')],'セッションも失効',async ({reason})=>{
@@ -567,7 +572,7 @@ function onboardingLink(label,store,anchor) {
   const link = el('a',label,'studio-link')
   const params = new URLSearchParams({store:store.id})
   if (anchor==='line-connection' && store.next_connection) params.set('line_channel',store.next_connection)
-  link.href = '/?'+params+'#'+anchor
+  link.href = '/master/?'+params+'#'+anchor
   return link
 }
 
@@ -713,13 +718,17 @@ $('#show-login').onclick = () => {
   $('#login').hidden = false
   $('#login input').focus()
 }
-$('#logout').onclick = async () => {
-  try { await api('/auth/logout','POST',{}); signedOut(); feedback('ログアウトしました。') }
+if ($('#logout')) $('#logout').onclick = async () => {
+  try { await api('/auth/logout','POST',{}); location.replace(location.pathname) }
   catch (error) { report(error) }
 }
 bind($('#login'),async (data)=>{
-  await api('/auth/login','POST',data)
+  await api(loginPath,'POST',data)
   $('#login').reset()
+  if (!$('#workspace')) {
+    location.reload()
+    return
+  }
   await refresh()
   feedback('')
 })
@@ -729,4 +738,12 @@ bind($('#activate'),async (data)=>{
   $('#show-login').click()
   feedback('招待を有効にしました。次に表示される新しい認証コードでログインしてください。')
 })
-refresh().catch(error=>{ if (error.status!==401) report(error) })
+if ($('#workspace')) {
+  refresh().catch(error=>{ if (error.status!==401) report(error) })
+} else {
+  // A navigation from another site can omit the Strict cookie. The same-site request can use it.
+  api('/session').then(result=>{
+    if (masterEntry && result.actor.role!=='admin') location.replace('/')
+    else location.reload()
+  }).catch(error=>{ if (error.status!==401) report(error) })
+}

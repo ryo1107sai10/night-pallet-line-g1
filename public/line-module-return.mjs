@@ -7,7 +7,7 @@ const retry = document.querySelector('#retry-module')
 const back = document.querySelector('#back-to-store')
 const store = /^[0-9a-f]{96}$/.test(state) ? state.slice(0,32).replace(
   /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,'$1-$2-$3-$4-$5') : null
-if (store) back.href = '/?store='+encodeURIComponent(store)+'#line-setup'
+if (store) back.href = '/staff/?store='+encodeURIComponent(store)+'#line-setup'
 
 async function complete() {
   retry.hidden = true
@@ -18,7 +18,7 @@ async function complete() {
     })
     const data = await response.json()
     if (response.ok) {
-      location.replace('/?'+new URLSearchParams({store,line_connected:data.id})+'#line-connection')
+      location.replace('/staff/?'+new URLSearchParams({store,line_connected:data.id})+'#line-connection')
       return
     }
     status.textContent = response.status===401
