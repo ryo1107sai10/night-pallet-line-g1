@@ -18,7 +18,7 @@ import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } 
 const loginSchema=z.strictObject({connection:uuid,id_token:z.string().min(20).max(12000),source:uuid.optional()})
 export const interviewSlotInput=z.strictObject({
   channel:uuid,starts_at:z.iso.datetime({offset:true}),ends_at:z.iso.datetime({offset:true}),
-  method:z.enum(['onsite','online']).default('onsite'),instructions:text(800),published:z.boolean(),
+  method:z.literal('onsite').default('onsite'),instructions:text(800),published:z.boolean(),
   host_id:uuid.nullable().optional(),
 })
 const gridMinute=z.int().min(0).max(1440).refine(value=>value%interval===0)
@@ -160,7 +160,8 @@ export async function staffInterviewOverview(db:DB,store:string,cfg:Config) {
     FROM interview_slot f JOIN channel c ON c.id=f.channel_id
     LEFT JOIN interview_booking b ON b.slot_id=f.id AND b.status='confirmed'
     LEFT JOIN interview_host h ON h.id=f.host_id LEFT JOIN interview_google_sync g ON g.booking_id=b.id
-    WHERE f.store_id=$1 AND f.ends_at>now()-interval '1 day' ORDER BY f.starts_at LIMIT 200`,[store])
+    WHERE f.store_id=$1 AND f.ends_at>now()-interval '1 day' AND (f.method='onsite' OR b.id IS NOT NULL)
+    ORDER BY f.starts_at LIMIT 200`,[store])
   return {channels,hosts,interviewers_enabled:features.interviewers_enabled,hours:location.hours,today:location.today,
     timezone:location.timezone,interviews_enabled:features.interviews_enabled,
     slots:slots.map(({guest_email_box,...slot})=>({...slot,
@@ -193,7 +194,7 @@ async function checkOverlap(db:DB,store:string,start:Date,end:Date,host:string|n
   const result=await db.query(`SELECT 1 FROM interview_slot s WHERE s.store_id=$1
     AND s.starts_at<$3 AND s.ends_at>$2 AND s.id IS DISTINCT FROM $4::uuid
     AND ($5::uuid IS NULL OR s.host_id IS NULL OR s.host_id=$5)
-    AND (s.published OR EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed'))
+    AND ((s.published AND s.method='onsite') OR EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed'))
     LIMIT 1`,[store,start,end,exclude??null,host])
   if (result.rowCount) throw new Fault(409,'INTERVIEW_OVERLAP','公開・予約済みの面談枠と同じ担当者または店舗の時間が重なっています。')
 }
@@ -204,6 +205,7 @@ export async function changeInterviewVisibility(db:DB,actor:Actor,store:string,i
   if (!slot) throw missing()
   if (slot.revision!==input.revision) throw conflict()
   if (input.published) {
+    if(slot.method!=='onsite')throw new Fault(422,'INTERVIEW_ONSITE_REQUIRED','公開できる枠は対面面談です。')
     await requireFeature(db,store,'interviews_enabled')
     if(slot.host_id)await requireHost(db,store,slot.host_id)
     if (+slot.starts_at<=Date.now()) throw taken()
@@ -239,11 +241,10 @@ export async function interviewCalendar(db:DB,a:Applicant,google:InterviewGoogle
     SELECT s.id,s.starts_at,s.ends_at,s.method,h.calendar_id,s.starts_at>now() AND
     NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed') AS available
     FROM interview_slot s LEFT JOIN interview_host h ON h.id=s.host_id
-    WHERE s.channel_id=$1 AND s.published AND $4 AND (s.host_id IS NULL OR ($5 AND h.active))
+    WHERE s.channel_id=$1 AND s.method='onsite' AND s.published AND $4 AND (s.host_id IS NULL OR ($5 AND h.active))
       AND s.starts_at >= ($2::date::timestamp AT TIME ZONE $3)
       AND s.starts_at < (($2::date+7)::timestamp AT TIME ZONE $3)
-    AND (NOT $6 OR s.method='onsite')
-    ORDER BY s.starts_at`,[a.channel_id,start,location.timezone,accepting,features.interviewers_enabled,!!a.guest])
+    ORDER BY s.starts_at`,[a.channel_id,start,location.timezone,accepting,features.interviewers_enabled])
   const {rows:bookings}=await db.query<Booking>(selectBooking+` WHERE b.channel_id=$1 AND b.applicant_key=$2
     ORDER BY (b.status='confirmed' AND s.starts_at>now()) DESC, b.updated_at DESC LIMIT 10`,[a.channel_id,a.applicant_key])
   const visible=slots.filter(slot=>fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours))
@@ -290,8 +291,8 @@ async function availableSlot(db:DB,a:Applicant,id:string,google:InterviewGoogle)
   if(a.guest)await requireFeature(db,a.store_id,'guest_interviews_enabled')
   const {rows:[slot]}=await db.query<Range & {calendar_id:string|null}>(`SELECT s.id,s.starts_at,s.ends_at,s.host_id,h.calendar_id
     FROM interview_slot s LEFT JOIN interview_host h ON h.id=s.host_id WHERE s.id=$1 AND s.channel_id=$2
-    AND s.published AND s.starts_at>clock_timestamp() AND (NOT $3 OR s.method='onsite')
-    AND NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed')`,[id,a.channel_id,!!a.guest])
+    AND s.published AND s.starts_at>clock_timestamp() AND s.method='onsite'
+    AND NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed')`,[id,a.channel_id])
   if (!slot) throw taken()
   if(slot.host_id)await requireHost(db,a.store_id,slot.host_id)
   const location=await locationFor(db,a.store_id)

@@ -72,6 +72,16 @@ const storeData = name => ({ name,address:'東京都',business_type:'接客飲�
   timezone:'Asia/Tokyo',cutoff:'06:00' })
 const read = (sql, values) => tx(pool,async db=>{await scope(db,signup.tenant,storeId);return db.query(sql,values)})
 
+async function legacyOnlineSlot(store,connection,start,end) {
+  const id=randomUUID()
+  await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    await db.query(`INSERT INTO interview_slot (id,tenant_id,store_id,channel_id,starts_at,ends_at,method,instructions,published)
+      VALUES ($1,$2,$3,$4,$5,$6,'online','過去の設定から残った枠',true)`,[id,signup.tenant,store,connection,start,end])
+  })
+  return id
+}
+
 test('公式LINEの設定ボタンは対象チャネルの画面を開き、未入力時は公式一覧を開く',()=>{
   const root='https://developers.line.biz/console/'
   const defaults=lineSetupLinks()
@@ -612,14 +622,19 @@ test('面談カレンダー: 採用権限、枠の取り合い、本人の日程
   const midnight=expect(await create(new Date(tomorrow+23.5*3600000),true),201)
   const one=expect(await create(first,true),201)
   expect(await create(first,true),409)
-  const next=expect(await create(new Date(+first+3600000),true,'online'),201)
+  const nextStart=new Date(+first+3600000)
+  expect(await create(nextStart,true,'online'),400)
+  const online=await legacyOnlineSlot(storeId,c,nextStart,new Date(+nextStart+1800000))
+  expect(await patch(root+'/slots/'+online,recruiter,{revision:1,published:true}),422)
+  const next=expect(await create(nextStart,true),201)
   const hidden=expect(await create(new Date(+first+2*3600000),false),201)
   const published=expect(await request('/interview/calendar',{cookie:a.cookie}),200)
   assert.deepEqual(published.slots.map(slot=>slot.id),[one.id,next.id,midnight.id])
-  assert.deepEqual(published.slots.map(slot=>slot.method),['onsite','online','onsite'])
+  assert.ok(published.slots.every(slot=>slot.method==='onsite'))
   assert.doesNotMatch(JSON.stringify(published),/確定者専用/)
   expect(await request('/interview/calendar?start=2026-02-30',{cookie:a.cookie}),422)
   expect(await post('/interview/bookings',a.cookie,{slot:hidden.id,name:'応募者A'}),409)
+  expect(await post('/interview/bookings',a.cookie,{slot:online,name:'応募者A'}),409)
   const races=await Promise.all([
     post('/interview/bookings',a.cookie,{slot:one.id,name:'応募者A'}),
     post('/interview/bookings',b.cookie,{slot:one.id,name:'応募者B'}),
@@ -633,7 +648,7 @@ test('面談カレンダー: 採用権限、枠の取り合い、本人の日程
   expect(await patch('/interview/bookings/'+booking.id,loser,{action:'cancel',revision:1}),404)
   assert.equal(expect(await post('/interview/bookings',winner,{slot:one.id,name:booking.applicant_name}),201).id,booking.id)
   const changed=expect(await patch('/interview/bookings/'+booking.id,winner,{action:'reschedule',revision:1,slot:next.id}),200)
-  assert.equal(changed.method,'online')
+  assert.equal(changed.method,'onsite')
   const calendar=expect(await request('/interview/calendar',{cookie:loser}),200)
   assert.deepEqual(calendar.slots.map(slot=>slot.available),[true,false,true])
   assert.deepEqual(calendar.bookings,[])
@@ -1062,7 +1077,7 @@ test('一斉配信は承認・送信直前の同意確認を守り、兼用LINE�
 })
 
 test('ログイン不要の面談は対面のみ、予約時もGoogleの重複を拒否して連絡先を店舗に限定する',async()=>{
-  const {root,connection}=await workflowStore('公開面談検証','recruitment','8',{guest_interviews_enabled:true})
+  const {store,root,connection}=await workflowStore('公開面談検証','recruitment','8',{guest_interviews_enabled:true})
   const api='/guest-interview/'+connection
   const session=await post(api+'/session',null,{})
   expect(session,201)
@@ -1072,12 +1087,12 @@ test('ログイン不要の面談は対面のみ、予約時もGoogleの重複�
   const {today}=await calendar()
   const start=Date.parse(today+'T00:00:00+09:00')+2*86400000
   const at=time=>new Date(start+time*3600000).toISOString()
-  const slot=async (hour,method='onsite')=>expect(await post(root+'/interviews/slots',admin,{
-    channel:connection,method,starts_at:at(hour),ends_at:at(hour+0.5),published:true,instructions:'店舗受付',
+  const slot=async hour=>expect(await post(root+'/interviews/slots',admin,{
+    channel:connection,starts_at:at(hour),ends_at:at(hour+0.5),published:true,instructions:'店舗受付',
   },idempotency()),201).id
   const busy=await slot(18)
   const free=await slot(19)
-  const online=await slot(20,'online')
+  const online=await legacyOnlineSlot(store,connection,at(20),at(20.5))
   const book=id=>post(api+'/bookings',session.cookie,{slot:id,name:'公開予約テスト',email:'booking@example.test'})
   assert.equal((await calendar()).availability_warning,true)
   assert.equal(expect(await book(free),503).code,'GOOGLE_UNAVAILABLE')

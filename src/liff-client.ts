@@ -131,17 +131,12 @@ async function showInterviewNotices(request:(path:string,method?:string,body?:un
     }
     if(data.waitlist_enabled&&data.notices&&!data.waitlist){
       const join=item('form')
-      const method=item('select')
-      method.add(new Option('対面','onsite'))
-      method.add(new Option('オンライン','online'))
-      const methodLabel=item('label','希望形式')
-      methodLabel.append(method)
       const days=item('select')
       for(const day of [3,7,14,30])days.add(new Option(day+'日間',String(day)))
       const dayLabel=item('label','待つ期間')
       dayLabel.append(days)
-      join.append(methodLabel,dayLabel,item('button','キャンセル待ちに登録'))
-      join.onsubmit=guarded(async()=>draw(await request('/waitlist','PUT',{method:method.value,days:Number(days.value)}) as NoticeSettings))
+      join.append(dayLabel,item('button','キャンセル待ちに登録'))
+      join.onsubmit=guarded(async()=>draw(await request('/waitlist','PUT',{days:Number(days.value)}) as NoticeSettings))
       root.append(join)
     }
   }

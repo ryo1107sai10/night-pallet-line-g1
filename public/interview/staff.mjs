@@ -149,7 +149,7 @@ async function show(){
     if(slot.host_name)section.append(el('p','担当 '+slot.host_name))
     if(slot.calendar_status)section.append(el('p','Googleカレンダー '+({queued:'反映待ち',synced:'反映済み',failed:'反映できませんでした'}[slot.calendar_status])+
       (slot.calendar_error?' · '+slot.calendar_error:'')))
-    if(Date.parse(slot.starts_at)>Date.now()&&(slot.published||(slot.in_hours&&interviews_enabled))){
+    if(Date.parse(slot.starts_at)>Date.now()&&(slot.published||(slot.method==='onsite'&&slot.in_hours&&interviews_enabled))){
       const toggle=el('button',slot.published?'公開を停止':'公開する')
       toggle.type='button';toggle.onclick=async()=>{
         toggle.disabled=true
@@ -174,7 +174,7 @@ form.onsubmit=async event=>{
     const start=localInstant(data.get('date')+'T'+data.get('time'),store.timezone)
     if(start===null)throw new Error('店舗のタイムゾーンで有効な日時を指定してください。')
     const settings={channel:data.get('channel'),starts_at:new Date(start).toISOString(),
-      ends_at:new Date(start+Number(data.get('minutes'))*60000).toISOString(),method:data.has('online')?'online':'onsite',
+      ends_at:new Date(start+Number(data.get('minutes'))*60000).toISOString(),
       instructions:data.get('instructions'),published:data.get('published')==='on',host_id:data.get('host')||null}
     const fingerprint=JSON.stringify([store.id,settings])
     if(fingerprint!==pendingInput){pendingInput=fingerprint;pendingKey=crypto.randomUUID()}

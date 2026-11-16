@@ -8,7 +8,7 @@ import { requireFeature, storeFeatures } from './store-features.js'
 
 const allNotices=['interview_confirm','interview_reminder','interview_waitlist'] as const
 export const noticeInput=z.strictObject({enabled:z.boolean()})
-export const waitlistInput=z.strictObject({method:z.enum(['onsite','online']),days:z.int().min(1).max(30)})
+export const waitlistInput=z.strictObject({method:z.literal('onsite').default('onsite'),days:z.int().min(1).max(30)})
 const day=86400000
 
 export async function interviewNotices(db:DB,identity:WorkflowSubject){
@@ -84,7 +84,7 @@ export async function onInterviewReleased(db:DB,cfg:Config,identity:WorkflowSubj
     SELECT w.applicant_key,s.starts_at FROM interview_waitlist w JOIN interview_slot s ON s.channel_id=w.channel_id AND s.id=$2
     JOIN workflow_contact c ON c.channel_id=w.channel_id AND c.purpose='recruitment' AND c.subject=w.applicant_key AND c.notices
     WHERE w.channel_id=$1 AND w.applicant_key<>$3 AND w.offered_at IS NULL AND w.until_at>=s.starts_at AND w.method=s.method
-      AND s.published AND s.starts_at>now() AND NOT EXISTS (
+      AND s.method='onsite' AND s.published AND s.starts_at>now() AND NOT EXISTS (
         SELECT 1 FROM interview_booking b JOIN interview_slot f ON f.id=b.slot_id
           WHERE b.channel_id=w.channel_id AND b.applicant_key=w.applicant_key AND b.status='confirmed' AND f.starts_at>now())
     ORDER BY w.created_at,w.applicant_key LIMIT 1`,[identity.channel_id,booking.slot_id,identity.subject])
