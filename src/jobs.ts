@@ -4,6 +4,11 @@ import { channel, channelCredentials, LineAPI } from './line.js'
 
 import { lockDispatch } from './dispatch-lock.js'
 import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
+import { deliverCampaign } from './campaigns.js'
+import { updateRichMenu } from './rich-menus.js'
+import { deliverService } from './service-delivery.js'
+import { googleFromEnvironment } from './interview-availability.js'
+import { runGoogleSync } from './interview-hosts.js'
 export { lockDispatch } from './dispatch-lock.js'
 
 const targets = {
@@ -33,6 +38,19 @@ export async function setStop(db: DB, actor: Actor, level: keyof typeof targets,
     // Ambiguous prior attempts stay visible as unknown and are never resumed after this stop.
     await db.query(`UPDATE test_send SET next_at='infinity'
       WHERE status IN ('unknown','submitting') AND ${target.constraint}`,args)
+    await db.query(`UPDATE campaign SET state='stopped' WHERE state<>'stopped' AND ${target.constraint}`,args)
+    for(const queue of ['campaign_delivery','service_delivery']){
+      const result=await db.query<{in_flight:number;cancelled:number}>(`WITH pending AS (
+        SELECT id,status FROM ${queue} WHERE status IN ('queued','submitting','unknown') AND ${target.constraint}
+      ), stopped AS (
+        UPDATE ${queue} q SET status=CASE WHEN p.status='queued' THEN 'cancelled' ELSE p.status END,
+          next_at='infinity',reason='緊急停止' FROM pending p WHERE q.id=p.id RETURNING p.status
+      )
+      SELECT count(*) FILTER (WHERE status='submitting')::int AS in_flight,
+        count(*) FILTER (WHERE status='queued')::int AS cancelled FROM stopped`,args)
+      inFlight+=result.rows[0].in_flight
+      cancelled+=result.rows[0].cancelled
+    }
   }
   await audit(db,actor.tenant_id,storeId,actor.id,'delivery.'+(stopped?'stop':'resume'),id,reason,{level,inFlight,cancelled})
   return { stopped, revision: updated.rows[0].revision, in_flight: inFlight, cancelled }
@@ -53,6 +71,8 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
       [event.tenant_id,event.store_id,event.channel_id,event.user_key,event.occurred_at,event.kind!=='unfollow'])
     }
     await processCustomerWebhook(db,cfg,c,event)
+    if(event.user_key&&event.stop_signal==='all')await db.query(`UPDATE workflow_contact SET notices=false
+      WHERE channel_id=$1 AND user_key=$2 AND notices_changed_at<=$3`,[c.id,event.user_key,event.occurred_at])
     await db.query('UPDATE webhook_event SET processed_at=now(),recipient_box=NULL WHERE channel_id=$1 AND event_id=$2',
       [channelId,event.event_id])
   }
@@ -106,11 +126,15 @@ async function claim(db: DB, r: Route) {
   return { c, job, attempt: attempt.attempt }
 }
 
-export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI) {
+export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=googleFromEnvironment(cfg)) {
   const { rows } = await pool.query<Route>('SELECT * FROM channel_route ORDER BY id')
   for (const r of rows) {
     await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,cfg,r) })
     await runAutomation(pool,cfg,api,r)
+    await deliverCampaign(pool,cfg,api,r)
+    await updateRichMenu(pool,cfg,api,r)
+    await runGoogleSync(pool,google,r)
+    await deliverService(pool,cfg,api,r)
     if (!cfg.external) continue
     const pending = await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); return claim(db,r) })
     if (!pending) continue

@@ -7,7 +7,7 @@
 <script type="module" src="./staff.mjs"></script>
 </head>
 <body class="interview-page">
-<header class="interview-header"><a href="/" id="back-to-admin">Night PRO LINE</a><a href="/operations/" id="back-to-operations">店舗運用</a></header>
+<header class="interview-header"><a href="/" id="back-to-admin">Night PRO LINE</a><a href="/operations/" id="back-to-operations">店舗運用</a><a href="/workflows/?use=recruitment" id="recruitment-operations">応募・選考</a></header>
 <main id="interview" class="interview-app">
 <header class="hero"><h1>面談枠の管理</h1><p>公開した枠は応募者がLINEから選べます。</p></header>
 <div id="notice" class="notice" role="status" hidden></div>
@@ -26,6 +26,7 @@
 <section class="box stack"><h2>面談枠を登録</h2>
 <form id="new-slot" class="stack" hidden>
 <label class="field">採用用公式アカウント<select name="channel" required></select></label>
+<label class="field" id="host-field" hidden>面談担当者<select name="host"></select></label>
 <label class="field">面談日<input type="date" name="date" required></label>
 <div class="time-fields">
 <label class="field">開始時刻<select name="time" required></select></label>
@@ -37,7 +38,7 @@
 <label><input type="checkbox" name="published" checked class="inline-check"> 予約カレンダーに公開する</label>
 <button type="submit" class="primary">面談枠を登録する</button>
 </form><p id="slot-help"></p>
-</section><div id="availability" class="stack"></div></div></div>
+</section><div id="interview-hosts" class="stack"></div><div id="availability" class="stack"></div></div></div>
 </main>
 </body>
 </html>

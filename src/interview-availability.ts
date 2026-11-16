@@ -6,13 +6,14 @@ import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
 
 const scope='https://www.googleapis.com/auth/calendar.events.freebusy'
+const writeScope='https://www.googleapis.com/auth/calendar.events'
 const timestamp=z.iso.datetime({offset:true})
-const calendarID=z.string().trim().max(250).regex(/^(?:primary|[A-Za-z0-9._+%#-]+@[A-Za-z0-9.-]+)$/)
+export const calendarID=z.string().trim().max(250).regex(/^(?:primary|[A-Za-z0-9._+%#-]+@[A-Za-z0-9.-]+)$/)
 export const googleCalendarInput=z.strictObject({calendar_id:calendarID})
 export const googleCalendarReturn=z.strictObject({state:opaque,code:z.string().min(1).max(4096)})
 export const blockInput=z.strictObject({starts_at:timestamp,ends_at:timestamp,note:z.string().trim().max(120)})
 type GoogleSetup={clientId:string;secret:string}
-type Credential={calendar_id:string;refresh_box:string;tenant_id:string;store_id:string}
+export type CalendarCredential={calendar_id:string;refresh_box:string;tenant_id:string;store_id:string;write_granted:boolean}
 export type Interval={starts_at:Date;ends_at:Date}
 const boxContext=(tenant:string, store:string)=>'interview-google:'+tenant+':'+store
 export const overlaps=(a:Interval,b:Interval)=>+a.starts_at<+b.ends_at && +a.ends_at>+b.starts_at
@@ -28,12 +29,13 @@ export class InterviewGoogle {
   }
   get configured(){return !!this.settings && new URL(this.cfg.origin).protocol==='https:'}
 
-  authorization(store:string,raw:string,verifier:string){
+  authorization(store:string,raw:string,verifier:string,write=false){
     if(!this.configured || !this.settings)throw unavailable()
     const challenge=createHash('sha256').update(verifier).digest('base64url')
     const url=new URL('https://accounts.google.com/o/oauth2/v2/auth')
     url.search=new URLSearchParams({client_id:this.settings.clientId,redirect_uri:this.redirect,response_type:'code',
-      scope,access_type:'offline',prompt:'consent',state:store+'.'+raw,code_challenge_method:'S256',code_challenge:challenge}).toString()
+      scope:write?scope+' '+writeScope:scope,access_type:'offline',prompt:'consent',state:store+'.'+raw,
+      code_challenge_method:'S256',code_challenge:challenge}).toString()
     return url.href
   }
 
@@ -55,10 +57,13 @@ export class InterviewGoogle {
     return parsed.data
   }
 
-  async exchange(code:string,verifier:string,calendar:string){
+  async exchange(code:string,verifier:string,calendar:string,write=false){
     const tokens=await this.tokens({code,code_verifier:verifier,grant_type:'authorization_code',redirect_uri:this.redirect})
     if(!tokens.refresh_token || (tokens.scope && !tokens.scope.split(' ').includes(scope))) {
       throw new Fault(422,'GOOGLE_PERMISSION','継続的に空き状況を参照する権限をGoogleで許可してください。')
+    }
+    if(write&&!tokens.scope?.split(' ').includes(writeScope)){
+      throw new Fault(422,'GOOGLE_PERMISSION','面談予定の登録・変更を行う権限をGoogleで許可してください。')
     }
     const now=Date.now()
     await this.query(tokens.access_token,calendar,{starts_at:new Date(now),ends_at:new Date(now+day)})
@@ -83,7 +88,7 @@ export class InterviewGoogle {
     return periods
   }
 
-  async busy(credential:Credential,range:Interval) {
+  private async access(credential:CalendarCredential){
     if(!this.configured)throw unavailable()
     const key=credential.refresh_box
     let cached=this.recent.get(key)
@@ -96,7 +101,38 @@ export class InterviewGoogle {
       if(this.recent.size>=100)this.recent.clear()
       this.recent.set(key,cached)
     }
-    return this.query(cached.access,credential.calendar_id,range)
+    return cached.access
+  }
+
+  async busy(credential:CalendarCredential,range:Interval,calendar=credential.calendar_id) {
+    return this.query(await this.access(credential),calendar,range)
+  }
+
+  async updateEvent(credential:CalendarCredential,calendar:string,id:string,range:Interval|null){
+    if(!credential.write_granted)throw unavailable()
+    const access=await this.access(credential)
+    const root='https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(calendar)+'/events'
+    const event=root+'/'+encodeURIComponent(id)
+    const headers={Authorization:'Bearer '+access,'Content-Type':'application/json'}
+    const call=(url:string,method:string,body?:object)=>this.request(url+'?sendUpdates=none',{
+      method,headers,body:body?JSON.stringify(body):undefined,redirect:'error',signal:AbortSignal.timeout(3200),
+    })
+    try{
+      if(!range){
+        const response=await call(event,'DELETE')
+        if(response.ok||[404,410].includes(response.status))return
+        throw unavailable()
+      }
+      const data={summary:'Night PRO LINE 面談',visibility:'private',
+        start:{dateTime:range.starts_at.toISOString()},end:{dateTime:range.ends_at.toISOString()}}
+      const updated=await call(event,'PATCH',data)
+      if(updated.ok)return
+      if(updated.status!==404&&updated.status!==410)throw unavailable()
+      const inserted=await call(root,'POST',{id,...data})
+      if(inserted.ok)return
+      if(inserted.status===409&&(await call(event,'PATCH',data)).ok)return
+      throw unavailable()
+    }catch{throw unavailable()}
   }
 }
 
@@ -106,23 +142,25 @@ export function googleFromEnvironment(cfg:Config){
 }
 export async function beginCalendarLink(db:DB,actor:Actor,store:string,calendar:string,google:InterviewGoogle){
   const state=token(),verifier=token()
-  const url=google.authorization(store,state,verifier)
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'google_calendar_enabled')
+  const write=(await storeFeatures(db,store)).google_write_enabled
+  const url=google.authorization(store,state,verifier,write)
   await db.query(`INSERT INTO interview_google_session
-    (store_id,tenant_id,actor_id,state_hash,calendar_id,verifier,expires_at)
-    VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()+interval '10 minutes')
+    (store_id,tenant_id,actor_id,state_hash,calendar_id,verifier,expires_at,write_requested)
+    VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()+interval '10 minutes',$7)
     ON CONFLICT (store_id) DO UPDATE SET actor_id=excluded.actor_id,state_hash=excluded.state_hash,
-      calendar_id=excluded.calendar_id,verifier=excluded.verifier,used=false,expires_at=excluded.expires_at`,
-    [store,actor.tenant_id,actor.id,digest(state),calendar,verifier])
+      calendar_id=excluded.calendar_id,verifier=excluded.verifier,used=false,expires_at=excluded.expires_at,
+      write_requested=excluded.write_requested`,
+    [store,actor.tenant_id,actor.id,digest(state),calendar,verifier,write])
   return {url}
 }
 
 export async function claimCalendarLink(db:DB,actor:Actor,store:string,state:string){
   await requireFeature(db,store,'google_calendar_enabled')
-  const {rows:[pending]}=await db.query<{calendar_id:string;verifier:string}>(`UPDATE interview_google_session SET used=true
+  const {rows:[pending]}=await db.query<{calendar_id:string;verifier:string;write_requested:boolean}>(`UPDATE interview_google_session SET used=true
     WHERE store_id=$1 AND actor_id=$2 AND state_hash=$3 AND NOT used AND expires_at>clock_timestamp()
-    RETURNING calendar_id,verifier`,[store,actor.id,digest(state)])
+    RETURNING calendar_id,verifier,write_requested`,[store,actor.id,digest(state)])
   if(!pending)throw invalidState()
   return pending
 }
@@ -130,13 +168,14 @@ export async function claimCalendarLink(db:DB,actor:Actor,store:string,state:str
 export async function finishCalendarLink(db:DB,cfg:Config,actor:Actor,store:string,state:string,refresh:string){
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'google_calendar_enabled')
-  const {rows:[pending]}=await db.query<{calendar_id:string}>(`DELETE FROM interview_google_session
+  const {rows:[pending]}=await db.query<{calendar_id:string;write_requested:boolean}>(`DELETE FROM interview_google_session
     WHERE store_id=$1 AND actor_id=$2 AND state_hash=$3 AND used AND expires_at>clock_timestamp()
-    RETURNING calendar_id`,[store,actor.id,digest(state)])
+    RETURNING calendar_id,write_requested`,[store,actor.id,digest(state)])
   if(!pending)throw invalidState()
-  await db.query(`INSERT INTO interview_google_calendar VALUES($1,$2,$3,$4)
-    ON CONFLICT (store_id) DO UPDATE SET calendar_id=excluded.calendar_id,refresh_box=excluded.refresh_box`,
-    [store,actor.tenant_id,pending.calendar_id,seal(cfg,boxContext(actor.tenant_id,store),refresh)])
+  await db.query(`INSERT INTO interview_google_calendar (store_id,tenant_id,calendar_id,refresh_box,write_granted)
+    VALUES($1,$2,$3,$4,$5) ON CONFLICT (store_id) DO UPDATE SET calendar_id=excluded.calendar_id,
+      refresh_box=excluded.refresh_box,write_granted=excluded.write_granted`,
+    [store,actor.tenant_id,pending.calendar_id,seal(cfg,boxContext(actor.tenant_id,store),refresh),pending.write_requested])
   await audit(db,actor.tenant_id,store,actor.id,'interview.google.link',store)
 }
 
@@ -148,14 +187,15 @@ export async function unlinkInterviewCalendar(db:DB,actor:Actor,store:string){
   return {connected:false}
 }
 
-async function calendarRecord(db:DB,store:string){
-  return (await db.query<Credential>('SELECT * FROM interview_google_calendar WHERE store_id=$1',[store])).rows[0]
+export async function calendarRecord(db:DB,store:string){
+  return (await db.query<CalendarCredential>('SELECT * FROM interview_google_calendar WHERE store_id=$1',[store])).rows[0]
 }
 
-export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range:Interval){
+export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range:Interval,alternate?:string){
   if (!(await storeFeatures(db,store)).google_calendar_enabled) return []
   const record=await calendarRecord(db,store)
-  return record?google.busy(record,range):[]
+  if(alternate&&!record)throw unavailable()
+  return record?google.busy(record,range,alternate):[]
 }
 
 export async function availabilityOverview(db:DB,store:string,google:InterviewGoogle){
@@ -164,7 +204,8 @@ export async function availabilityOverview(db:DB,store:string,google:InterviewGo
   const {rows:blocks}=await db.query(`SELECT id,starts_at,ends_at,note FROM interview_block
     WHERE store_id=$1 AND ends_at>now() ORDER BY starts_at LIMIT 200`,[store])
   return {google:{configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null},
-    google_enabled:features.google_calendar_enabled,blocks}
+    google_enabled:features.google_calendar_enabled,google_write_enabled:features.google_write_enabled,
+    google_write_granted:record?.write_granted??false,blocks}
 }
 
 export async function localBlocks(db:DB,store:string,range:Interval){
@@ -197,7 +238,10 @@ export async function removeBlock(db:DB,actor:Actor,store:string,id:string){
   return {removed:true}
 }
 
-export async function requireFree(db:DB,google:InterviewGoogle,store:string,slot:Interval){
+export async function requireFree(db:DB,google:InterviewGoogle,store:string,slot:Interval,calendar?:string){
   const local=await localBlocks(db,store,slot)
   if(local.length||(await googleBusy(db,google,store,slot)).some(busy=>overlaps(busy,slot)))throw new Fault(409,'INTERVIEW_SLOT_BLOCKED','ほかの予定と重なっています。別の空き枠を選んでください。')
+  if(calendar&&(await googleBusy(db,google,store,slot,calendar)).some(busy=>overlaps(busy,slot))){
+    throw new Fault(409,'INTERVIEW_SLOT_BLOCKED','面談担当者のほかの予定と重なっています。別の空き枠を選んでください。')
+  }
 }

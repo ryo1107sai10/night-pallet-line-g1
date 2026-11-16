@@ -27,9 +27,12 @@ const ids = { messaging:'1234567890', login:'1234567891', redLogin:'1234567894' 
 const redCalendar='red-store@example.test'
 const endpoint = id => '/api/v1/webhooks/line/'+id
 const signup = {}
-let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line
+let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line, google
 let remainingQuota=200, intendedId, pushedBody, attemptedKeys=[], remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
 let managerId, fakeBusy=[], fakeGoogleError=false, googleCalls=[]
+const menus=[],pushesLog=[],remoteEvents=new Map()
+const hostCalendar='host-a@example.test'
+let hostBusy=[]
 const code = (key, steps = 0) => new TOTP({ secret:Secret.fromBase32(key) })
   .generate({timestamp:Date.now()+30000*steps})
 const signed = raw => createHmac('sha256',channelSecret).update(raw).digest('base64')
@@ -89,6 +92,13 @@ before(async ()=>{
     const address = new URL(url)
     assert.equal(address.origin,'https://api.line.me')
     remoteCalls.push(address.pathname)
+    if(address.pathname.startsWith('/v2/bot/richmenu/')){
+      return address.pathname.endsWith('0'.repeat(32))?new Response(null,{status:404}):Response.json({richMenuId:address.pathname.split('/').at(-1)})
+    }
+    if(/^\/v2\/bot\/user\/U[0-9a-f]{32}\/richmenu/.test(address.pathname)){
+      menus.push({pathname:address.pathname,method:options.method})
+      return new Response(null,{status:200})
+    }
     switch (address.pathname) {
       case '/v2/oauth/verify':
         assert.equal(options.body.get('access_token'),accessToken)
@@ -110,6 +120,7 @@ before(async ()=>{
       case '/v2/bot/message/push': {
         assert.ok([user,user2].includes(JSON.parse(options.body).to))
         pushedBody=JSON.parse(options.body).messages[0].text
+        pushesLog.push(JSON.parse(options.body))
         intendedId = options.headers['X-Line-Retry-Key']
         attemptedKeys.push(intendedId)
         remoteEntered?.()
@@ -122,7 +133,7 @@ before(async ()=>{
     }
   }
   line = new LineAPI(fetchLine)
-  const google=new InterviewGoogle(cfg,{clientId:'calendar-client',secret:'calendar-server-secret'},async(url,options)=>{
+  google=new InterviewGoogle(cfg,{clientId:'calendar-client',secret:'calendar-server-secret'},async(url,options)=>{
     if(url==='https://oauth2.googleapis.com/token'){
       const grant=options.body.get('grant_type')
       const red=options.body.get('code')==='test-red-oauth-code'||options.body.get('refresh_token')==='red-refresh-secret'
@@ -131,8 +142,28 @@ before(async ()=>{
         assert.match(options.body.get('code_verifier'),/^[A-Za-z0-9_-]{43}$/)
         assert.equal(options.body.get('redirect_uri'),origin+'/interview/google-return.html')
       } else assert.equal(options.body.get('refresh_token'),red?'red-refresh-secret':'calendar-refresh-secret')
+      const scope=options.body.get('code')==='test-write-oauth-code'?
+        'https://www.googleapis.com/auth/calendar.events.freebusy https://www.googleapis.com/auth/calendar.events':undefined
       return Response.json({access_token:red?'red-access-secret':'calendar-access-secret',
-        refresh_token:red?'red-refresh-secret':'calendar-refresh-secret',expires_in:3600})
+        refresh_token:red?'red-refresh-secret':'calendar-refresh-secret',expires_in:3600,scope})
+    }
+    if(url.startsWith('https://www.googleapis.com/calendar/v3/calendars/')){
+      const address=new URL(url)
+      assert.equal(address.searchParams.get('sendUpdates'),'none')
+      assert.equal(options.headers.Authorization,'Bearer calendar-access-secret')
+      const [, , , ,calendar,,id]=address.pathname.split('/')
+      const key=decodeURIComponent(calendar)+'/'+id
+      if(options.method==='DELETE')return new Response(null,{status:remoteEvents.delete(key)?204:404})
+      const data=JSON.parse(options.body)
+      assert.equal(data.visibility,'private')
+      assert.equal(data.summary,'Night PRO LINE 面談')
+      if(options.method==='POST'){
+        remoteEvents.set(decodeURIComponent(calendar)+'/'+data.id,data)
+        return Response.json(data)
+      }
+      if(!remoteEvents.has(key))return new Response(null,{status:404})
+      remoteEvents.set(key,data)
+      return Response.json(data)
     }
     assert.equal(url,'https://www.googleapis.com/calendar/v3/freeBusy')
     const query=JSON.parse(options.body)
@@ -140,6 +171,10 @@ before(async ()=>{
     if (query.items[0].id===redCalendar) {
       assert.equal(options.headers.Authorization,'Bearer red-access-secret')
       return Response.json({calendars:{[redCalendar]:{busy:[]}}})
+    }
+    if(query.items[0].id===hostCalendar){
+      assert.equal(options.headers.Authorization,'Bearer calendar-access-secret')
+      return Response.json({calendars:{[hostCalendar]:{busy:hostBusy}}})
     }
     assert.equal(options.headers.Authorization,'Bearer calendar-access-secret')
     assert.deepEqual(query.items,[{id:'primary'}])
@@ -764,4 +799,211 @@ test('同一法人の店舗ごとにOA・Google予定・タグ・機能設定を
   assert.equal((await calendar(a.cookie)).slots.find(slot=>slot.id===one.id).available,false)
   assert.equal(expect(await request(settings(red),{cookie:admin}),200).google.calendar_id,redCalendar)
   fakeBusy=[]
+})
+
+const put=(path,cookie,data)=>request(path,{method:'PUT',cookie,data,headers:idempotency()})
+async function workflowStore(label,purpose,index,features){
+  const store=expect(await post('/stores',admin,storeData(label),idempotency()),201).id
+  const root='/stores/'+store
+  const destination='U'+index.repeat(32)
+  const connection=expect(await post(root+'/connections',admin,{
+    label,purpose,owner_name:'甲法人',provider_id:'provider',messaging_id:'130000000'+index,
+    login_id:ids.login,liff_id:ids.login+'-'+index,bot_user_id:destination,
+    account_type:'unverified',management_authority:'検証用',channel_secret:channelSecret,access_token:accessToken,token_type:'console',
+  },idempotency()),201).id
+  await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    await db.query('UPDATE channel SET checks=$2 WHERE id=$1',[connection,{
+      ...consoleChecks,delivery_confirmed:true,token_verified:true,webhook_verified:true,
+    }])
+    await db.query(`UPDATE store SET eligible_at=now(),contract_active=true,auto_enabled=true,
+      auto_enabled_at=now(),monthly_limit=100 WHERE id=$1`,[store])
+  })
+  const settings=expect(await request(root+'/features',{cookie:admin}),200)
+  expect(await patch(root+'/features',admin,{...settings,...features}),200)
+  const inbound=async events=>{
+    const raw=JSON.stringify({destination,events})
+    return send(endpoint(connection),{method:'POST',headers:{'Content-Type':'application/json','X-Line-Signature':signed(raw)},body:raw})
+  }
+  return {store,root,connection,inbound}
+}
+const worker=()=>workOnce(pool,cfg,line,google)
+const confirmation=(cookie,slot,name='応募者')=>post('/interview/bookings',cookie,{slot,name})
+
+test('採用と顧客の回答フォーム・版・流入QRを分離し、店舗の面談・体入・入店実績に集計する',async()=>{
+  const {root,connection}=await workflowStore('フォーム検証','shared','5',{
+    forms_enabled:true,recruitment_enabled:true,sources_enabled:true,
+  })
+  const candidate=root+'/workflows/recruitment'
+  const guest=root+'/workflows/customer'
+  const entry=expect(await post(candidate+'/sources',admin,{channel:connection,label:'求人媒体Ａ'}),201)
+  const competing=expect(await post(candidate+'/sources',admin,{channel:connection,label:'求人媒体Ｂ'}),201)
+  const channelOnly=expect(await post(guest+'/sources',admin,{channel:connection,label:'来店用'}),201)
+  const fixture={channel:connection,revision:0,title:'面談事前フォーム',description:'回答をご入力ください',published:true,
+    fields:[{key:'name',label:'お名前',kind:'text',required:true,applicant_name:true},
+      {key:'shift',label:'希望',kind:'choice',required:true,options:['平日','週末']}]}
+  const form=expect(await put(candidate+'/forms',admin,fixture),200)
+  const second=expect(await put(candidate+'/forms',admin,{...fixture,title:'追加質問'}),200)
+  expect(await put(guest+'/forms',admin,{...fixture,title:'来店アンケート'}),200)
+  const person=await post('/interview/login',null,{connection,id_token:'signed-token-first-user',source:entry.id})
+  expect(person,200)
+  expect(await post('/interview/login',null,{connection,id_token:'signed-token-first-user',source:competing.id}),200)
+  const guestUser=await post('/customer/login',null,{connection,id_token:'signed-token-first-user',source:entry.id})
+  expect(guestUser,200)
+  assert.equal(expect(await request('/customer/form?form='+form.id,{cookie:guestUser.cookie}),200),null)
+  assert.equal(expect(await request('/interview/form',{cookie:person.cookie}),200).id,form.id)
+  assert.equal(expect(await request('/interview/form?form='+second.id,{cookie:person.cookie}),200).id,second.id)
+  expect(await post('/interview/form',person.cookie,{form:form.id,revision:1,answers:{name:'面談テスト',shift:'不正'}}),422)
+  const answers={form:form.id,revision:1,answers:{name:'面談テスト',shift:'週末'}}
+  expect(await post('/interview/form',person.cookie,answers),201)
+  expect(await post('/interview/form',person.cookie,answers),201)
+  expect(await put(candidate+'/forms',admin,{...fixture,id:form.id,revision:1,title:'更新後の題名'}),200)
+  expect(await post('/interview/form',person.cookie,answers),409)
+  const response=expect(await request(candidate+'/responses',{cookie:admin}),200)
+  assert.equal(response.length,1)
+  assert.equal(response[0].title,fixture.title)
+  assert.deepEqual(response[0].answers,[{label:'お名前',value:'面談テスト'},{label:'希望',value:'週末'}])
+  assert.doesNotMatch(JSON.stringify(response),/answers_box|applicant_key/)
+  assert.deepEqual(expect(await request(guest+'/responses',{cookie:admin}),200),[])
+  expect(await request(candidate+'/responses',{cookie:other}),404)
+  expect(await request(guest+'/sources/'+entry.id+'/qr',{cookie:admin}),404)
+  assert.match(expect(await request(candidate+'/sources/'+entry.id+'/qr',{cookie:admin}),200).image,/^data:image\/png;base64,/)
+  let [record]=expect(await request(root+'/recruitment',{cookie:admin}),200)
+  assert.equal(record.applicant_name,'面談テスト')
+  assert.equal(record.source,'求人媒体Ａ')
+  expect(await patch(root+'/recruitment/'+record.id,admin,{stage:'hired',trial_at:null,revision:record.revision}),409)
+  for(const stage of ['interviewed','trial_scheduled','trial_done','hired']){
+    record=expect(await patch(root+'/recruitment/'+record.id,admin,{stage,revision:record.revision,
+      trial_at:stage==='trial_scheduled'?new Date(Date.now()+86400000).toISOString():null}),200)
+  }
+  const report=expect(await request(candidate+'/sources',{cookie:admin}),200)
+  assert.match(report.entries.find(source=>source.id===entry.id).url,/source=/)
+  assert.deepEqual(report.entries.map(source=>[source.opened,source.forms,source.interviewed,source.trials,source.hired]),[[1,1,1,1,1],[0,0,0,0,0]])
+  assert.equal(expect(await request(guest+'/sources',{cookie:admin}),200).entries.find(source=>source.id===channelOnly.id).opened,0)
+})
+
+test('担当者別の空き枠・Googleへの登録と取消・LINEメニュー・面談通知・キャンセル待ち',async()=>{
+  const {root,connection,inbound}=await workflowStore('面談フロー検証','recruitment','6',{
+    reminders_enabled:true,waitlist_enabled:true,rich_menus_enabled:true,interviewers_enabled:true,google_write_enabled:true,
+  })
+  const path=root+'/interviews'
+  const menusPath=root+'/workflows/recruitment/rich-menus'
+  const normal='richmenu-'+'1'.repeat(32), booked='richmenu-'+'2'.repeat(32)
+  expect(await put(menusPath,admin,{channel:connection,revision:0,base_menu:normal,booked_menu:'richmenu-'+'0'.repeat(32)}),422)
+  expect(await put(menusPath,admin,{channel:connection,revision:0,base_menu:normal,booked_menu:booked}),200)
+  const first=await post('/interview/login',null,{connection,id_token:'signed-token-first-user'})
+  const second=await post('/interview/login',null,{connection,id_token:'signed-token-second-user'})
+  expect(first,200);expect(second,200)
+  assert.equal((await inbound([event('host-follow-a','follow',Date.now()),{
+    ...event('host-follow-b','follow',Date.now()),source:{type:'user',userId:user2},
+  }])).status,200)
+  const oauth=expect(await post(path+'/availability/google',admin,{calendar_id:'primary'}),200)
+  const url=new URL(oauth.url)
+  assert.match(url.searchParams.get('scope'),/calendar\.events$/)
+  const state=url.searchParams.get('state').split('.')[1]
+  expect(await post(path+'/availability/google/complete',admin,{state,code:'test-write-oauth-code'}),200)
+  const availability=expect(await request(path+'/availability',{cookie:admin}),200)
+  assert.equal(availability.google_write_granted,true)
+  const host=expect(await put(path+'/hosts',admin,{name:'面談担当Ａ',calendar_id:hostCalendar,active:true}),200)
+  const alternative=expect(await put(path+'/hosts',admin,{name:'面談担当Ｂ',calendar_id:null,active:true}),200)
+  const day=Date.parse(expect(await request('/interview/calendar',{cookie:first.cookie}),200).today+'T00:00:00+09:00')+4*86400000
+  const at=hour=>new Date(day+hour*3600000).toISOString()
+  const offer=(host_id,hour)=>post(path+'/slots',admin,{channel:connection,host_id,starts_at:at(hour),ends_at:at(hour+.5),
+    instructions:'会場案内のテスト',published:true},idempotency())
+  const personal=expect(await offer(host.id,18),201)
+  const parallel=expect(await offer(alternative.id,18),201)
+  const later=expect(await offer(host.id,19),201)
+  expect(await offer(host.id,18),409)
+  hostBusy=[{start:at(18),end:at(18.5)}]
+  const candidates=expect(await request('/interview/calendar',{cookie:first.cookie}),200)
+  assert.equal(candidates.slots.find(slot=>slot.id===personal.id).available,false)
+  assert.equal(candidates.slots.find(slot=>slot.id===parallel.id).available,true)
+  assert.doesNotMatch(JSON.stringify(candidates),/host-a@example/)
+  expect(await confirmation(first.cookie,personal.id),409)
+  expect(await put('/interview/waitlist',second.cookie,{method:'onsite',days:7}),409)
+  expect(await put('/interview/notices',first.cookie,{enabled:true}),200)
+  expect(await put('/interview/notices',second.cookie,{enabled:true}),200)
+  const appointment=expect(await confirmation(first.cookie,later.id),201)
+  expect(await put('/interview/waitlist',second.cookie,{method:'onsite',days:7}),200)
+  assert.equal(appointment.method,'onsite')
+  await worker()
+  await worker()
+  const calendarKey=hostCalendar+'/night'+appointment.id.replaceAll('-','')
+  assert.equal(remoteEvents.get(calendarKey)?.start.dateTime,at(19))
+  assert.ok(menus.some(item=>item.method==='POST'&&item.pathname.endsWith('/'+booked)&&item.pathname.includes(user)))
+  assert.ok(pushesLog.some(item=>item.to===user&&item.messages[0].text.includes('面談予約が確定しました。')))
+  const notices=expect(await request(root+'/workflows/recruitment/delivery',{cookie:admin}),200)
+  assert.ok(notices.some(item=>item.kind==='interview_reminder'&&item.status==='queued'))
+  expect(await patch('/interview/bookings/'+appointment.id,first.cookie,{action:'cancel',revision:1}),200)
+  await worker()
+  assert.equal(remoteEvents.has(calendarKey),false)
+  assert.ok(pushesLog.some(item=>item.to===user2&&item.messages[0].text.includes('面談の受付枠に変更')))
+  const final=expect(await request(root+'/workflows/recruitment/delivery',{cookie:admin}),200)
+  assert.ok(final.some(item=>item.kind==='interview_reminder'&&item.status==='cancelled'))
+  hostBusy=[]
+})
+
+test('一斉配信は承認・送信直前の同意確認を守り、兼用LINEの受信は振り分け前に漏れない',async()=>{
+  const {root,connection,inbound}=await workflowStore('配信・受信箱検証','shared','7',{campaigns_enabled:true,inbox_enabled:true})
+  const customers=root+'/workflows/customer'
+  const intake=root+'/intake'
+  const one=await post('/customer/login',null,{connection,id_token:'signed-token-first-user'})
+  const two=await post('/customer/login',null,{connection,id_token:'signed-token-second-user'})
+  for(const [person,name] of [[one,'試験ひとり目'],[two,'試験ふたり目']]){
+    expect(person,200)
+    const account=expect(await request('/customer/account',{cookie:person.cookie}),200)
+    expect(await patch('/customer/preferences',person.cookie,{revision:account.revision,version:account.policy_version,
+      preferences:{service_consent:true,marketing_consent:true,all_stop:false}}),200)
+    const rows=expect(await request(root+'/customers',{cookie:admin}),200)
+    const record=rows.find(row=>row.display_name===null&&!row.tags.length)
+    expect(await patch(root+'/customers/'+record.id,admin,{revision:record.revision,display_name:name,memo:'',
+      assigned_to:null,verified20:true,active_chat:false,tags:['検証配信'],reason:'試験用の本人確認'}),200)
+  }
+  assert.equal((await inbound([event('campaign-follow-a','follow',Date.now()),{
+    ...event('campaign-follow-b','follow',Date.now()),source:{type:'user',userId:user2},
+  }])).status,200)
+  await worker()
+  const nowHour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tokyo',hour:'2-digit',hourCycle:'h23'}).format(new Date()))
+  const clock=hour=>String((hour+24)%24).padStart(2,'0')+':00'
+  const draft=expect(await post(root+'/campaigns',admin,{channel:connection,title:'配信承認テスト',body:'配信リハーサル',
+    scheduled_at:new Date().toISOString(),criteria:{tags:['検証配信'],match:'all',last_visit_days:null,assigned_to:null,
+      windowStart:clock(nowHour-1),windowEnd:clock(nowHour+2)}},idempotency()),201)
+  assert.equal(draft.eligible,2)
+  await worker()
+  assert.equal(pushesLog.filter(item=>item.messages[0].text==='配信リハーサル').length,0)
+  expect(await post(root+'/campaigns/'+draft.id+'/approve',admin,{recipients:1,approved:true}),409)
+  expect(await post(root+'/campaigns/'+draft.id+'/approve',admin,{recipients:2,approved:true}),200)
+  const beforeStop=expect(await request('/customer/account',{cookie:two.cookie}),200)
+  expect(await patch('/customer/preferences',two.cookie,{revision:beforeStop.revision,version:beforeStop.policy_version,
+    preferences:{service_consent:false,marketing_consent:false,all_stop:true}}),200)
+  await worker()
+  await worker()
+  assert.deepEqual(pushesLog.filter(item=>item.messages[0].text==='配信リハーサル').map(item=>item.to),[user])
+  const [sent]=expect(await request(root+'/campaigns',{cookie:admin}),200).entries
+  assert.deepEqual(sent.counts,{accepted:1,cancelled:1})
+
+  const chat={...event('inbox-message','message',Date.now()),message:{id:'760001',type:'text',text:'面談の日程を確認したいです'}}
+  assert.equal((await inbound([chat,chat])).status,200)
+  assert.deepEqual(expect(await request(customers+'/inbox',{cookie:admin}),200).threads,[])
+  assert.deepEqual(expect(await request(root+'/workflows/recruitment/inbox',{cookie:admin}),200).threads,[])
+  const [thread]=expect(await request(intake,{cookie:admin}),200).threads
+  assert.equal(expect(await request(intake+'/'+thread.id,{cookie:admin}),200).length,1)
+  expect(await request(intake+'/'+thread.id,{cookie:other}),404)
+  expect(await patch(intake+'/'+thread.id,admin,{revision:thread.revision,purpose:'recruitment',reason:'応募者から面談日程の確認'}),200)
+  const route=root+'/workflows/recruitment/inbox'
+  const [classified]=expect(await request(route,{cookie:admin}),200).threads
+  const actor=expect(await request('/session',{cookie:admin}),200).actor
+  const handling=expect(await patch(route+'/'+classified.id,admin,{revision:classified.revision,state:'handling',assigned_to:actor.id}),200)
+  const key=idempotency()
+  const reply={revision:handling.revision,body:'公式LINEの面談窓口です。',internal:false}
+  const queued=expect(await post(route+'/'+classified.id,admin,reply,key),201)
+  assert.equal(expect(await post(route+'/'+classified.id,admin,reply,key),201).id,queued.id)
+  expect(await post(route+'/'+classified.id,admin,reply,idempotency()),409)
+  await worker()
+  assert.equal(pushesLog.filter(item=>item.messages[0].text===reply.body).length,1)
+  const unsend={...event('inbox-unsend','unsend',Date.now()),unsend:{messageId:chat.message.id}}
+  assert.equal((await inbound([unsend])).status,200)
+  const messages=expect(await request(route+'/'+classified.id,{cookie:admin}),200)
+  assert.ok(messages.some(item=>item.withdrawn&&item.body===null))
+  assert.ok(messages.some(item=>item.status==='accepted'))
 })

@@ -3,6 +3,7 @@ import { audit, conflict, Fault, missing, newId, once, revision, text, uuid, typ
 import { customerById, emitDelivery, type Customer } from './customer.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature } from './store-features.js'
+import { refreshMenu } from './rich-menus.js'
 
 export const slotInput=z.strictObject({label:text(100),starts_at:z.iso.datetime({offset:true}),
   ends_at:z.iso.datetime({offset:true}),capacity:z.int().min(1).max(200),published:z.boolean()})
@@ -77,7 +78,10 @@ export async function requestBooking(db:DB,customer:Customer,slotId:string,party
   await db.query(`INSERT INTO visit_booking(id,tenant_id,store_id,customer_id,slot_id,party,status,business_date)
     SELECT $1,$2,$3,$4,$5,$6,$7,(($8::timestamptz AT TIME ZONE timezone)-(cutoff-time '00:00'))::date
     FROM store WHERE id=$3`,[id,customer.tenant_id,customer.store_id,customer.id,slotId,party,status,slot.starts_at])
-  if (confirm) await emitDelivery(db,customer,'booking:'+id+':1','booking_created',new Date(),{id,revision:1})
+  if (confirm) {
+    await emitDelivery(db,customer,'booking:'+id+':1','booking_created',new Date(),{id,revision:1})
+    await refreshMenu(db,{...customer,purpose:'customer',subject:customer.id})
+  }
   return {id,revision:1,status}
 }
 
@@ -131,6 +135,7 @@ export async function changeBooking(db:DB,actor:Actor|null,id:string,input:z.inf
   const kind=input.status==='visited'?'visit':input.status==='cancelled'?'booking_cancelled':
     input.status==='confirmed'?(previous.status==='pending'&&!previous.change_pending?'booking_created':'booking_changed'):null
   if (kind) await emitDelivery(db,c,'booking:'+id+':'+version,kind,new Date(),{id,revision:version})
+  await refreshMenu(db,{...c,purpose:'customer',subject:c.id})
   await audit(db,c.tenant_id,c.store_id,actor?.id??null,'booking.update',id,input.reason,
     {previous:previous.status,current:input.status,revision:version})
   return {id,status:input.status,revision:version}

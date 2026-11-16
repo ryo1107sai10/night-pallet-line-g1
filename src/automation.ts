@@ -1,10 +1,11 @@
 import type pg from 'pg'
 import { localPart, nextWindow, renderMessage, waitUntil } from '../public/studio/engine.mjs'
 import { audit, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
-import { channel, channelCredentials, summary, type Channel, type LineAPI } from './line.js'
+import { channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
 import { customerById, emitDelivery, endCustomerRuns, ensureCustomer, stopFromLine, type Customer } from './customer.js'
 import { lockDispatch } from './dispatch-lock.js'
 import type { Graph } from './scenario.js'
+import { messageBudget } from './delivery-budget.js'
 
 const minute=60000
 const day=1440*minute
@@ -56,10 +57,8 @@ export async function locationOf(db:DB,id:string) {
   return entry
 }
 
-const isEnabled=(cfg:Config,s:Location,c:Channel)=>cfg.external&&cfg.automation===true&&s.auto_enabled&&s.contract_active&&
+export const isEnabled=(cfg:Config,s:Location,c:Channel)=>cfg.external&&cfg.automation===true&&s.auto_enabled&&s.contract_active&&
   !!s.eligible_at&&!s.stopped&&!s.tenant_stopped&&!c.stopped&&c.purpose!=='recruitment'
-const channelReady=(c:Channel)=>['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked','login_published',
-  'non_developer','token_verified','webhook_verified','delivery_confirmed'].every(key=>c.checks[key as keyof Channel['checks']]===true)
 const featureStop=(s:Location,graph:Graph,event:string,happenedAt:Date)=>{
   if ((!s.visits_enabled || (s.visits_enabled_at && happenedAt<s.visits_enabled_at)) &&
     ['booking_created','booking_changed','booking_cancelled','visit'].includes(event)) return '来店予約が停止または切り替えられました'
@@ -189,7 +188,9 @@ async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer
     AND processed_at IS NULL AND occurred_at>= $3 AND ($4 OR stop_signal='all') LIMIT 1`,
     [c.id,cst.user_key,cst.preference_at,category==='marketing'])
   if (pending.rowCount) return 'LINEで配信停止を受信'
-  if (cst.active_chat) return '有人対応中'
+  const handling=await db.query(`SELECT 1 FROM inbox_thread x JOIN store s ON s.id=x.store_id WHERE x.channel_id=$1
+    AND x.user_key=$2 AND x.purpose='customer' AND x.state='handling' AND s.inbox_enabled`,[c.id,cst.user_key])
+  if (cst.active_chat||handling.rowCount) return '有人対応中'
   if (category==='service') return cst.service_consent?null:'業務案内の同意がありません'
   if (!cst.marketing_consent||cst.marketing_stop) return '販促の同意がありません'
   if (!cst.verified_20_at) return '20歳以上の確認がありません'
@@ -200,20 +201,7 @@ async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer
 }
 
 async function allowance(db:DB,s:Location,run:Run,cst:Customer,category:string,except?:string) {
-  const {rows:[limits]}=await db.query(`SELECT
-    (SELECT count(*)::int FROM automatic_send WHERE store_id=$1 AND coalesce(accepted_at,first_attempt_at)>=
-      (date_trunc('month',now() AT TIME ZONE $3) AT TIME ZONE $3) AND status IN ('accepted','submitting','unknown')
-      AND ($4::uuid IS NULL OR id<>$4))
-    +(SELECT count(*)::int FROM test_send WHERE store_id=$1 AND attempted_at>=
-      (date_trunc('month',now() AT TIME ZONE $3) AT TIME ZONE $3) AND status IN ('accepted','submitting','unknown')) AS monthly,
-    count(*) FILTER (WHERE (coalesce(accepted_at,first_attempt_at) AT TIME ZONE $3)::date=(now() AT TIME ZONE $3)::date)::int AS daily,
-    count(*)::int AS weekly
-    FROM automatic_send WHERE customer_id=$2 AND coalesce(accepted_at,first_attempt_at)>=now()-interval '7 days'
-    AND status IN ('accepted','submitting','unknown') AND category='marketing' AND ($4::uuid IS NULL OR id<>$4)`,
-    [s.id,cst.id,s.timezone,except??null])
-  if (limits.monthly>=s.monthly_limit) return '店舗の月次配信上限に達しました'
-  if (category==='marketing' && (limits.daily>=run.graph.daily || limits.weekly>=run.graph.weekly)) return '配信頻度の上限に達しました'
-  return null
+  return messageBudget(db,s,cst.id,category==='marketing'?run.graph:undefined,except)
 }
 
 async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|null> {

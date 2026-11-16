@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>店舗業務 | Night PRO LINE</title>
+<link rel="stylesheet" href="/studio/studio.css"><link rel="stylesheet" href="/operations/operations.css">
+<script type="module" src="./workflows.mjs"></script>
+</head>
+<body>
+<header class="top glass">
+<a class="logo" id="back" href="/">Night <b>PRO LINE</b></a>
+<nav aria-label="店舗の業務"><a id="interviews" href="/interview/staff.html">面談枠</a><a id="customers" href="/operations/">顧客・予約</a></nav>
+<label><span class="sr">店舗</span><select id="store"></select></label>
+</header>
+<main>
+<header class="hero"><div><h1>店舗<span>業務</span></h1></div></header>
+<div class="glass controls">
+<label>用途 <select id="use"><option value="customer">顧客</option><option value="recruitment">採用</option></select></label>
+<nav id="tabs" aria-label="業務を切り替え"></nav>
+</div>
+<p id="message" role="status" aria-live="polite" hidden></p>
+<section id="content" class="glass panel"></section>
+</main>
+</body>
+</html>

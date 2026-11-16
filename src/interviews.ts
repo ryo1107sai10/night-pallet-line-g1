@@ -7,13 +7,19 @@ import {
 import { channel, type LineAPI } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
+import { ensureRecruitmentCase, type WorkflowSubject } from './forms.js'
+import { recordSource } from './sources.js'
+import { refreshMenu, rememberContact } from './rich-menus.js'
+import { onInterviewReleased, scheduleInterviewNotices, setWaitlist } from './interview-notices.js'
+import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
 
-const loginSchema=z.strictObject({connection:uuid,id_token:z.string().min(20).max(12000)})
+const loginSchema=z.strictObject({connection:uuid,id_token:z.string().min(20).max(12000),source:uuid.optional()})
 export const interviewSlotInput=z.strictObject({
   channel:uuid,starts_at:z.iso.datetime({offset:true}),ends_at:z.iso.datetime({offset:true}),
   method:z.enum(['onsite','online']).default('onsite'),instructions:text(800),published:z.boolean(),
+  host_id:uuid.nullable().optional(),
 })
 const gridMinute=z.int().min(0).max(1440).refine(value=>value%interval===0)
 export const interviewHours=z.strictObject({start:gridMinute,end:gridMinute,revision})
@@ -27,11 +33,12 @@ export const interviewChange=z.discriminatedUnion('action',[
   z.strictObject({action:z.literal('cancel'),revision}),
 ])
 type Applicant = {tenant_id:string;store_id:string;channel_id:string;applicant_key:string}
+export const recruitmentSubject=(a:Applicant):WorkflowSubject=>({...a,purpose:'recruitment',subject:a.applicant_key})
 type Booking = {id:string;slot_id:string;status:'confirmed'|'cancelled'|'completed';revision:number;applicant_name:string;
   starts_at:Date;ends_at:Date;method:'onsite'|'online';instructions:string}
 type Hours={start:number;end:number;revision:number}
 type Location={name:string;timezone:string;today:string;hours:Hours}
-type Range = {starts_at:Date;ends_at:Date;method:'onsite'|'online';published:boolean;id:string;revision:number}
+type Range = {starts_at:Date;ends_at:Date;method:'onsite'|'online';published:boolean;id:string;revision:number;host_id:string|null}
 
 const taken=()=>new Fault(409,'INTERVIEW_SLOT_TAKEN','この枠は予約できなくなりました。空き枠を選び直してください。')
 const unauthorized=()=>new Fault(401,'INTERVIEW_SESSION','LINEで本人確認を行ってください。')
@@ -60,6 +67,9 @@ export async function startInterviewSession(pool:pg.Pool,cfg:Config,api:LineAPI,
     const c=await recruitmentConnection(db,connection.id)
     if (c.generation!==connection.generation || !c.checks.provider_verified || !c.checks.login_published) throw unauthorized()
     const identity=keyed(cfg,'interview:'+c.id+':'+user)
+    const subject=recruitmentSubject({tenant_id:c.tenant_id,store_id:c.store_id,channel_id:c.id,applicant_key:identity})
+    await recordSource(db,subject,data.source)
+    await rememberContact(db,cfg,c,user,subject)
     await db.query(`INSERT INTO interview_session VALUES($1,$2,$3,$4,$5,$6,now()+interval '30 minutes')`,
       [digest(raw),c.tenant_id,c.store_id,c.id,c.generation,identity])
     await db.query('DELETE FROM interview_session WHERE channel_id=$1 AND expires_at<=now()',[c.id])
@@ -120,12 +130,16 @@ function assertSlotHours(location:Location,start:Date,end:Date) {
 export async function staffInterviewOverview(db:DB,store:string) {
   const location=await locationFor(db,store)
   const features=await storeFeatures(db,store)
+  const hosts=features.interviewers_enabled?await hostsFor(db,store):[]
   const {rows:channels}=await db.query("SELECT id,label FROM channel WHERE store_id=$1 AND purpose<>'customer' ORDER BY label",[store])
-  const {rows:slots}=await db.query(`SELECT f.*,c.label AS channel_label,b.applicant_name,b.id AS booking_id
+  const {rows:slots}=await db.query(`SELECT f.*,c.label AS channel_label,b.applicant_name,b.id AS booking_id,h.name AS host_name,
+    g.status AS calendar_status,g.last_error AS calendar_error
     FROM interview_slot f JOIN channel c ON c.id=f.channel_id
     LEFT JOIN interview_booking b ON b.slot_id=f.id AND b.status='confirmed'
+    LEFT JOIN interview_host h ON h.id=f.host_id LEFT JOIN interview_google_sync g ON g.booking_id=b.id
     WHERE f.store_id=$1 AND f.ends_at>now()-interval '1 day' ORDER BY f.starts_at LIMIT 200`,[store])
-  return {channels,hours:location.hours,today:location.today,timezone:location.timezone,interviews_enabled:features.interviews_enabled,
+  return {channels,hosts,interviewers_enabled:features.interviewers_enabled,hours:location.hours,today:location.today,
+    timezone:location.timezone,interviews_enabled:features.interviews_enabled,
     slots:slots.map(slot=>({...slot,in_hours:fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours)}))}
 }
 
@@ -136,25 +150,27 @@ export async function publishInterviewSlot(db:DB,cfg:Config,actor:Actor,store:st
     await recruitmentConnection(db,input.channel)
     const start=new Date(input.starts_at),end=new Date(input.ends_at)
     const duration=+end-+start
+    if(input.host_id)await requireHost(db,store,input.host_id)
     if (+start<=Date.now() || duration<interval*60000 || duration>180*60000) {
       throw new Fault(422,'INTERVIEW_TIME','将来の日時を指定し、所要時間を30〜180分にしてください。')
     }
     assertSlotHours(await locationFor(db,store),start,end)
-    if (input.published) await checkOverlap(db,store,start,end)
+    if (input.published) await checkOverlap(db,store,start,end,input.host_id??null)
     const id=newId()
-    await db.query(`INSERT INTO interview_slot(id,tenant_id,store_id,channel_id,starts_at,ends_at,method,instructions,published)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[id,actor.tenant_id,store,input.channel,start,end,input.method,input.instructions,input.published])
+    await db.query(`INSERT INTO interview_slot(id,tenant_id,store_id,channel_id,starts_at,ends_at,method,instructions,published,host_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[id,actor.tenant_id,store,input.channel,start,end,input.method,input.instructions,input.published,input.host_id??null])
     await audit(db,actor.tenant_id,store,actor.id,'interview.slot.create',id,null,{published:input.published})
     return {id}
   })
 }
 
-async function checkOverlap(db:DB,store:string,start:Date,end:Date,exclude?:string) {
+async function checkOverlap(db:DB,store:string,start:Date,end:Date,host:string|null,exclude?:string) {
   const result=await db.query(`SELECT 1 FROM interview_slot s WHERE s.store_id=$1
     AND s.starts_at<$3 AND s.ends_at>$2 AND s.id IS DISTINCT FROM $4::uuid
+    AND ($5::uuid IS NULL OR s.host_id IS NULL OR s.host_id=$5)
     AND (s.published OR EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed'))
-    LIMIT 1`,[store,start,end,exclude??null])
-  if (result.rowCount) throw new Fault(409,'INTERVIEW_OVERLAP','同じ店舗で公開・予約済みの面談枠と時間が重なっています。')
+    LIMIT 1`,[store,start,end,exclude??null,host])
+  if (result.rowCount) throw new Fault(409,'INTERVIEW_OVERLAP','公開・予約済みの面談枠と同じ担当者または店舗の時間が重なっています。')
 }
 
 export async function changeInterviewVisibility(db:DB,actor:Actor,store:string,id:string,input:z.infer<typeof interviewVisibility>) {
@@ -164,9 +180,10 @@ export async function changeInterviewVisibility(db:DB,actor:Actor,store:string,i
   if (slot.revision!==input.revision) throw conflict()
   if (input.published) {
     await requireFeature(db,store,'interviews_enabled')
+    if(slot.host_id)await requireHost(db,store,slot.host_id)
     if (+slot.starts_at<=Date.now()) throw taken()
     assertSlotHours(await locationFor(db,store),slot.starts_at,slot.ends_at)
-    await checkOverlap(db,store,slot.starts_at,slot.ends_at,id)
+    await checkOverlap(db,store,slot.starts_at,slot.ends_at,slot.host_id,id)
   }
   await db.query('UPDATE interview_slot SET published=$2,revision=revision+1 WHERE id=$1',[id,input.published])
   await audit(db,actor.tenant_id,store,actor.id,'interview.slot.visibility',id,null,{published:input.published})
@@ -192,12 +209,14 @@ export async function interviewCalendar(db:DB,a:Applicant,google:InterviewGoogle
   }
   const max=new Date(Date.parse(location.today+'T00:00:00Z')+90*86400000).toISOString().slice(0,10)
   if (start<location.today || start>max) throw new Fault(422,'INTERVIEW_DATE','本日から90日以内の日付を選択してください。')
-  const {rows:slots}=await db.query<Pick<Range,'id'|'starts_at'|'ends_at'|'method'>&{available:boolean}>(`SELECT s.id,s.starts_at,s.ends_at,s.method,s.starts_at>now() AND
+  const {rows:slots}=await db.query<Pick<Range,'id'|'starts_at'|'ends_at'|'method'>&{available:boolean;calendar_id:string|null}>(`
+    SELECT s.id,s.starts_at,s.ends_at,s.method,h.calendar_id,s.starts_at>now() AND
     NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed') AS available
-    FROM interview_slot s WHERE s.channel_id=$1 AND s.published AND $4
+    FROM interview_slot s LEFT JOIN interview_host h ON h.id=s.host_id
+    WHERE s.channel_id=$1 AND s.published AND $4 AND (s.host_id IS NULL OR ($5 AND h.active))
       AND s.starts_at >= ($2::date::timestamp AT TIME ZONE $3)
       AND s.starts_at < (($2::date+7)::timestamp AT TIME ZONE $3)
-    ORDER BY s.starts_at`,[a.channel_id,start,location.timezone,features.interviews_enabled])
+    ORDER BY s.starts_at`,[a.channel_id,start,location.timezone,features.interviews_enabled,features.interviewers_enabled])
   const {rows:bookings}=await db.query<Booking>(selectBooking+` WHERE b.channel_id=$1 AND b.applicant_key=$2
     ORDER BY (b.status='confirmed' AND s.starts_at>now()) DESC, b.updated_at DESC LIMIT 10`,[a.channel_id,a.applicant_key])
   const visible=slots.filter(slot=>fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours))
@@ -212,12 +231,26 @@ export async function interviewCalendar(db:DB,a:Applicant,google:InterviewGoogle
       if(!(error instanceof Fault)||error.code!=='GOOGLE_UNAVAILABLE')throw error
       googleUnavailable=true
     }
+    const baseUnavailable=googleUnavailable
+    const personal=new Map<string,typeof local|null>()
+    if(!baseUnavailable)for(const calendar of new Set(candidates.map(slot=>slot.calendar_id))){
+      if(!calendar)continue
+      try{personal.set(calendar,await googleBusy(db,google,a.store_id,range,calendar))}
+      catch(error){
+        if(!(error instanceof Fault)||error.code!=='GOOGLE_UNAVAILABLE')throw error
+        googleUnavailable=true
+        personal.set(calendar,null)
+      }
+    }
     for(const slot of candidates) {
-      slot.available=!googleUnavailable&&!local.some(block=>overlaps(slot,block))&&!external.some(busy=>overlaps(slot,busy))
+      const host=slot.calendar_id?personal.get(slot.calendar_id):[]
+      slot.available=!baseUnavailable&&host!==null&&!local.some(block=>overlaps(slot,block))&&
+        !external.some(busy=>overlaps(slot,busy))&&!host?.some(busy=>overlaps(slot,busy))
     }
   }
   return {store:location.name,timezone:location.timezone,today:location.today,hours:location.hours,
-    interviews_enabled:features.interviews_enabled,availability_warning:googleUnavailable,slots:visible,bookings:bookings.map(visibleBooking)}
+    interviews_enabled:features.interviews_enabled,availability_warning:googleUnavailable,
+    slots:visible.map(({calendar_id,...slot})=>slot),bookings:bookings.map(visibleBooking)}
 }
 
 function visibleBooking(booking:Booking) {
@@ -227,17 +260,19 @@ function visibleBooking(booking:Booking) {
 
 async function availableSlot(db:DB,a:Applicant,id:string,google:InterviewGoogle) {
   await requireFeature(db,a.store_id,'interviews_enabled')
-  const {rows:[slot]}=await db.query<Range>(`SELECT s.id,s.starts_at,s.ends_at FROM interview_slot s WHERE s.id=$1 AND s.channel_id=$2
+  const {rows:[slot]}=await db.query<Range & {calendar_id:string|null}>(`SELECT s.id,s.starts_at,s.ends_at,s.host_id,h.calendar_id
+    FROM interview_slot s LEFT JOIN interview_host h ON h.id=s.host_id WHERE s.id=$1 AND s.channel_id=$2
     AND s.published AND s.starts_at>clock_timestamp()
     AND NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed')`,[id,a.channel_id])
   if (!slot) throw taken()
+  if(slot.host_id)await requireHost(db,a.store_id,slot.host_id)
   const location=await locationFor(db,a.store_id)
   if (!fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours)) throw taken()
-  await requireFree(db,google,a.store_id,slot)
+  await requireFree(db,google,a.store_id,slot,slot.calendar_id??undefined)
   if (+slot.starts_at<=Date.now()) throw taken()
 }
 
-export async function confirmInterview(db:DB,a:Applicant,input:z.infer<typeof interviewCreate>,google:InterviewGoogle) {
+export async function confirmInterview(db:DB,cfg:Config,a:Applicant,input:z.infer<typeof interviewCreate>,google:InterviewGoogle) {
   const {rows:[current]}=await db.query<Booking>(selectBooking+` WHERE b.channel_id=$1 AND b.applicant_key=$2
     AND b.status='confirmed'`,[a.channel_id,a.applicant_key])
   if (current && +current.starts_at>Date.now()) {
@@ -250,11 +285,17 @@ export async function confirmInterview(db:DB,a:Applicant,input:z.infer<typeof in
   const id=newId()
   await db.query(`INSERT INTO interview_booking (id,tenant_id,store_id,channel_id,applicant_key,slot_id,applicant_name,status)
     VALUES($1,$2,$3,$4,$5,$6,$7,'confirmed')`,[id,a.tenant_id,a.store_id,a.channel_id,a.applicant_key,input.slot,input.name])
+  const subject=recruitmentSubject(a)
+  await ensureRecruitmentCase(db,subject)
+  await refreshMenu(db,subject)
+  await setWaitlist(db,subject,null)
+  await scheduleInterviewNotices(db,cfg,subject)
+  await queueGoogleSync(db,a.store_id,id)
   await audit(db,a.tenant_id,a.store_id,null,'interview.confirm',id,null,{slot:input.slot})
   return visibleBooking(await ownBooking(db,a,id))
 }
 
-export async function updateInterview(db:DB,a:Applicant,id:string,input:z.infer<typeof interviewChange>,google:InterviewGoogle) {
+export async function updateInterview(db:DB,cfg:Config,a:Applicant,id:string,input:z.infer<typeof interviewChange>,google:InterviewGoogle) {
   const existing=await ownBooking(db,a,id)
   if (existing.status==='cancelled' && input.action==='cancel') return visibleBooking(existing)
   if (input.action==='reschedule' && existing.status==='confirmed' && existing.slot_id===input.slot) return visibleBooking(existing)
@@ -264,5 +305,10 @@ export async function updateInterview(db:DB,a:Applicant,id:string,input:z.infer<
     WHERE id=$1`,[id,input.action==='reschedule'?input.slot:existing.slot_id,input.action==='cancel'?'cancelled':'confirmed'])
   await audit(db,a.tenant_id,a.store_id,null,'interview.'+input.action,id,null,
     {previous_slot:existing.slot_id,slot:input.action==='reschedule'?input.slot:existing.slot_id})
+  const subject=recruitmentSubject(a)
+  await refreshMenu(db,subject)
+  await onInterviewReleased(db,cfg,subject,existing)
+  if(input.action==='reschedule')await scheduleInterviewNotices(db,cfg,subject)
+  await queueGoogleSync(db,a.store_id,id)
   return visibleBooking(await ownBooking(db,a,id))
 }

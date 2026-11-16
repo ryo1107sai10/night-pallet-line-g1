@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { lockDispatch } from './dispatch-lock.js'
+import { recordInboxEvent } from './inbox.js'
 import type pg from 'pg'
 import { z } from 'zod'
 import {
@@ -43,6 +44,8 @@ export type Channel = Route & {
   existing_tools: string | null; existing_webhook: string | null; management_authority: string;
   credentials: string; checks: Checks; stopped: boolean; revision: number; generation: number;
 }
+export const channelReady=(c:Channel)=>['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked','login_published',
+  'non_developer','token_verified','webhook_verified','delivery_confirmed'].every(key=>c.checks[key as keyof Channel['checks']]===true)
 
 export async function channel(db: DB, id: string) {
   const { rows: [row] } = await db.query<Channel>(`SELECT c.*,r.messaging_id FROM channel c
@@ -169,6 +172,21 @@ export class LineAPI {
     return ceiling.type==='none'?Infinity:Math.max(0,ceiling.value-used)
   }
 
+  async richMenuExists(cred:Credentials,id:string){
+    const response=await this.call('/v2/bot/richmenu/'+encodeURIComponent(id),
+      {headers:{Authorization:'Bearer '+cred.access_token}})
+    if(response.status>=500||response.status===429)throw lineUnavailable()
+    return response.ok
+  }
+
+  async bindRichMenu(cred:Credentials,user:string,id:string|null){
+    const endpoint='/v2/bot/user/'+encodeURIComponent(user)+'/richmenu'
+    const response=await this.call(id?endpoint+'/'+encodeURIComponent(id):endpoint,{
+      method:id?'POST':'DELETE',headers:{Authorization:'Bearer '+cred.access_token},
+    })
+    return {ok:response.ok||!id&&response.status===404,retry:response.status>=500||response.status===429}
+  }
+
   async push(cred: Credentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。') {
     const response = await this.call('/v2/bot/message/push', { method: 'POST',
       headers: { Authorization: 'Bearer ' + cred.access_token, 'Content-Type': 'application/json',
@@ -190,7 +208,8 @@ const invalidLiff = () => new Fault(401,'INVALID_LIFF','LINEの本人確認ま�
 const signatureError = () => new Fault(401,'INVALID_WEBHOOK','Webhookを確認できません。')
 const eventSchema = z.object({ webhookEventId: text(100), type: text(100), timestamp: z.int().min(0).max(8640000000000000),
   follow:z.object({isUnblocked:z.boolean().optional()}).optional(),
-  message:z.object({type:z.string(),text:z.string().optional()}).optional(),
+  message:z.object({type:z.string().max(100),id:z.string().max(100).optional(),text:z.string().optional()}).optional(),
+  unsend:z.object({messageId:z.string().max(100)}).optional(),
   source: z.object({ type: z.string(), userId: userId.optional() }).optional(),
 })
 const webhookSchema = z.object({ destination: userId, events: z.array(eventSchema).max(500) })
@@ -211,6 +230,7 @@ export async function receiveWebhook(pool: pg.Pool, cfg: Config, id: string, raw
     if (!parsed.success || parsed.data.destination !== c.bot_user_id) throw signatureError()
     await lockDispatch(db,c.tenant_id)
     if ((await channel(db,id)).generation!==c.generation) throw signatureError()
+    const {rows:[store]}=await db.query<{inbox_enabled:boolean}>('SELECT inbox_enabled FROM store WHERE id=$1',[c.store_id])
     for (const event of parsed.data.events) {
       if (event.timestamp>Date.now()+5*60000) continue
       const key = event.source?.type === 'user' && event.source.userId
@@ -221,10 +241,14 @@ export async function receiveWebhook(pool: pg.Pool, cfg: Config, id: string, raw
       const recipient=key&&event.source?.userId&&c.purpose==='customer'&&['follow','refollow'].includes(kind)
         ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,event.source.userId) : null
       const eventPurpose = c.purpose === 'shared' ? 'unclassified' : c.purpose
-      await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
+      const written=await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
         occurred_at,kind,purpose,user_key,recipient_box,stop_signal) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ON CONFLICT(channel_id,event_id) DO NOTHING`,
         [c.tenant_id,c.store_id,id,event.webhookEventId,c.generation,new Date(event.timestamp),kind,eventPurpose,key,recipient,stopSignal])
+      if(written.rowCount&&key&&event.source?.userId&&(kind==='message'&&store.inbox_enabled||kind==='unsend')){
+        await recordInboxEvent(db,cfg,c,key,event.source.userId,{kind,messageId:event.message?.id,messageType:event.message?.type,
+          body:event.message?.type==='text'?event.message.text:undefined,unsent:event.unsend?.messageId,when:new Date(event.timestamp)},store.inbox_enabled)
+      }
     }
   })
 }

@@ -17,5 +17,6 @@ export function simulate(
 
 export function localPart(instant:number,zone:string): {date:string;time:string}
 export function nextWindow(instant:number,flow:{holidays:number[];windowStart:string;windowEnd:string},zone:string): number|null
+export function localInstant(value:string,zone:string):number|null
 export function waitUntil(node:unknown,at:number,zone:string,cutoff:string,bookingAt:number|null): number|null
 export function renderMessage(body:string,person:{values:Record<string,string>;bookingLinkValid:boolean}): {message?:string;reason?:string}

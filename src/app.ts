@@ -21,12 +21,22 @@ import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBo
 import { endScope, locationOf, updateAutomation } from './automation.js'
 import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
   interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
-  interviewHours, saveInterviewHours, startInterviewSession, updateInterview } from './interviews.js'
+  interviewHours, saveInterviewHours, startInterviewSession, updateInterview, recruitmentSubject } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
   googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
 import { featureInput, requireFeature, saveStoreFeatures, storeFeatures } from './store-features.js'
 import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, tagRuleInput,
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
+import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
+  type WorkflowSubject } from './forms.js'
+import { saveSource, setSourceStatus, sourceInput, sourceQr, sourceReport, sourceReportInput, sourceStatus } from './sources.js'
+import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepareCampaign, stopCampaign } from './campaigns.js'
+import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
+import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitlistInput } from './interview-notices.js'
+import { serviceHistory } from './service-delivery.js'
+import { changeThread, classifyThread, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
+import { hostInput, queueGoogleSync, saveHost } from './interview-hosts.js'
+import { workflowChecks } from './workflow-checks.js'
 
 
 
@@ -70,6 +80,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.use('/studio',express.static(here('../public/studio')))
   app.use('/interview',express.static(here('../public/interview')))
   app.use('/operations',express.static(here('../public/operations')))
+  app.use('/workflows',express.static(here('../public/workflows')))
   app.get('/healthz',async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
@@ -158,6 +169,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       return changeBooking(db,null,idOf(req,'booking'),{...p,reason:'LIFFの本人操作'},c)
     }))
   })
+  const customerSubject=async(db:DB,req:Request):Promise<WorkflowSubject>=>{
+    const c=await authenticateCustomer(db,localCustomerSession(req))
+    return {tenant_id:c.tenant_id,store_id:c.store_id,channel_id:c.channel_id,purpose:'customer',subject:c.id}
+  }
 
   const interviewCredential=(req:Request)=>req.headers.cookie?.split(';').map(value=>value.trim())
     .find(value=>value.startsWith('night_interview='))?.slice('night_interview='.length)
@@ -171,12 +186,37 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.post('/interview/bookings',async(req,res)=>{
     const input=interviewCreate.parse(req.body)
-    res.status(201).json(await tx(pool,async db=>confirmInterview(db,await interviewApplicant(db,interviewCredential(req),true),input,google)))
+    res.status(201).json(await tx(pool,async db=>confirmInterview(db,cfg,await interviewApplicant(db,interviewCredential(req),true),input,google)))
   })
   api.patch('/interview/bookings/:booking',async(req,res)=>{
     const input=interviewChange.parse(req.body)
-    res.json(await tx(pool,async db=>updateInterview(db,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input,google)))
+    res.json(await tx(pool,async db=>updateInterview(db,cfg,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input,google)))
   })
+  const applicantSubject=async(db:DB,req:Request)=>recruitmentSubject(await interviewApplicant(db,interviewCredential(req)))
+  api.get('/interview/notices',async(req,res)=>{
+    res.json(await tx(pool,async db=>interviewNotices(db,await applicantSubject(db,req))))
+  })
+  api.put('/interview/notices',async(req,res)=>{
+    const {enabled}=noticeInput.parse(req.body)
+    res.json(await tx(pool,async db=>setInterviewNotices(db,cfg,await applicantSubject(db,req),enabled)))
+  })
+  api.put('/interview/waitlist',async(req,res)=>{
+    const data=waitlistInput.parse(req.body)
+    res.json(await tx(pool,async db=>setWaitlist(db,await applicantSubject(db,req),data)))
+  })
+  api.delete('/interview/waitlist',async(req,res)=>{
+    res.json(await tx(pool,async db=>setWaitlist(db,await applicantSubject(db,req),null)))
+  })
+  for(const [path,subject] of [['/customer/form',customerSubject],['/interview/form',applicantSubject]] as const){
+    api.get(path,async(req,res)=>{
+      const {form}=formQuery.parse(req.query)
+      res.json(await tx(pool,async db=>formFor(db,await subject(db,req),form)))
+    })
+    api.post(path,async(req,res)=>{
+      const data=formResponse.parse(req.body)
+      res.status(201).json(await tx(pool,async db=>submitForm(db,cfg,await subject(db,req),data)))
+    })
+  }
 
   type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
   const staff = (action: Action, status=200) => async (req: Request,res: Response) => {
@@ -194,6 +234,63 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     await interviewAccess(db,actor,idOf(req,'store'))
     return action(db,actor,req)
   },status)
+  const workPurpose=(req:Request)=>purpose.parse(req.params.purpose)
+  const workflowAccess=(db:DB,actor:Actor,store:string,use:WorkflowSubject['purpose'])=>
+    use==='customer'?storeAccess(db,actor,store,true):interviewAccess(db,actor,store)
+  const workflowStaff=(action:Action,status=200)=>staff(async(db,actor,req)=>{
+    await workflowAccess(db,actor,idOf(req,'store'),workPurpose(req))
+    return action(db,actor,req)
+  },status)
+  const workflow='/stores/:store/workflows/:purpose'
+  api.get(workflow+'/settings',workflowStaff((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
+  api.get(workflow+'/checks',workflowStaff((db,_actor,req)=>workflowChecks(db,cfg,idOf(req,'store'),workPurpose(req),google.configured)))
+  api.get(workflow+'/delivery',workflowStaff((db,_actor,req)=>serviceHistory(db,workPurpose(req))))
+  api.get(workflow+'/inbox',workflowStaff((db,_actor,req)=>inboxOverview(db,idOf(req,'store'),workPurpose(req))))
+  api.get(workflow+'/inbox/:thread',workflowStaff((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),workPurpose(req),idOf(req,'thread'))))
+  api.patch(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
+    changeThread(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),inboxEdit.parse(req.body))))
+  api.post(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
+    writeInbox(db,cfg,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),keyOf(req),inboxText.parse(req.body)),201))
+  const intake='/stores/:store/intake'
+  api.get(intake,inStore((db,_actor,req)=>inboxOverview(db,idOf(req,'store'),'unclassified')))
+  api.get(intake+'/:thread',inStore((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),'unclassified',idOf(req,'thread'))))
+  api.patch(intake+'/:thread',inStore((db,actor,req)=>
+    classifyThread(db,actor,idOf(req,'store'),idOf(req,'thread'),inboxClassify.parse(req.body))))
+  api.get(workflow+'/forms',workflowStaff((db,_actor,req)=>listForms(db,idOf(req,'store'),workPurpose(req))))
+  api.put(workflow+'/forms',workflowStaff((db,actor,req)=>saveForm(db,cfg,actor,idOf(req,'store'),workPurpose(req),keyOf(req),formInput.parse(req.body))))
+  api.get(workflow+'/responses',workflowStaff((db,_actor,req)=>responses(db,cfg,idOf(req,'store'),workPurpose(req))))
+  api.get(workflow+'/sources',workflowStaff((db,_actor,req)=>
+    sourceReport(db,idOf(req,'store'),workPurpose(req),sourceReportInput.parse(req.query).days)))
+  api.post(workflow+'/sources',workflowStaff((db,actor,req)=>
+    saveSource(db,actor,idOf(req,'store'),workPurpose(req),sourceInput.parse(req.body)),201))
+  api.patch(workflow+'/sources/:source',workflowStaff((db,actor,req)=>
+    setSourceStatus(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'source'),sourceStatus.parse(req.body).active)))
+  api.get(workflow+'/sources/:source/qr',workflowStaff((db,_actor,req)=>
+    sourceQr(db,idOf(req,'store'),workPurpose(req),idOf(req,'source'))))
+  api.get(workflow+'/rich-menus',workflowStaff((db,_actor,req)=>listMenus(db,idOf(req,'store'),workPurpose(req))))
+  api.put(workflow+'/rich-menus',async(req,res)=>{
+    const store=idOf(req,'store'),use=workPurpose(req),data=menuInput.parse(req.body)
+    await gate(pool,cfg,'menu-verify:'+address(req),30)
+    const authorized=async(db:DB)=>{
+      const actor=await authenticate(db,credential(req))
+      await workflowAccess(db,actor,store,use)
+      return actor
+    }
+    const generation=await tx(pool,async db=>{
+      await authorized(db)
+      return validateMenus(db,cfg,line,store,use,data)
+    })
+    res.json(await tx(pool,async db=>saveMenus(db,await authorized(db),store,use,data,generation)))
+  })
+  api.get('/stores/:store/recruitment',interviewStaff((db,_actor,req)=>listRecruitment(db,cfg,idOf(req,'store'))))
+  api.patch('/stores/:store/recruitment/:case',interviewStaff((db,actor,req)=>
+    updateCase(db,actor,idOf(req,'store'),idOf(req,'case'),caseInput.parse(req.body))))
+  const campaigns='/stores/:store/campaigns'
+  api.get(campaigns,inStore((db,_actor,req)=>campaignOverview(db,cfg,idOf(req,'store'))))
+  api.post(campaigns,inStore((db,actor,req)=>prepareCampaign(db,cfg,actor,idOf(req,'store'),keyOf(req),campaignInput.parse(req.body)),true,201))
+  api.post(campaigns+'/:campaign/approve',inStore((db,actor,req)=>
+    approveCampaign(db,cfg,actor,idOf(req,'store'),idOf(req,'campaign'),approvalInput.parse(req.body))))
+  api.post(campaigns+'/:campaign/stop',inStore((db,actor,req)=>stopCampaign(db,actor,idOf(req,'store'),idOf(req,'campaign'))))
   api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'))))
   api.patch('/stores/:store/interviews/hours',interviewStaff((db,actor,req)=>
     saveInterviewHours(db,actor,idOf(req,'store'),interviewHours.parse(req.body))))
@@ -213,8 +310,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       return actor
     }
     const pending=await tx(pool,async db=>claimCalendarLink(db,await authorized(db),store,data.state))
-    const refresh=await google.exchange(data.code,pending.verifier,pending.calendar_id)
-    await tx(pool,async db=>finishCalendarLink(db,cfg,await authorized(db),store,data.state,refresh))
+    const refresh=await google.exchange(data.code,pending.verifier,pending.calendar_id,pending.write_requested)
+    await tx(pool,async db=>{
+      await finishCalendarLink(db,cfg,await authorized(db),store,data.state,refresh)
+      if(pending.write_requested)await queueGoogleSync(db,store)
+    })
     res.json({connected:true})
   })
   api.delete(availability+'/google',interviewStaff((db,actor,req)=>
@@ -223,6 +323,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     publishInterviewSlot(db,cfg,actor,idOf(req,'store'),keyOf(req),interviewSlotInput.parse(req.body)),201))
   api.patch('/stores/:store/interviews/slots/:slot',interviewStaff((db,actor,req)=>
     changeInterviewVisibility(db,actor,idOf(req,'store'),idOf(req,'slot'),interviewVisibility.parse(req.body))))
+  api.put('/stores/:store/interviews/hosts',interviewStaff((db,actor,req)=>
+    saveHost(db,actor,idOf(req,'store'),hostInput.parse(req.body))))
+  api.post('/stores/:store/interviews/calendar-sync',interviewStaff(async(db,actor,req)=>{
+    const store=idOf(req,'store')
+    await lockDispatch(db,actor.tenant_id)
+    await requireFeature(db,store,'google_write_enabled')
+    await queueGoogleSync(db,store)
+    return {queued:true}
+  }))
 
   api.post('/auth/logout',async (req,res)=>{
     if (credential(req)) {

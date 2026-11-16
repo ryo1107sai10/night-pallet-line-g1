@@ -180,7 +180,7 @@ export async function mountInterview(root,service) {
     }
     mobile.append(strip,list)
     cal.append(table,mobile)
-    if(data.availability_warning)cal.insertBefore(el('p','Googleカレンダーの空き状況を確認できないため、現在は予約を受け付けていません。','notice'),table)
+    if(data.availability_warning)cal.insertBefore(el('p','Googleカレンダーの空き状況を確認できなかった枠は、現在予約できません。','notice'),table)
     if(!pending.size)cal.append(el('p','この週に公開中の'+methods[method]+'面談の枠はありません。翌週もご確認ください。','small'))
     return cal
   }

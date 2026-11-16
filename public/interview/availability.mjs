@@ -40,6 +40,11 @@ export function drawAvailability(root,state,zone,controls){
     }
     busyList.append(link)
   }else if(state.google_enabled!==false)busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
+  if(state.google_enabled!==false&&state.google_write_enabled){
+    busyList.append(el('p',state.google_write_granted?'面談が確定すると、予約名を含めずGoogleカレンダーに予定を登録します。':
+      '予定の登録・変更を行うには「Googleで連携」から書き込み権限を許可してください。'))
+    if(state.google_write_granted)busyList.append(button('予定の反映を再試行',event=>run(event.currentTarget,controls.retryWrites)))
+  }
   if(!controls.demo&&state.google.connected){
     const remove=el('details')
     remove.append(el('summary','連携を解除する'),el('p','解除後はGoogleの予定を照合せず、店内の確定予約と受付停止時間で空きを判定します。'),

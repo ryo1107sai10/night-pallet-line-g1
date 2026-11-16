@@ -18,6 +18,46 @@ async function api(path,method='GET',body,key){
   return result
 }
 const path=store=>'/stores/'+store.id+'/interviews'
+function drawHosts(root,hosts,store,refresh){
+  const box=el('section','')
+  box.className='box stack'
+  box.append(el('h2','面談担当者'))
+  for(const host of [null,...hosts]){
+    const details=el('details','')
+    details.append(el('summary',host?host.name+(host.active?'':'（停止中）'):'担当者を追加'))
+    const editor=el('form','')
+    editor.className='stack'
+    const name=el('input',''),calendar=el('input',''),active=el('input','')
+    name.required=true
+    name.maxLength=80
+    name.value=host?.name??''
+    calendar.value=host?.calendar_id??''
+    calendar.maxLength=250
+    active.type='checkbox'
+    active.checked=host?.active??true
+    const nameLabel=el('label','担当者の表示名'),calendarLabel=el('label','共有GoogleカレンダーID（任意）')
+    nameLabel.className=calendarLabel.className='field'
+    nameLabel.append(name)
+    calendarLabel.append(calendar)
+    const activeLabel=el('label','面談担当として使う')
+    activeLabel.prepend(active)
+    const save=el('button','担当者を保存')
+    save.className='primary'
+    editor.append(nameLabel,calendarLabel,activeLabel,save)
+    editor.onsubmit=async event=>{
+      event.preventDefault()
+      save.disabled=true
+      try{
+        await api(path(store)+'/hosts','PUT',{id:host?.id,revision:host?.revision,name:name.value,
+          calendar_id:calendar.value.trim()||null,active:active.checked})
+        await refresh('面談担当者を保存しました。')
+      }catch(error){if(selected.id===store.id)notice(error.message)}finally{save.disabled=false}
+    }
+    details.append(editor)
+    box.append(details)
+  }
+  root.append(box)
+}
 async function show(){
   const current=++requestNumber
   selected=stores.find(store=>store.id===$('#stores').value)
@@ -27,15 +67,19 @@ async function show(){
   $('#slots').replaceChildren()
   $('#slot-help').textContent=''
   $('#availability').replaceChildren()
+  $('#interview-hosts').replaceChildren()
   const store=selected
   const availabilityPath=path(store)+'/availability'
-  const [{channels,slots,hours,today,interviews_enabled},availability]=await Promise.all([api(path(store)),api(availabilityPath)])
+  const [{channels,slots,hours,today,interviews_enabled,hosts,interviewers_enabled},availability]=await Promise.all([api(path(store)),api(availabilityPath)])
   if(current!==requestNumber)return
   const refresh=async message=>{
     if(selected.id!==store.id)return
     await show()
     if(selected.id===store.id)notice(message)
   }
+  if(interviewers_enabled)drawHosts($('#interview-hosts'),hosts,store,refresh)
+  $('#host-field').hidden=!interviewers_enabled
+  form.elements.host.replaceChildren(new Option('店舗共通',''),...hosts.filter(host=>host.active).map(host=>new Option(host.name,host.id)))
   drawAvailability($('#availability'),{...availability,interviews_enabled},store.timezone,{
     localInstant,report:message=>{
       if(selected.id===store.id)notice(message)
@@ -47,6 +91,10 @@ async function show(){
     disconnect:async()=>{
       await api(availabilityPath+'/google','DELETE',{})
       await refresh('Googleカレンダーとの連携を解除しました。')
+    },
+    retryWrites:async()=>{
+      await api(path(store)+'/calendar-sync','POST',{})
+      await refresh('Googleカレンダーへの反映を待ち行列に登録しました。')
     },
     add:async input=>{
       const result=await api(availabilityPath+'/blocks','POST',input,crypto.randomUUID())
@@ -97,6 +145,9 @@ async function show(){
     section.append(el('strong',formatAppointment(slot,store.timezone)),
       el('p',(slot.method==='online'?'オンライン':'対面')+' · '+slot.channel_label+' · '+
       (stopped?'受付停止中':slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+(slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')))
+    if(slot.host_name)section.append(el('p','担当 '+slot.host_name))
+    if(slot.calendar_status)section.append(el('p','Googleカレンダー '+({queued:'反映待ち',synced:'反映済み',failed:'反映できませんでした'}[slot.calendar_status])+
+      (slot.calendar_error?' · '+slot.calendar_error:'')))
     if(Date.parse(slot.starts_at)>Date.now()&&(slot.published||(slot.in_hours&&interviews_enabled))){
       const toggle=el('button',slot.published?'公開を停止':'公開する')
       toggle.type='button';toggle.onclick=async()=>{
@@ -123,7 +174,7 @@ form.onsubmit=async event=>{
     if(start===null)throw new Error('店舗のタイムゾーンで有効な日時を指定してください。')
     const settings={channel:data.get('channel'),starts_at:new Date(start).toISOString(),
       ends_at:new Date(start+Number(data.get('minutes'))*60000).toISOString(),method:data.has('online')?'online':'onsite',
-      instructions:data.get('instructions'),published:data.get('published')==='on'}
+      instructions:data.get('instructions'),published:data.get('published')==='on',host_id:data.get('host')||null}
     const fingerprint=JSON.stringify([store.id,settings])
     if(fingerprint!==pendingInput){pendingInput=fingerprint;pendingKey=crypto.randomUUID()}
     await api(path(store)+'/slots','POST',settings,pendingKey)
@@ -146,6 +197,7 @@ try{
     const store=$('#stores').value
     $('#back-to-admin').href=store?'/?store='+encodeURIComponent(store):'/'
     $('#back-to-operations').href='/operations/'+(store?'?store='+encodeURIComponent(store):'')
+    $('#recruitment-operations').href='/workflows/?'+new URLSearchParams({store,use:'recruitment'})
     const url=new URL(location.href)
     if(store)url.searchParams.set('store',store)
     else url.searchParams.delete('store')

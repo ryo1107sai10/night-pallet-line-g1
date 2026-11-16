@@ -6,6 +6,9 @@ const form = document.querySelector<HTMLFormElement>('#verify')!
 const signin = document.querySelector<HTMLButtonElement>('#signin')!
 const connection = location.pathname.split('/')[2]
 const labels = { customer:'顧客', recruitment:'採用' }
+const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
+let source:string|undefined
+let formId:string|undefined
 
 async function prepare() {
   const response = await fetch('/api/v1/liff/' + encodeURIComponent(connection))
@@ -13,10 +16,20 @@ async function prepare() {
   if (!response.ok) throw new Error(configuration.message)
   try { await liff.init({ liffId:configuration.liff_id }) }
   catch { throw new Error('LINE公式アカウントから接続テスト画面を開き直してください。') }
+  const query=new URLSearchParams(location.search)
+  const code=query.get('source')
+  source=code&&uuid.test(code)?code:undefined
+  const formCode=query.get('form')
+  formId=formCode&&uuid.test(formCode)?formCode:undefined
   if (!liff.isLoggedIn()) {
     status.textContent = 'LINEでログインして本人確認を続けてください。'
     signin.hidden = false
-    signin.onclick = () => liff.login({ redirectUri:location.origin + location.pathname })
+    const redirect=new URL(location.origin+location.pathname)
+    if(source)redirect.searchParams.set('source',source)
+    if(formId)redirect.searchParams.set('form',formId)
+    const use=query.get('use')
+    if(use==='customer'||use==='recruitment')redirect.searchParams.set('use',use)
+    signin.onclick = () => liff.login({redirectUri:redirect.href})
     return
   }
   const select = form.elements.namedItem('purpose') as HTMLSelectElement
@@ -28,6 +41,8 @@ async function prepare() {
     picker.hidden=false
     picker.querySelector<HTMLButtonElement>('[data-use=customer]')!.onclick=()=>choosePurpose(openCustomer)
     picker.querySelector<HTMLButtonElement>('[data-use=recruitment]')!.onclick=()=>choosePurpose(openInterviews)
+    if(query.get('use')==='recruitment')await choosePurpose(openInterviews)
+    if(query.get('use')==='customer')await choosePurpose(openCustomer)
   } else {
     await choosePurpose(configuration.recruitment?openInterviews:openCustomer)
   }
@@ -78,7 +93,7 @@ async function openInterviews() {
     if(!response.ok) throw Object.assign(new Error(data.message??'操作できませんでした。'),{status:response.status})
     return data
   }
-  await request('/login','POST',{connection,id_token:liff.getIDToken()})
+  await request('/login','POST',{connection,id_token:liff.getIDToken(),source})
   const root=document.querySelector<HTMLElement>('#interview')!
   await mountInterview(root,{
     calendar:start=>request('/calendar'+(start?'?start='+encodeURIComponent(start):'')),
@@ -87,7 +102,51 @@ async function openInterviews() {
   })
   document.body.classList.add('has-interviews')
   root.hidden=false
+  await showWorkflowForm(request)
+  await showInterviewNotices(request)
   document.title='面談予約 | Night PRO LINE'
+}
+type NoticeSettings={reminders:boolean;waitlist_enabled:boolean;notices:boolean;waitlist:{method:string;until_at:string;offered_at:string|null}|null}
+async function showInterviewNotices(request:(path:string,method?:string,body?:unknown)=>Promise<unknown>){
+  const root=document.querySelector<HTMLElement>('#interview-notices')!
+  const draw=(data:NoticeSettings)=>{
+    root.replaceChildren()
+    root.hidden=!data.reminders&&!data.waitlist_enabled&&!data.notices&&!data.waitlist
+    if(root.hidden)return
+    const preferences=item('form')
+    const label=item('label','LINEで予約の案内を受け取る')
+    const input=item('input')
+    input.type='checkbox'
+    input.checked=data.notices
+    label.prepend(input)
+    preferences.append(label,item('button','通知設定を保存'))
+    preferences.onsubmit=guarded(async()=>draw(await request('/notices','PUT',{enabled:input.checked}) as NoticeSettings))
+    root.append(item('h2','面談のお知らせ'),preferences)
+    if(data.waitlist){
+      const current=item('form')
+      current.append(item('p',data.waitlist.offered_at?'空きが出た枠の案内を準備しました。':'キャンセル待ちに登録済みです。'),
+        item('button','キャンセル待ちを解除'))
+      current.onsubmit=guarded(async()=>draw(await request('/waitlist','DELETE',{}) as NoticeSettings))
+      root.append(current)
+    }
+    if(data.waitlist_enabled&&data.notices&&!data.waitlist){
+      const join=item('form')
+      const method=item('select')
+      method.add(new Option('対面','onsite'))
+      method.add(new Option('オンライン','online'))
+      const methodLabel=item('label','希望形式')
+      methodLabel.append(method)
+      const days=item('select')
+      for(const day of [3,7,14,30])days.add(new Option(day+'日間',String(day)))
+      const dayLabel=item('label','待つ期間')
+      dayLabel.append(days)
+      join.append(methodLabel,dayLabel,item('button','キャンセル待ちに登録'))
+      join.onsubmit=guarded(async()=>draw(await request('/waitlist','PUT',{method:method.value,days:Number(days.value)}) as NoticeSettings))
+      root.append(join)
+    }
+  }
+  try{draw(await request('/notices') as NoticeSettings)}
+  catch{status.textContent='通知の設定を確認できませんでした。'}
 }
 
 type Slot = {id:string;label:string;starts_at:string;remaining:number}
@@ -119,9 +178,70 @@ function guarded(fn:()=>Promise<void>) {
   }
 }
 async function openCustomer() {
-  await accountRequest('/login','POST',{connection,id_token:liff.getIDToken()})
+  await accountRequest('/login','POST',{connection,id_token:liff.getIDToken(),source})
   await drawAccount()
+  await showWorkflowForm(accountRequest)
   document.querySelector<HTMLElement>('#customer')!.hidden=false
+}
+type FormField={key:string;label:string;kind:'text'|'long'|'choice'|'checkbox';required:boolean;options:string[]}
+type PublishedForm={id:string;revision:number;title:string;description:string;submitted:boolean;fields:FormField[]}
+async function showWorkflowForm(request:(path:string,method?:string,body?:unknown)=>Promise<unknown>){
+  const region=document.querySelector<HTMLElement>('#workflow-form')!
+  region.hidden=true
+  region.replaceChildren()
+  let page:PublishedForm|null
+  try{page=await request('/form'+(formId?'?form='+encodeURIComponent(formId):'')) as PublishedForm|null}
+  catch{status.textContent='回答フォームを読み込めませんでした。LINE内で開き直すと再試行できます。';return}
+  if(!page){
+    if(formId){region.append(item('p','この回答フォームは現在公開されていません。'));region.hidden=false}
+    return
+  }
+  const published=page
+  region.append(item('h2',page.title))
+  if(page.description)region.append(item('p',page.description))
+  region.hidden=false
+  if(page.submitted){region.append(item('p','回答を送信済みです。'));return}
+  const application=item('form')
+  for(const field of page.fields){
+    const label=item('label',field.label+(field.required?'（必須）':''))
+    let control:HTMLInputElement|HTMLTextAreaElement|HTMLSelectElement
+    if(field.kind==='choice'){
+      const select=item('select')
+      select.add(new Option('選択してください',''))
+      for(const option of field.options)select.add(new Option(option,option))
+      control=select
+    }else if(field.kind==='long'){
+      const input=item('textarea')
+      input.maxLength=1000
+      control=input
+    }else{
+      const input=item('input')
+      input.type=field.kind==='checkbox'?'checkbox':'text'
+      input.value=field.kind==='checkbox'?'yes':''
+      input.maxLength=200
+      control=input
+    }
+    control.name=field.key
+    control.required=field.required
+    label.append(control)
+    application.append(label)
+  }
+  const submit=item('button','回答を送信')
+  const result=item('p')
+  result.setAttribute('role','status')
+  application.append(submit,result)
+  region.append(application)
+  application.onsubmit=guarded(async()=>{
+    const answers=Object.fromEntries(new FormData(application))
+    try{
+      await request('/form','POST',{form:published.id,revision:published.revision,answers})
+      const success=item('p','回答を送信しました。')
+      success.setAttribute('role','status')
+      application.replaceWith(success)
+    }catch(error){
+      result.textContent=error instanceof Error?error.message:'回答を送信できませんでした。'
+    }
+  })
 }
 async function drawAccount(){
   const account:Account=await accountRequest('/account')

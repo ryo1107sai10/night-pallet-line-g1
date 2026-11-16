@@ -6,6 +6,8 @@ import { channel, LineAPI, userKey, type Channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { applyTagRules } from './customer-tags.js'
 import { requireFeature } from './store-features.js'
+import { recordSource } from './sources.js'
+import { rememberContact } from './rich-menus.js'
 
 export const consentVersion = 'customer-line-v1'
 export const customerFields = 'id,channel_id,display_name,memo,assigned_to,verified_20_at,tags,active_chat,service_consent,marketing_consent,all_stop,marketing_stop,last_reply_at,verified_at,revision'
@@ -22,7 +24,7 @@ export type Preferences = z.infer<typeof preferenceInput>
 export const profileInput = z.strictObject({revision,display_name:z.string().trim().max(100),memo:z.string().max(1000),
   assigned_to:z.uuid().nullable(),verified20:z.boolean(),active_chat:z.boolean(),
   tags:z.array(text(80)).max(30).optional(),reason:text(200)})
-export const lineCustomerLogin = z.strictObject({connection:z.uuid(),id_token:z.string().min(20).max(12000)})
+export const lineCustomerLogin = z.strictObject({connection:z.uuid(),id_token:z.string().min(20).max(12000),source:z.uuid().optional()})
 export const selfPreferenceInput = z.strictObject({preferences:preferenceInput,version:z.literal(consentVersion),revision})
 const safeSession = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 
@@ -141,6 +143,9 @@ export async function openCustomerSession(pool:pg.Pool,cfg:Config,line:LineAPI,i
     const current=await channel(db,c.id)
     if (current.generation!==c.generation || !current.checks.provider_verified || !current.checks.login_published) throw conflict()
     const record=await ensureCustomer(db,cfg,c,user,true)
+    const identity={...record,purpose:'customer' as const,subject:record.id}
+    await recordSource(db,identity,p.source)
+    await rememberContact(db,cfg,current,user,identity)
     await db.query(`INSERT INTO customer_session(token_hash,tenant_id,store_id,channel_id,customer_id,generation,expires_at)
       VALUES($1,$2,$3,$4,$5,$6,now()+interval '30 minutes')`,[digest(raw),record.tenant_id,record.store_id,c.id,record.id,c.generation])
     await db.query('DELETE FROM customer_session WHERE expires_at<now() AND channel_id=$1',[c.id])

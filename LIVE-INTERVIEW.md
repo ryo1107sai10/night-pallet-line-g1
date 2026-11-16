@@ -15,7 +15,7 @@
 2. Google CloudでGoogle Calendar APIを有効にします。OAuthのウェブアプリケーション用クライアントに、`PUBLIC_ORIGIN` の末尾に `/interview/google-return.html` を付けたURLを「承認済みのリダイレクトURI」として登録します。外部アプリをテストモードで使う場合は、連携に使うGoogleアカウントをテストユーザーに追加します。クライアントID・シークレットはサーバーの `GOOGLE_CALENDAR_CLIENT_ID`・`GOOGLE_CALENDAR_CLIENT_SECRET` に設定します。
 3. Night PRO LINEの「店舗で使う機能」で、検証する店舗の面談予約とGoogleカレンダーの照合を有効にします。「面談枠の管理 → Googleカレンダー連携」で接続します。メインカレンダーなら `primary`、共有・検証専用カレンダーならそのカレンダーIDを指定します。Googleの画面で空き状況の参照を許可し、店舗の管理画面に「連携中」と表示されることを確認します。
 
-Google連携は空き状況を参照します。確定した面談はNight PRO LINEに保存されます。Google Calendarに予約を書き込む機能は含まれていません。
+Google連携は既定で空き状況を参照します。確定した面談はNight PRO LINEに保存されます。Googleにも登録する試験では「Googleカレンダーへの面談登録」を有効にし、書き込みを許可して再連携します。担当者別の照合を試す場合は、担当者ごとの共有カレンダーと担当者付きの面談枠を用意します。
 
 ## テスト用のLINE公式アカウントを接続する
 
@@ -36,5 +36,12 @@ Google連携は空き状況を参照します。確定した面談はNight PRO L
 | 21:00 | LINE内で空き枠を選択した後、確定前にGoogleに21:00〜21:30を「予定あり」で登録 | 確定操作が拒否され、空き枠を選び直せる |
 
 21:00の確認には別のテスト利用者を使うか、19:00のテスト予約を先に取り消します。Googleの予定と枠が端で接する場合は、そのほかの制約がなければ予約できます。検証後はテスト予約を取り消し、試験用のGoogle予定と受付停止時間を削除し、公開したテスト枠を非公開にします。検証日、店舗、公式アカウント、予約IDと各ケースの結果を記録します。
+
+## 追加機能の検証
+
+1. 「店舗業務 → 採用」でフォームを公開し、発行した経路のQRコードから実機で本人確認・回答します。回答が応募台帳に反映され、同じ経路に1人として集計されることを確認します。
+2. LINEのメニュー切り替えを試すときは、検証用公式LINEに通常用と面談確定用のメニューをMessaging APIで用意し、店舗業務でIDを照合します。送信と切り替えを行う検証環境だけで `AUTO_SEND_ENABLED=true` に設定し、対象スタッフ・テスト利用者・配信先を確認します。
+3. 実機で面談案内への同意を選び、空き枠を対面で確定します。端末でメニューの切り替えと案内受信を確認し、予定登録を有効にした場合はGoogleへの反映も確認します。予約を取り消して前日の通知が停止し、Googleの予定が削除されることを確認します。
+4. 配信は検証用の顧客のみに対象を絞り、承認前の人数と除外理由を確認します。承認後、送信前に1人が同意を撤回した場合に送信されないことを確認します。兼用公式LINEの受信は受付保留に入り、用途の振り分け後にのみ該当の受信箱に表示されることを確認します。
 
 [LIFFアプリの設定](https://developers.line.biz/ja/docs/liff/registering-liff-apps/) · [リッチメニュー](https://developers.line.biz/ja/docs/messaging-api/using-rich-menus/) · [Google OAuth設定](https://developers.google.com/identity/protocols/oauth2/web-server) · [Google Calendar FreeBusy API](https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query)

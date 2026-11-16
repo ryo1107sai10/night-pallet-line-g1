@@ -6,6 +6,11 @@ const roles = { admin:'法人管理者',manager:'店舗責任者',sales:'営業�
 const featureNames = {
   tags_enabled:'顧客タグ', visits_enabled:'来店予約',
   interviews_enabled:'面談予約', google_calendar_enabled:'面談時にGoogleカレンダーを照合',
+  forms_enabled:'回答フォーム', recruitment_enabled:'応募・選考管理', sources_enabled:'流入分析',
+  campaigns_enabled:'絞り込み配信',
+  rich_menus_enabled:'リッチメニュー切り替え', reminders_enabled:'面談リマインド', waitlist_enabled:'面談のキャンセル待ち',
+  inbox_enabled:'LINE受信箱',
+  interviewers_enabled:'担当者別の面談枠', google_write_enabled:'Googleカレンダーへの面談登録',
 }
 const sendStatus = { queued:'待機中',submitting:'LINEへ提出中',accepted:'LINE受付済',failed:'送信失敗',unknown:'結果不明',cancelled:'取消' }
 const checks = {
@@ -315,6 +320,7 @@ async function render() {
   history.replaceState(null,'',url)
   $('#manage-interviews').href = '/interview/staff.html'+(store ? '?store='+encodeURIComponent(store.id) : '')
   $('#manage-operations').href = '/operations/'+(store ? '?store='+encodeURIComponent(store.id) : '')
+  $('#manage-workflows').href = '/workflows/'+(store ? '?store='+encodeURIComponent(store.id) : '')
   const layout = el('div',null,'controls')
   const main = el('div')
   const side = el('div')
