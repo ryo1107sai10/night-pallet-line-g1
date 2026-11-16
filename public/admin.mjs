@@ -182,7 +182,7 @@ function lineRegistration(base) {
     for (const optional of ['existing_webhook','existing_tools']) if (!data[optional]) delete data[optional]
     const created = await api(base+'/connections','POST',data,key)
     channelId = created.id
-    if (location.hash==='#line-setup') history.replaceState(null,'','#line-connection')
+    if (['#line-setup','#line-register'].includes(location.hash)) history.replaceState(null,'','#line-connection')
     await refresh()
     feedback('接続情報を登録しました。WebhookとLIFFの設定に進んでください。')
   })
@@ -228,6 +228,7 @@ async function refresh() {
   session = await api('/session')
   $('#auth').hidden = true
   $('#workspace').hidden = false
+  $('#manage-line').hidden = session.actor.role!=='admin'
   $('#account').textContent = roles[session.actor.role] + ' · ' + session.actor.email
   $('#tenant-name').textContent = session.tenant.legal_name
   if (!session.stores.some(store=>store.id===storeId)) storeId = session.stores[0]?.id
@@ -379,7 +380,6 @@ function connectedPanel(base, c, testers) {
 
 function moduleConnect(base, configured) {
   const box = el('section',null,'line-setting')
-  box.id = 'line-setup'
   box.append(el('h3','公式LINEのかんたん連携'))
   if (!configured) {
     const start = el('button','公式LINEを連携')
@@ -459,6 +459,127 @@ function connectionSetting(label,value,linkLabel,href) {
   return row
 }
 
+const onboardingStages = {
+  unknown:'状況未登録',uncreated:'未開設',waiting:'招待待ち',received:'招待を受領',
+  setting:'設定中',verified:'送受信確認済み',
+}
+const onboardingModes = {
+  create:'公式LINEがまだない',
+  managed:'公式LINEがあり、管理権限がある',
+  invite:'公式LINEがあり、店舗からの招待が必要',
+}
+
+function onboardingPatch(base,detail,action,message) {
+  return change(base+'/line-onboarding','PATCH',{...action,revision:detail.revision},message)
+}
+
+function onboardingPanel(stores,selected,detail,connections) {
+  const panel = details('公式LINEを設定する')
+  panel.id = 'line-setup'
+  panel.className = 'panel line-onboarding'
+  panel.open = location.hash==='#line-setup' || $('#line-setup.line-onboarding')?.open || false
+  if (!selected) {
+    panel.append(el('p','管理画面で店舗を登録すると、公式LINEの初期設定を始められます。'))
+    return panel
+  }
+  const next = el('section',null,'onboarding-next')
+  const base = '/stores/'+selected.id
+  const destinations = lineSetupLinks()
+  const item = stores.find(store=>store.id===selected.id)
+  const headline = el('div',null,'heading')
+  headline.append(el('h3',selected.name),status(onboardingStages[item.stage],item.stage==='verified'))
+  next.append(headline)
+  const actions = el('div',null,'actions')
+  const mode = formOf([field('公式LINEの状況','mode',{choices:{'':'選択してください',...onboardingModes},value:detail.mode??''})],
+    '対応方法を保存',data=>onboardingPatch(base,detail,{action:'set-mode',mode:data.mode},'この店舗の対応方法を保存しました。'))
+  if (item.stage==='unknown') next.append(mode)
+  else {
+    if (item.stage==='uncreated') {
+      next.append(el('p','LINEの開設が済んだら、管理権限を確認して接続情報の登録へ進んでください。'))
+      actions.append(lineLink('LINE公式の開設画面を開く ↗',destinations.create),
+        button('開設・管理権限を確認した',()=>onboardingPatch(base,detail,{action:'set-mode',mode:'managed'},'接続情報の登録へ進んでください。')))
+    } else if (detail.mode==='invite') {
+      next.append(el('p','店舗に案内リンクを渡し、LINE公式側で管理者として招待してもらいます。'))
+      if (detail.guide) {
+        const copy = el('div',null,'actions onboarding-copy')
+        const input = el('input')
+        input.value = detail.guide.url
+        input.readOnly = true
+        input.setAttribute('aria-label','店舗に渡す案内リンク')
+        copy.append(input,button('案内リンクをコピー',async()=>{
+          try {
+            await navigator.clipboard.writeText(input.value)
+            feedback('案内リンクをコピーしました。店舗へ渡してください。')
+          } catch {
+            input.select()
+            feedback('表示したリンクをコピーして店舗へ渡してください。')
+          }
+        }))
+        next.append(copy,el('p','店舗向け案内の有効期限 '+date(detail.guide.expires_at),'muted'))
+      }
+      if (detail.invitation) {
+        actions.append(lineLink('店舗から届いた招待URLを開く ↗',detail.invitation))
+      } else if (detail.invitation_received_at) {
+        next.append(el('p','招待URLの受け取りから24時間が過ぎました。店舗へ新しい招待URLを依頼してください。','muted'))
+      }
+      const issue = detail.guide ? details('案内リンクを再発行する',
+        el('p','前の案内リンクが失効します。届いている招待URLがあれば、店舗に再発行を依頼してください。'),
+        button('再発行する',()=>onboardingPatch(base,detail,{action:'issue-guide'},'新しい案内リンクを発行しました。'))) :
+        button('店舗向けの案内リンクを発行',()=>onboardingPatch(base,detail,{action:'issue-guide'},'店舗向けの案内リンクを発行しました。'))
+      actions.append(issue,button('進捗を更新',refresh))
+    } else {
+      if (item.next_connection) actions.append(onboardingLink(item.stage==='verified'?'接続の詳細を開く':'接続確認へ進む',item,'line-connection'))
+      actions.append(lineLink('LINE公式の管理画面を開く ↗',destinations.manager),
+        onboardingLink('接続情報を登録する',item,'line-register'))
+    }
+    next.append(actions)
+    if (detail.mode==='invite') {
+      const confirmFields = connections.length ? [field('確認した公式LINE','connection',{
+        choices:{'':'このあと新しく登録する',...Object.fromEntries(connections.map(c=>[c.id,c.label]))},
+        required:false,
+      })] : []
+      const confirm = formOf(confirmFields,'管理権限を確認した',data=>onboardingPatch(base,detail,
+        {action:'confirm-access',connection:data.connection||null},'管理権限の確認を記録しました。'))
+      next.append(details('LINE側で管理権限を確認できた方',confirm))
+    }
+    next.append(details('対応方法を変更',mode))
+  }
+  panel.append(next)
+  const list = el('ul',null,'onboarding-list')
+  for (const store of stores) {
+    const row = el('li',null,'record')
+    const name = el('div',null,'onboarding-store')
+    name.append(el('strong',store.name),status(onboardingStages[store.stage],store.stage==='verified'))
+    if (store.connections>1) name.append(el('span',' '+store.verified+'/'+store.connections+'件確認済み','muted'))
+    const labels = {unknown:'手順を選ぶ',uncreated:'開設を進める',waiting:'招待の案内を開く',
+      received:'届いた招待を確認',setting:store.next_connection?'接続確認へ進む':'接続情報を登録する',
+      verified:'接続の詳細を開く'}
+    const step = store.stage==='setting' ? (store.next_connection?'line-connection':'line-register') :
+      store.stage==='verified' ? 'line-connection' : 'line-setup'
+    row.append(name,onboardingLink(labels[store.stage],store,step))
+    list.append(row)
+  }
+  panel.append(el('h3','店舗ごとの進捗'),list)
+  return panel
+}
+
+function onboardingLink(label,store,anchor) {
+  const link = el('a',label,'studio-link')
+  const params = new URLSearchParams({store:store.id})
+  if (anchor==='line-connection' && store.next_connection) params.set('line_channel',store.next_connection)
+  link.href = '/?'+params+'#'+anchor
+  return link
+}
+
+function revealLineAnchor() {
+  if (!['#line-setup','#line-register','#line-connection'].includes(location.hash)) return
+  const target = $(location.hash)
+  if (target instanceof HTMLDetailsElement) target.open = true
+  target?.scrollIntoView()
+}
+
+window.addEventListener('hashchange',revealLineAnchor)
+
 async function render() {
   const generation = ++view
   const admin = session.actor.role==='admin'
@@ -466,15 +587,21 @@ async function render() {
   const store = session.stores.find(item=>item.id===storeId)
   const base = store ? '/stores/'+store.id : ''
   const staffPromise = admin ? api('/staff') : Promise.resolve([])
+  const onboardingList = admin ? api('/line-onboarding') : Promise.resolve([])
+  const onboardingItem = admin && store ? api(base+'/line-onboarding') : Promise.resolve(null)
   const connectionPromise = manage && store ? api(base+'/connections') : Promise.resolve([])
   const modulePromise = manage && store ? api(base+'/line-module') : Promise.resolve(null)
   const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
-  const [staff,connections,features,module] = await Promise.all([staffPromise,connectionPromise,featurePromise,modulePromise])
+  const [staff,connections,features,module,onboarding,detail] = await Promise.all([
+    staffPromise,connectionPromise,featurePromise,modulePromise,onboardingList,onboardingItem,
+  ])
   if (generation!==view) return
   const url = new URL(location.href)
   const linked = connections.find(item=>item.id===url.searchParams.get('line_connected')&&item.module_channel_id)
   url.searchParams.delete('line_connected')
-  if (linked) channelId = linked.id
+  const requestedChannel = connections.find(item=>item.id===url.searchParams.get('line_channel'))
+  url.searchParams.delete('line_channel')
+  if (linked || requestedChannel) channelId = (linked ?? requestedChannel).id
   if (!connections.some(item=>item.id===channelId)) channelId = connections[0]?.id
   const current = connections.find(item=>item.id===channelId)
   const testers = current ? await api(base+'/connections/'+current.id+'/tests') : []
@@ -544,7 +671,12 @@ async function render() {
     })))
   main.append(storePanel)
   if (manage && store) {
-    const line = panel('LINE接続',moduleConnect(base,module.configured))
+    const line = panel('LINE接続')
+    if (module.configured || !admin) {
+      const connect = moduleConnect(base,module.configured)
+      if (!admin) connect.id = 'line-setup'
+      line.append(connect)
+    }
     if (current) {
       const picker = field('公式アカウント','channel',{
         choices:Object.fromEntries(connections.map(item=>[item.id,item.label])),value:current.id,
@@ -555,8 +687,10 @@ async function render() {
       }
       line.append(picker,connectedPanel(base,current,testers))
     } else line.append(el('p','この店舗に公式アカウントが登録されていません。'))
-    const registration = details('手動で設定する',lineRegistration(base))
-    registration.open = !module.configured && (!current || location.hash==='#line-setup')
+    const registration = details('公式LINEの接続情報を登録',lineRegistration(base))
+    registration.id = 'line-register'
+    registration.open = location.hash==='#line-register' ||
+      !admin && !module.configured && (!current || location.hash==='#line-setup')
     line.append(registration)
     main.append(line)
   }
@@ -564,9 +698,9 @@ async function render() {
     status(session.tenant.stopped?'配信停止中':'法人停止なし',false,session.tenant.stopped),
     stopForm('/tenant/stop',session.tenant,'法人の配信'),auditPanel('/tenant/audit')))
   layout.append(main,side)
-  content.replaceChildren(layout)
+  content.replaceChildren(...(admin ? [onboardingPanel(onboarding,store,detail,connections),layout] : [layout]))
   if (linked) feedback(linked.label+'を連携しました。')
-  if (['#line-setup','#line-connection'].includes(location.hash)) $(location.hash)?.scrollIntoView()
+  revealLineAnchor()
 }
 
 $('#show-activate').onclick = () => {

@@ -20,6 +20,7 @@ export function lineSetupLinks({provider_id, messaging_id, login_id, liff_id} = 
   const liffPage = loginPage ? loginPage + '/liff' : ''
   return {
     manager: 'https://manager.line.biz/',
+    create: 'https://entry.line.biz/form/entry/unverified',
     provider: provider ? providerPage + '/settings' : consoleHome,
     messagingBasics: messagingPage || providerPage,
     messagingSettings: messagingPage ? messagingPage + '/messaging-api' : providerPage,

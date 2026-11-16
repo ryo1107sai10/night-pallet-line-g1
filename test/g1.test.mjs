@@ -1243,14 +1243,90 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     assert.equal(modulePushes.length,1)
     const confirmed=expect(await post(path+'/module-delivery',admin,{revision:sent.revision}),200)
     assert.equal(confirmed.status,'connected')
+    const overview=async()=>expect(await request('/line-onboarding',{cookie:admin}),200).find(item=>item.id===store)
+    assert.equal((await overview()).stage,'verified')
+    const setup=basePath+'/line-onboarding'
+    const ask=expect(await patch(setup,admin,{action:'set-mode',mode:'invite',revision:0}),200)
+    const guide=expect(await patch(setup,admin,{action:'issue-guide',revision:ask.revision}),200)
+    const guideToken=new URL(guide.guide.url).hash.slice(1)
+    expect(await patch(setup,admin,{action:'confirm-access',connection:done.id,revision:guide.revision}),200)
+    const guideStatus=async()=>expect(await post('/line-onboarding/guide',null,{token:guideToken}),200).status
+    assert.equal(await guideStatus(),'verified')
     assert.equal((await moduleWeb(moduleBot,[{
       webhookEventId:randomUUID(),type:'module',mode:'active',timestamp:Date.now(),
       module:{type:'detached',botId:moduleBot},
     }])).status,200)
     assert.equal((await summary()).module_status,'detached')
     assert.equal((await summary()).checks.delivery_confirmed,undefined)
+    assert.equal((await overview()).stage,'setting')
+    assert.equal(await guideStatus(),'setting')
   } finally {
     delete cfg.lineModule
     botInfoUnavailable=false
   }
+})
+
+test('法人マスターだけが店舗別のLINE初期設定を管理し、店舗は案内リンクでLINEの招待を渡せる',async()=>{
+  const name='LINE初期設定テスト店'
+  const store=expect(await post('/stores',admin,storeData(name),idempotency()),201).id
+  const endpoint='/stores/'+store+'/line-onboarding'
+  const list=async()=>expect(await request('/line-onboarding',{cookie:admin}),200).find(item=>item.id===store)
+  const lookup=async token=>post('/line-onboarding/guide',null,{token})
+  const invite=(token,invitation,headers)=>post('/line-onboarding/guide/submit',null,{token,invitation},headers)
+  const guideToken=detail=>new URL(detail.guide.url).hash.slice(1)
+  const authURL='https://manager.line.biz/invitation/testTenantExampleInvite'
+  const option=(mode,revision)=>({action:'set-mode',mode,revision})
+  assert.equal((await list()).stage,'unknown')
+  expect(await request('/line-onboarding'),401)
+  expect(await request(endpoint,{cookie:other}),404)
+  assert.ok(!expect(await request('/line-onboarding',{cookie:other}),200).some(item=>item.id===store))
+  const memberEmail='onboarding-manager@example.test'
+  const memberInvite=expect(await post('/staff/invites',admin,{email:memberEmail,role:'manager',stores:[store]},idempotency()),201)
+  const member=await activate(memberInvite,memberEmail,'alpha')
+  expect(await request('/line-onboarding',{cookie:member}),403)
+  expect(await request(endpoint,{cookie:member}),403)
+  expect(await patch(endpoint,member,option('invite',0)),403)
+  const creating=expect(await patch(endpoint,admin,option('create',0)),200)
+  assert.equal((await list()).stage,'uncreated')
+  const waiting=expect(await patch(endpoint,admin,option('invite',creating.revision)),200)
+  const issued=expect(await patch(endpoint,admin,{action:'issue-guide',revision:waiting.revision}),200)
+  const raw=guideToken(issued)
+  assert.equal(new URL(issued.guide.url).pathname,'/line-setup/invite')
+  expect(await patch(endpoint,admin,{action:'issue-guide',revision:waiting.revision}),409)
+  const landing=await send('/line-setup/invite')
+  assert.equal(landing.status,200)
+  assert.equal(landing.headers.get('x-robots-tag'),'noindex, nofollow')
+  assert.match(await landing.text(),/公式LINEの管理者招待/)
+  assert.deepEqual(expect(await lookup(raw),200),{store:name,company:'甲法人',status:'waiting'})
+  expect(await lookup(randomBytes(32).toString('base64url')),404)
+  expect(await invite(raw,authURL,{Origin:'https://other-origin.test'}),403)
+  expect(await invite(raw,'https://manager.line.biz.example/invitation/testTenantExampleInvite'),400)
+  expect(await invite(raw,'https://manager.line.biz/not-an-invitation'),400)
+  assert.deepEqual(expect(await invite(raw,authURL),200),{store:name,company:'甲法人',status:'received'})
+  expect(await invite(raw,'https://manager.line.biz/invitation/differentValidToken'),200)
+  const receipt=expect(await request(endpoint,{cookie:admin}),200)
+  assert.equal(receipt.invitation,authURL)
+  assert.equal((await list()).stage,'received')
+  assert.ok(!JSON.stringify(await list()).includes(authURL))
+  const persisted=await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    return (await db.query('SELECT guide_box,invitation_box FROM line_onboarding WHERE store_id=$1',[store])).rows[0]
+  })
+  assert.notEqual(persisted.guide_box,raw)
+  assert.notEqual(persisted.invitation_box,authURL)
+  const renewed=expect(await patch(endpoint,admin,{action:'issue-guide',revision:receipt.revision}),200)
+  expect(await lookup(raw),404)
+  const active=guideToken(renewed)
+  expect(await invite(active,authURL),200)
+  const updated=expect(await request(endpoint,{cookie:admin}),200)
+  expect(await patch(endpoint,admin,{action:'confirm-access',connection:c,revision:updated.revision}),404)
+  const managed=expect(await patch(endpoint,admin,{action:'confirm-access',connection:null,revision:updated.revision}),200)
+  assert.equal(managed.invitation,null)
+  assert.equal((await list()).stage,'setting')
+  assert.equal(expect(await lookup(active),200).status,'setting')
+  await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    await db.query("UPDATE line_onboarding SET guide_expires_at=now()-interval '1 minute' WHERE store_id=$1",[store])
+  })
+  expect(await lookup(active),404)
 })

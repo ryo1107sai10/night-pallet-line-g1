@@ -47,10 +47,11 @@ export type Channel = Route & {
   credentials: string | null; checks: Checks; stopped: boolean; revision: number; generation: number;
   basic_id:string|null; module_status:'attached'|'active'|'standby'|'detached'|'suspended'|null; module_status_at:Date|null;
 }
-export const channelTestReady = (c:Channel) => !!(c.checks.ownership_verified && c.checks.token_verified && c.checks.webhook_verified &&
+type ConnectionState = Pick<Channel,'module_channel_id'|'module_status'|'checks'>
+export const channelTestReady = (c:ConnectionState) => !!(c.checks.ownership_verified && c.checks.token_verified && c.checks.webhook_verified &&
   (c.module_channel_id ? c.module_status==='active' :
     c.checks.provider_verified && c.checks.redelivery_enabled && c.checks.auto_reply_checked && c.checks.login_published && c.checks.non_developer))
-export const messagingReady = (c:Channel) => channelTestReady(c) && c.checks.delivery_confirmed===true
+export const messagingReady = (c:ConnectionState) => channelTestReady(c) && c.checks.delivery_confirmed===true
 export const channelReady = (c:Channel) => !!c.liff_id && messagingReady(c)
 
 export async function channel(db: DB, id: string) {
@@ -97,27 +98,41 @@ export async function replaceCredentials(db: DB, cfg: Config, actor: Actor, c: C
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.rotate_credentials',c.id,reason)
 }
 
-export async function evidence(db: DB, c: Channel) {
-  const { rows: [result] } = await db.query(`SELECT
-    EXISTS(SELECT 1 FROM tester WHERE channel_id=$1 AND generation=$2 AND verified_at IS NOT NULL) AS liff_verified,
+type Evidence = {liff_verified:boolean;receive_verified:boolean;send_accepted:boolean}
+const evidenceColumns = `EXISTS(SELECT 1 FROM tester WHERE channel_id=c.id AND generation=c.generation AND verified_at IS NOT NULL) AS liff_verified,
     EXISTS(SELECT 1 FROM webhook_event e JOIN tester t ON e.channel_id=t.channel_id AND e.user_key=t.user_key
-      WHERE e.channel_id=$1 AND e.generation=$2 AND e.kind IN ('follow','message')
-        AND t.generation=$2 AND t.verified_at IS NOT NULL
+      WHERE e.channel_id=c.id AND e.generation=c.generation AND e.kind IN ('follow','message')
+        AND t.generation=c.generation AND t.verified_at IS NOT NULL
         AND e.received_at BETWEEN t.verified_at AND t.expires_at
         AND e.occurred_at BETWEEN t.verified_at AND t.expires_at) AS receive_verified,
-    EXISTS(SELECT 1 FROM test_send WHERE channel_id=$1 AND generation=$2 AND status='accepted' AND scenario_id IS NULL) AS send_accepted`,
-    [c.id,c.generation])
-  return result as { liff_verified: boolean; receive_verified: boolean; send_accepted: boolean }
+    EXISTS(SELECT 1 FROM test_send WHERE channel_id=c.id AND generation=c.generation AND status='accepted' AND scenario_id IS NULL) AS send_accepted`
+
+export async function evidence(db:DB,c:Channel) {
+  const {rows:[result]}=await db.query<Evidence>(`SELECT ${evidenceColumns}
+    FROM (VALUES($1::uuid,$2::integer)) AS c(id,generation)`,[c.id,c.generation])
+  return result
+}
+
+function verifiedConnection(c:ConnectionState,checks:Checks & Evidence) {
+  if (c.module_channel_id) return messagingReady(c) && checks.receive_verified && checks.send_accepted
+  return ['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked','login_published','non_developer',
+    'token_verified','webhook_verified','liff_verified','receive_verified','send_accepted','delivery_confirmed']
+    .every(key=>checks[key as keyof typeof checks]===true)
+}
+
+export async function connectionProgress(db:DB,connection?:string) {
+  const {rows}=await db.query<ConnectionState & Evidence & {id:string;store_id:string}>(`SELECT
+    c.id,c.store_id,c.checks,c.module_status,r.module_channel_id,${evidenceColumns}
+    FROM channel c JOIN channel_route r ON r.id=c.id
+    WHERE ($1::uuid IS NULL OR c.id=$1) ORDER BY c.label,c.id`,[connection ?? null])
+  return rows.map(({id,store_id,...state})=>({id,store_id,verified:verifiedConnection(state,{...state.checks,...state})}))
 }
 
 export async function summary(db: DB, cfg: Config, c: Channel) {
   const { credentials, module_bot_id, ...safe } = c
   const checks = { ...c.checks, ...await evidence(db,c) }
   if (c.module_channel_id) checks.liff_verified = false
-  const complete = c.module_channel_id ? messagingReady(c) && checks.receive_verified && checks.send_accepted :
-    ['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked',
-    'login_published','non_developer','token_verified','webhook_verified','liff_verified','receive_verified',
-    'send_accepted','delivery_confirmed'].every(check => checks[check as keyof typeof checks] === true)
+  const complete = verifiedConnection(c,checks)
   return { ...safe, checks, status: complete ? 'connected' : 'pending',
     webhook_url: cfg.origin + (c.module_channel_id ? moduleWebhookPath : '/api/v1/webhooks/line/' + c.id),
     liff_url: c.liff_id ? cfg.origin + '/liff/' + c.id : null,

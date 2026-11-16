@@ -14,6 +14,8 @@ import {
 } from './line.js'
 import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, moduleReturnPath,
   moduleStart, rememberModuleBot, requireModule} from './line-module.js'
+import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboarding, markOnboardingRegistered,
+  onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
 import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, openCustomerSession, authenticateCustomer,
@@ -86,6 +88,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.use('/workflows',express.static(here('../public/workflows')))
   app.get(['/api/health','/healthz'],async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
+  app.get(guidePath,(_req,res)=>res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/line-invite.html')))
   app.get(moduleReturnPath,(_req,res)=>res.sendFile(here('../public/line-module-return.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
   app.get('/book/:connection',(req,res)=>{
@@ -383,6 +386,27 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     }
     res.set('Set-Cookie',sessionCookie(cfg)).json({ signed_out:true })
   })
+  api.get('/line-onboarding',staff(async(db,actor)=>{
+    requireAdmin(actor)
+    return listOnboarding(db,actor)
+  }))
+  const onboarding='/stores/:store/line-onboarding'
+  api.get(onboarding,inStore(async(db,actor,req)=>{
+    requireAdmin(actor)
+    return onboardingDetails(db,cfg,idOf(req,'store'))
+  }))
+  api.patch(onboarding,inStore(async(db,actor,req)=>{
+    requireAdmin(actor)
+    return changeOnboarding(db,cfg,actor,idOf(req,'store'),onboardingChange.parse(req.body))
+  }))
+  api.post('/line-onboarding/guide',async(req,res)=>{
+    const {token}=guideLookup.parse(req.body)
+    res.json(await tx(pool,db=>readGuide(db,token)))
+  })
+  api.post('/line-onboarding/guide/submit',async(req,res)=>{
+    const {token,invitation}=guideSubmission.parse(req.body)
+    res.json(await tx(pool,db=>submitGuide(db,cfg,token,invitation)))
+  })
   api.get('/session',staff(async (db,actor)=>{
     const { rows:[tenant] } = await db.query(`SELECT id,slug,legal_name,stopped,revision FROM tenant WHERE id=$1`,[actor.tenant_id])
     return { actor:{ id:actor.id,email:actor.email,role:actor.role }, tenant, stores:await storeList(db,actor) }
@@ -557,7 +581,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       return
     }
     const bot=await line.modules.bot(requireModule(cfg),pending.bot_user_id!)
-    res.json(await tx(pool,async db=>finishModuleLink(db,cfg,await authorized(db),store,session!,data.state,bot)))
+    res.json(await tx(pool,async db=>{
+      const linked=await finishModuleLink(db,cfg,await authorized(db),store,session!,data.state,bot)
+      await markOnboardingRegistered(db,store,linked.id)
+      return linked
+    }))
   })
   api.get(channels,inStore(async(db,_actor,req)=>{
     const { rows } = await db.query<{id:string}>('SELECT id FROM channel WHERE store_id=$1 ORDER BY label',[idOf(req,'store')])
@@ -569,7 +597,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     return once(db,cfg,actor,'line.register',keyOf(req),{store,data},async()=>{
       const botUserId = data.bot_user_id ?? await line.botIdForChannel(data.messaging_id,data)
       if (!botUserId) throw new Fault(422,'LINE_CHANNEL_TOKEN','Messaging APIのチャネルIDと、同じチャネルで発行したアクセストークンを確認してください。')
-      return createChannel(db,cfg,actor,store,{...data,bot_user_id:botUserId})
+      const created=await createChannel(db,cfg,actor,store,{...data,bot_user_id:botUserId})
+      await markOnboardingRegistered(db,store,created.id)
+      return created
     })
   },true,201))
   api.patch(connection+'/credentials',withChannel(async(db,actor,req,c)=>{
