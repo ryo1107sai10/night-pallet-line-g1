@@ -195,6 +195,11 @@ form.onsubmit=async event=>{
 }
 try{
   const session=await api('/session')
+  if(session.actor.agency){
+    $('#back-to-operations').hidden=true
+    $('#recruitment-operations').textContent='採用LINEの受信箱・通知履歴'
+  }
+  if(session.actor.platform)(await import('/static/tour.mjs')).mountTour('interview')
   if(!['admin','manager','recruiter'].includes(session.actor.role))throw new Error('採用担当の権限が必要です。')
   stores=session.stores
   $('#stores').append(...stores.map(store=>new Option(store.name,store.id)))

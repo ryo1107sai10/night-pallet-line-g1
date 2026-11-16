@@ -12,7 +12,7 @@ export const looseId = z.string().regex(/^[0-9]{5,20}$/)
 export const userId = z.string().regex(/^U[0-9a-f]{32}$/i)
 export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 export type DB = PoolClient
-export type Actor = { id: string; tenant_id: string; role: string; email: string; platform?: boolean }
+export type Actor = { id: string; tenant_id: string; role: string; email: string; platform?: boolean; agency?: boolean }
 export type LineModuleConfig = { id: string; secret: string; botHeader: string }
 export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; lineModule?: LineModuleConfig; publicBookingConnection?: string }
 

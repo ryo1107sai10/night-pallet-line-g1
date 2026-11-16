@@ -1,5 +1,7 @@
-import { authenticate } from './auth.js'
-import { type Actor, type DB, audit, missing, newId, scope } from './core.js'
+import { authenticate, createInvite } from './auth.js'
+import { type Actor, type Config, type DB, Fault, audit, conflict, forbidden, missing, newId, once, scope } from './core.js'
+
+import { lockDispatch } from './dispatch-lock.js'
 
 export const platformWorkspace = '/platform/tenants'
 
@@ -56,4 +58,53 @@ export async function enterPlatformTenant(db:DB,credential:string|undefined,tena
   const actor=await scopedActor(db,principal,tenant)
   await audit(db,tenant,null,actor.id,'platform.tenant_opened',tenant)
   return {url:platformWorkspace+'/'+tenant+'/master/'}
+}
+
+function requireSupervisor(actor:Actor) {
+  if(!actor.platform)throw forbidden()
+}
+
+export async function agencyMasterDetails(db:DB,actor:Actor) {
+  requireSupervisor(actor)
+  await scope(db,actor.tenant_id,undefined,true)
+  const {rows:[state]}=await db.query(`SELECT current.email AS current_email, next.id AS pending_id,
+    next.email AS pending_email,next.password_hash IS NOT NULL AS pending_active,i.expires_at
+    FROM tenant_master m JOIN staff current ON (m.tenant_id,m.staff_id)=(current.tenant_id,current.id)
+    LEFT JOIN staff next ON (m.tenant_id,m.pending_staff_id)=(next.tenant_id,next.id) AND next.disabled_at IS NULL
+    LEFT JOIN invite i ON (i.tenant_id,i.staff_id)=(next.tenant_id,next.id)
+    WHERE m.tenant_id=$1`,[actor.tenant_id])
+  if(!state)throw missing()
+  return state
+}
+
+export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:string,key:string) {
+  requireSupervisor(actor)
+  await scope(db,actor.tenant_id,undefined,true)
+  return once(db,cfg,actor,'agency.master_invite',key,{email:address},async()=>{
+    await lockDispatch(db,actor.tenant_id)
+    const {rows:[state]}=await db.query(`SELECT pending_staff_id FROM tenant_master WHERE tenant_id=$1 FOR UPDATE`,[actor.tenant_id])
+    if(!state)throw missing()
+    const invite=await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[]},actor.id)
+    const changed=await db.query('UPDATE tenant_master SET pending_staff_id=$2 WHERE tenant_id=$1',[actor.tenant_id,invite.id])
+    if(!changed.rowCount)throw forbidden()
+    await audit(db,actor.tenant_id,null,actor.id,'agency.master_invite',invite.id)
+    return invite
+  })
+}
+
+export async function promoteAgencyMaster(db:DB,actor:Actor,pending:string) {
+  requireSupervisor(actor)
+  await scope(db,actor.tenant_id,undefined,true)
+  await lockDispatch(db,actor.tenant_id)
+  const {rows:[state]}=await db.query<{staff_id:string;pending_staff_id:string|null}>(
+    'SELECT staff_id,pending_staff_id FROM tenant_master WHERE tenant_id=$1 FOR UPDATE',[actor.tenant_id])
+  if(!state||state.pending_staff_id!==pending)throw conflict()
+  const candidate=await db.query(`SELECT 1 FROM staff WHERE id=$1 AND role='admin' AND NOT platform_actor
+    AND password_hash IS NOT NULL AND disabled_at IS NULL FOR UPDATE`,[pending])
+  if(!candidate.rowCount)throw new Fault(409,'MASTER_NOT_ACTIVE','新しいマスターが招待を有効化してから切り替えてください。')
+  const changed=await db.query('UPDATE tenant_master SET staff_id=$2,pending_staff_id=NULL WHERE tenant_id=$1',[actor.tenant_id,pending])
+  if(!changed.rowCount)throw forbidden()
+  await db.query("DELETE FROM staff_session WHERE staff_id=$1 AND session_kind='staff'",[state.staff_id])
+  await audit(db,actor.tenant_id,null,actor.id,'agency.master_promote',pending,null,{previous_staff_id:state.staff_id})
+  return agencyMasterDetails(db,actor)
 }

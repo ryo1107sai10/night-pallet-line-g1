@@ -110,7 +110,8 @@ export async function authenticate(db: DB, credential: string | undefined, kind:
     throw unauthenticated()
   }
   await scope(db, tenantId)
-  const { rows: [actor] } = await db.query<Actor>(`SELECT f.id,f.tenant_id,f.role,f.email
+  const { rows: [actor] } = await db.query<Actor>(`SELECT f.id,f.tenant_id,f.role,f.email,
+    EXISTS(SELECT 1 FROM platform_master p WHERE p.agency_id=f.tenant_id) AS agency
     FROM staff_session s JOIN staff f ON (s.tenant_id,s.staff_id)=(f.tenant_id,f.id) JOIN tenant t ON t.id=f.tenant_id
     WHERE s.token_hash=$1 AND s.session_kind=$2 AND s.expires_at>now()
       AND NOT f.platform_actor AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL
@@ -200,7 +201,7 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
       ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND NOT f.platform_actor AND f.disabled_at IS NULL
         AND f.password_hash IS NULL
-        AND CASE WHEN f.role='admin' THEN EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id))
+        AND CASE WHEN f.role='admin' THEN EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.pending_staff_id))
           ELSE f.agency_staff END
       FOR UPDATE OF f`, [hash])
     if (!staff) throw invalid()
@@ -219,7 +220,9 @@ export async function disableStaff(db: DB, actor: Actor, id: string, reason: str
   if (id === actor.id) throw forbidden()
   await scope(db, actor.tenant_id, undefined, true)
   const updated = await db.query(`UPDATE staff SET disabled_at=now() WHERE id=$1 AND disabled_at IS NULL AND NOT platform_actor
-    AND NOT EXISTS (SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(staff.tenant_id,staff.id)) RETURNING id`, [id])
+    AND NOT EXISTS (SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(staff.tenant_id,staff.id))
+    AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(staff.tenant_id,staff.id))
+    RETURNING id`, [id])
   if (!updated.rowCount) throw missing()
   await db.query('DELETE FROM staff_session WHERE staff_id=$1', [id])
   await db.query('DELETE FROM invite WHERE staff_id=$1', [id])

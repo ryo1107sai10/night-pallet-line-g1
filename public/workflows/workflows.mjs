@@ -79,7 +79,7 @@ const blankField=()=>({key:crypto.randomUUID(),kind:'text',label:'',required:fal
 const stages={applied:'応募',interviewed:'面談実施',trial_scheduled:'体入予定',trial_done:'体入実施',hired:'入店',withdrawn:'辞退・終了'}
 const allowed={applied:['interviewed','withdrawn'],interviewed:['trial_scheduled','hired','withdrawn'],
   trial_scheduled:['trial_scheduled','trial_done','interviewed','withdrawn'],trial_done:['hired','withdrawn'],hired:[],withdrawn:[]}
-let stores,current,openThread,view=0
+let stores,current,openThread,agency=false,view=0
 let actor
 
 function formEditor(root,data,path,refresh,use){
@@ -440,16 +440,18 @@ async function render(){
   const settings=await api(path+'/settings')
   if(marker!==view)return
   const sections=[]
-  if(settings.forms_enabled)sections.push(['forms','回答フォーム'],['responses','フォーム回答'])
-  if(use==='recruitment'&&settings.recruitment_enabled)sections.push(['recruitment','応募・選考'])
-  if(settings.sources_enabled)sections.push(['sources','流入分析'])
-  if(use==='customer'&&settings.campaigns_enabled)sections.push(['campaigns','絞り込み配信'])
-  if(settings.rich_menus_enabled)sections.push(['rich-menus','リッチメニュー'])
+  if(!agency){
+    if(settings.forms_enabled)sections.push(['forms','回答フォーム'],['responses','フォーム回答'])
+    if(use==='recruitment'&&settings.recruitment_enabled)sections.push(['recruitment','応募・選考'])
+    if(settings.sources_enabled)sections.push(['sources','流入分析'])
+    if(use==='customer'&&settings.campaigns_enabled)sections.push(['campaigns','絞り込み配信'])
+    if(settings.rich_menus_enabled)sections.push(['rich-menus','リッチメニュー'])
+  }
   if(settings.inbox_enabled)sections.push(['inbox','LINE受信箱'])
-  if(use==='customer'&&settings.inbox_enabled)sections.push(['intake','受付保留'])
+  if(!agency&&use==='customer'&&settings.inbox_enabled)sections.push(['intake','受付保留'])
   if(settings.inbox_enabled||use==='recruitment'&&(settings.reminders_enabled||settings.waitlist_enabled))sections.push(['delivery','LINE送信履歴'])
   if(!sections.length){content.replaceChildren(el('p','この店舗で有効な機能はありません。法人管理者が「店舗で使う機能」から設定できます。'));return}
-  sections.unshift(['checks','運用チェック'])
+  if(!agency)sections.unshift(['checks','運用チェック'])
   if(!sections.some(([id])=>id===current))current=sections[0][0]
   for(const [key,label] of sections){
     const tab=button(label,async()=>{current=key;notice();await render()})
@@ -475,6 +477,11 @@ async function render(){
 
 async function start(){
   const session=await api('/session')
+  agency=session.actor.agency===true
+  if(agency){
+    $('#customers').hidden=true
+    $('#use').closest('label').hidden=true
+  }
   actor=session.actor
   stores=session.stores
   $('#store').append(...stores.map(store=>new Option(store.name,store.id)))
@@ -486,7 +493,7 @@ async function start(){
     use.disabled=true
     $('#customers').hidden=true
   }else if(['admin','manager'].includes(session.actor.role)){
-    if(query.get('use')==='recruitment')use.value='recruitment'
+    if(agency||query.get('use')==='recruitment')use.value='recruitment'
   }else throw new Error('この業務を利用できる権限がありません。')
   for(const input of [$('#store'),use])input.onchange=()=>{notice();render().catch(error=>notice(error.message,true))}
   await render()

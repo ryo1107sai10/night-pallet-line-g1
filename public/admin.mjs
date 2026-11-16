@@ -241,6 +241,7 @@ async function refresh() {
   $('#tenant-name').textContent = session.tenant.legal_name
   if (!session.stores.some(store=>store.id===storeId)) storeId = session.stores[0]?.id
   await render()
+  if(session?.actor.platform)(await import('/static/tour.mjs')).mountTour('master')
 }
 
 async function change(path, method, data, message, idem = false) {
@@ -390,23 +391,67 @@ function connectedPanel(base, c, testers) {
   return box
 }
 
-function moduleConnect(base, configured) {
-  const box = el('section',null,'line-setting')
-  box.append(el('h3','公式LINEのかんたん連携'))
+function moduleConnect(base, configured, store) {
+  const box = el('section',null,'panel')
+  box.id='quick-line'
+  box.append(el('h2','公式LINEをつなぐ'))
+  if(store)box.append(el('p','連携先の店舗 · '+store.name,'muted'))
   if (!configured) {
-    const start = el('button','公式LINEを連携')
-    start.disabled = true
-    box.append(el('p','かんたん連携は準備中です。手動設定から公式LINEを登録できます。','muted'),start)
+    box.append(el('p','LINEのかんたん連携を利用するには、LINEヤフーから発行されたモジュールの設定が必要です。','muted'))
+    const manual=el('a','手動設定を開く','studio-link')
+    manual.href='#line-register'
+    box.append(manual)
     return box
   }
   const purpose = field('この店舗での用途','purpose',{choices:types,value:'recruitment'})
-  box.append(el('p','LINEの画面で、対象の公式アカウントへの接続を許可してください。','muted'),
-    formOf([purpose],'公式LINEを連携',async data=>{
+  box.append(el('p','LINEで公式アカウントを選択し、接続を許可してください。','muted'),
+    formOf([purpose],'公式LINEをつなぐ',async data=>{
       const result = await api(base+'/line-module','POST',data)
       rememberReturnWorkspace('line',base.split('/').at(-1))
       location.assign(result.url)
     }))
   return box
+}
+
+let recentMasterInvite
+function masterPanel(info) {
+  const team=panel('エールのマスター管理',el('p','現在のマスター · '+info.current_email))
+  team.id='supervisor-team'
+  if(info.pending_id){
+    team.append(el('p','招待中 · '+info.pending_email+' · '+
+      (info.pending_active?'本人による有効化が完了':info.expires_at?'有効期限 '+date(info.expires_at):'本人の有効化待ち')))
+    const refreshStatus=el('button','最新の状態を取得','secondary')
+    refreshStatus.type='button'
+    refreshStatus.onclick=()=>refresh().catch(report)
+    team.append(refreshStatus)
+    if(info.pending_active){
+      const promote=el('button','マスターを切り替える')
+      promote.type='button'
+      promote.onclick=async()=>{
+        if(!window.confirm(info.pending_email+' に切り替えると、前任者のログインは終了します。切り替えますか？'))return
+        promote.disabled=true
+        try {
+          await change('/agency-master/promote','POST',{pending:info.pending_id},'エールのマスターを切り替えました。')
+        }catch(error){report(error);promote.disabled=false}
+      }
+      team.append(promote)
+    }
+  }
+  const invite=details('新しいマスターを招待',formOf([field('候補者のメールアドレス','address',{type:'email'})],'招待を発行',
+    async (data,key)=>{
+      recentMasterInvite=await api('/agency-master/invite','POST',data,key)
+      await refresh()
+      feedback('招待を発行しました。招待の有効化が済むと切り替えられます。')
+    }))
+  invite.id='supervisor-invite'
+  if(recentMasterInvite&&recentMasterInvite.id===info.pending_id&&!info.pending_active){
+    invite.open=true
+    const {invite_code,setup_key,expires_at}=recentMasterInvite
+    invite.append(el('p','招待コードと設定キーを候補者の本人に渡してください。候補者はエールのログイン画面から有効化できます。'),
+      el('pre',['招待コード　'+invite_code,'認証アプリ設定キー　'+setup_key,'期限　'+date(expires_at)].join('\n')))
+  }
+  team.append(invite)
+  return team
 }
 
 function moduleConnection(base,c,testers) {
@@ -605,8 +650,9 @@ async function render() {
   const connectionPromise = manage && store ? api(base+'/connections') : Promise.resolve([])
   const modulePromise = manage && store ? api(base+'/line-module') : Promise.resolve(null)
   const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
-  const [staff,connections,features,module,onboarding,detail] = await Promise.all([
-    staffPromise,connectionPromise,featurePromise,modulePromise,onboardingList,onboardingItem,
+  const masterPromise = session.actor.platform ? api('/agency-master') : Promise.resolve(null)
+  const [staff,connections,features,module,onboarding,detail,agencyMaster] = await Promise.all([
+    staffPromise,connectionPromise,featurePromise,modulePromise,onboardingList,onboardingItem,masterPromise,
   ])
   if (generation!==view) return
   const url = new URL(location.href)
@@ -633,6 +679,7 @@ async function render() {
   const selector = field('操作する店舗','store',{
     choices:Object.fromEntries(session.stores.map(item=>[item.id,item.name])),value:storeId,
   })
+  selector.querySelector('select').id='workspace-store'
   selector.querySelector('select').onchange = async event => {
     const select = event.target
     const previousChannel = channelId
@@ -687,8 +734,9 @@ async function render() {
   main.append(storePanel)
   if (manage && store) {
     const line = panel('LINE接続')
-    if (module.configured || !admin) {
-      const connect = moduleConnect(base,module.configured)
+    line.id='supervisor-line'
+    if (!session.actor.platform && (module.configured || !admin)) {
+      const connect = moduleConnect(base,module.configured,store)
       if (!admin) connect.id = 'line-setup'
       line.append(connect)
     }
@@ -709,11 +757,14 @@ async function render() {
     line.append(registration)
     main.append(line)
   }
+  if (agencyMaster) side.append(masterPanel(agencyMaster))
   if (admin) side.append(teamPanel(staff),panel('法人の配信管理',
     status(session.tenant.stopped?'配信停止中':'法人停止なし',false,session.tenant.stopped),
     stopForm('/tenant/stop',session.tenant,'法人の配信'),auditPanel('/tenant/audit')))
   layout.append(main,side)
-  content.replaceChildren(...(admin ? [onboardingPanel(onboarding,store,detail,connections),layout] : [layout]))
+  const sections=admin ? [onboardingPanel(onboarding,store,detail,connections),layout] : [layout]
+  if (session.actor.platform && store) sections.unshift(moduleConnect(base,module.configured,store))
+  content.replaceChildren(...sections)
   if (linked) feedback(linked.label+'を連携しました。')
   revealLineAnchor()
 }

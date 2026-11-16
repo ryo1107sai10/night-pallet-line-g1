@@ -1,0 +1,36 @@
+#npl-tour {
+  position: fixed;
+  z-index: 40;
+  inset-inline-end: max(1rem, env(safe-area-inset-right));
+  inset-block-end: max(1rem, env(safe-area-inset-bottom));
+  padding: .72rem 1.1rem;
+  background: #5d36ad;
+  color: white;
+  box-shadow: 0 4px 20px #251b5140;
+}
+.npl-tour-panel {
+  position: fixed;
+  z-index: 41;
+  inset-inline-end: max(1rem, env(safe-area-inset-right));
+  inset-block-end: max(4.6rem, calc(env(safe-area-inset-bottom) + 4rem));
+  inline-size: min(420px, calc(100vw - 2rem));
+  max-block-size: min(65dvh, 500px);
+  overflow: auto;
+  box-sizing: border-box;
+  border: 1px solid #e2d9f4;
+  border-radius: 1rem;
+  padding: 1rem;
+  color: #211738;
+  background: #f9f6ff;
+  box-shadow: 0 12px 45px #251b5140;
+  font: 400 .94rem/1.55 system-ui, sans-serif;
+}
+.npl-tour-panel[hidden] { display: none; }
+.npl-tour-panel h2, .npl-tour-panel h3 { margin: 0; font-size: 1.05rem; color: #211738; }
+.npl-tour-panel p { margin: .55rem 0; color: #3e3451; }
+.npl-tour-title, .npl-tour-actions { display: flex; align-items: center; justify-content: space-between; gap: .45rem; flex-wrap: wrap; }
+.npl-tour-choices { display: grid; gap: .45rem; margin-top: .8rem; }
+.npl-tour-panel .npl-tour-button { background: #ece4fb; color: #382260; border: 1px solid #d9caf2; padding: .45rem .65rem; font-size: .88rem; }
+.npl-tour-panel .npl-tour-button:focus-visible, #npl-tour:focus-visible { outline: 3px solid #7944c6; outline-offset: 2px; }
+.npl-tour-target { outline: 3px solid #9e66ef !important; outline-offset: 4px; }
+.npl-tour-count { font-variant-numeric: tabular-nums; }

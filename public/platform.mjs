@@ -1,3 +1,5 @@
+import {mountTour} from '/static/tour.mjs'
+
 const notice = document.querySelector('#notice')
 const tenants = document.querySelector('#tenants')
 const logout = document.querySelector('#logout')
@@ -36,6 +38,7 @@ try {
   const [{actor},records]=await Promise.all([platformApi('/session'),platformApi('/tenants')])
   document.querySelector('#account').textContent=actor.organization+' · '+actor.display_name
   if (!records.length) notice.textContent='管理を担当する会社が登録されていません。'
+  else mountTour('platform',{enter:async()=>(await platformApi('/tenants/'+records[0].id+'/enter','POST')).url})
   for (const tenant of records) {
     const row=element('li',null,'record')
     const detail=element('div',null,'onboarding-store')

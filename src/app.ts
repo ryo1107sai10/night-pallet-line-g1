@@ -1,4 +1,5 @@
-import { authenticatePlatformWorkspace, enterPlatformTenant, platformSession, platformTenants, platformWorkspace } from './platform.js'
+import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster } from './platform.js'
+import { checkAgencyAccess } from './agency-access.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
 import type pg from 'pg'
@@ -99,8 +100,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     }
   }
   const staffPage = async(req:Request,res:Response,next:NextFunction) => {
-    if (await pageActor(req)) next()
-    else res.redirect(302,scoped(req)?'/platform/':'/staff/')
+    const actor=await pageActor(req)
+    if (!actor) {
+      res.redirect(302,scoped(req)?'/platform/':'/staff/')
+    } else if (actor.agency&&/^\/operations(?:\/|$)/i.test(req.path)) {
+      res.redirect(302,actor.role==='admin'?'/master/':'/staff/')
+    } else next()
   }
   for (const section of ['studio','operations','workflows']) {
     const path='/'+section
@@ -142,7 +147,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
         }
         res.redirect(302,workspacePrefix(req)+'/master/'+(params.size?'?'+params:''))
       } else {
-        res.sendFile(here('../public/index.html'))
+        res.sendFile(here(actor.agency?'../public/agency.html':'../public/index.html'))
       }
     })
   }
@@ -161,9 +166,14 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.sendFile(here('../public/interview/guest.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs'])
-  app.get('/static/:asset',(req,res,next)=>{
-    if (staticAssets.has(req.params.asset)) res.sendFile(here('../public/'+req.params.asset))
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs'])
+  const tourAssets=new Set(['tour.mjs','tour.css'])
+  app.get('/static/:asset',async(req,res,next)=>{
+    const asset=req.params.asset
+    if(tourAssets.has(asset)){
+      await tx(pool,db=>authenticate(db,platformCredential(req),'platform'))
+      res.sendFile(here('../public/'+asset))
+    }else if (staticAssets.has(asset)) res.sendFile(here('../public/'+asset))
     else next()
   })
   app.use('/assets',express.static(here('./assets'),{index:false}))
@@ -360,7 +370,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
 
   type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
   const staff = (action: Action, status=200) => async (req: Request,res: Response) => {
-    const data = await tx(pool,async db=>action(db,await requestActor(db,req),req))
+    const data = await tx(pool,async db=>{
+      const actor=await requestActor(db,req)
+      checkAgencyAccess(actor,req)
+      return action(db,actor,req)
+    })
     res.status(status).json(data)
   }
   const inStore = (action: Action,manage = true,status=200) => staff(async (db,actor,req)=>{
@@ -417,6 +431,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     await gate(pool,cfg,'menu-verify:'+address(req),30)
     const authorized=async(db:DB)=>{
       const actor=await requestActor(db,req)
+      checkAgencyAccess(actor,req)
       await workflowAccess(db,actor,store,use)
       return actor
     }
@@ -450,6 +465,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const data=googleCalendarReturn.parse(req.body),store=idOf(req,'store')
     const authorized=async(db:DB)=>{
       const actor=await requestActor(db,req)
+      checkAgencyAccess(actor,req)
       await interviewAccess(db,actor,store)
       return actor
     }
@@ -510,7 +526,16 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.get('/session',staff(async (db,actor)=>{
     const { rows:[tenant] } = await db.query(`SELECT id,slug,legal_name,stopped,revision FROM tenant WHERE id=$1`,[actor.tenant_id])
-    return { actor:{ id:actor.id,email:actor.email,role:actor.role,platform:actor.platform===true }, tenant, stores:await storeList(db,actor) }
+    return { actor:{ id:actor.id,email:actor.email,role:actor.role,platform:actor.platform===true,agency:actor.agency===true }, tenant, stores:await storeList(db,actor) }
+  }))
+  api.get('/agency-master',staff((db,actor)=>agencyMasterDetails(db,actor)))
+  api.post('/agency-master/invite',staff((db,actor,req)=>{
+    const {address}=z.strictObject({address:email}).parse(req.body)
+    return inviteAgencyMaster(db,cfg,actor,address,keyOf(req))
+  },201))
+  api.post('/agency-master/promote',staff((db,actor,req)=>{
+    const {pending}=z.strictObject({pending:uuid}).parse(req.body)
+    return promoteAgencyMaster(db,actor,pending)
   }))
   api.post('/stores',staff(async (db,actor,req)=>{
     requireAdmin(actor)
@@ -673,6 +698,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const data=moduleReturn.parse(req.body),store=idOf(req,'store'),session=staffCredential(req)
     const authorized=async(db:DB)=>{
       const actor=await requestActor(db,req)
+      checkAgencyAccess(actor,req)
       await storeAccess(db,actor,store,true)
       return actor
     }
@@ -726,6 +752,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       const required = z.strictObject({ revision }).parse(req.body)
       const read = async (db:DB) => {
         const actor = await requestActor(db,req)
+        checkAgencyAccess(actor,req)
         await storeAccess(db,actor,idOf(req,'store'),true)
         const c = await channel(db,idOf(req,'connection'))
         if (c.module_channel_id && item==='webhook') throw new Fault(409,'LINE_MODULE_MANAGED','公式LINEへのテストメッセージで受信を確認してください。')

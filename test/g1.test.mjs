@@ -1407,84 +1407,6 @@ test('公開入口からマスターを分離し、指定した法人管理者�
   expect(await request('/line-onboarding',{cookie:newMaster.cookie}),200)
 })
 
-test('北村さんはエールだけを管理し、エールの担当者のみ担当店舗で操作できる',async()=>{
-  const creator='lilu'
-  const email='kitamura@example.test'
-  const input={slug:creator,name:'リルコーポレーション',displayName:'北村さん',email,agency:'alpha'}
-  await assert.rejects(inviteSupervisor(pool,cfg,input),{code:'42501'})
-  const invite=await inviteSupervisor(owner,cfg,input)
-  await assert.rejects(inviteSupervisor(owner,cfg,{...input,slug:'another-supervisor'}),/既に登録/)
-  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)}),200)
-  const loginData={tenant:creator,email,password:pass,code:code(invite.setup_key)}
-  expect(await post('/auth/master/login',null,loginData),401)
-  expect(await post('/auth/login',null,loginData),401)
-  expect(await request('/platform/tenants',{cookie:admin}),401)
-  const platform=await post('/auth/platform/login',null,loginData)
-  expect(platform,200)
-  assert.match(platform.cookie,/^night_platform=/)
-  const {actor:supervisor}=expect(await request('/platform/session',{cookie:platform.cookie}),200)
-  assert.equal(supervisor.display_name,'北村さん')
-  assert.equal(supervisor.organization,'リルコーポレーション')
-  expect(await request('/session',{cookie:platform.cookie}),401)
-  expect(await request('/session',{cookie:platform.cookie.replace('night_platform=','night_session=')}),401)
-
-  const alpha=expect(await request('/session',{cookie:admin}),200)
-  const gamma=expect(await request('/session',{cookie:other}),200)
-  const legal=expect(await request('/platform/tenants',{cookie:platform.cookie}),200)
-  assert.deepEqual(legal.map(t=>t.id),[alpha.tenant.id])
-  const open=async path=>send(path,{headers:{Cookie:platform.cookie},redirect:'manual'})
-  assert.match(await (await open('/platform/')).text(),/管理会社の監督/)
-  const scopePath=tenant=>'/platform/tenants/'+tenant+'/api/v1'
-  async function scoped(tenant,path,method='GET',data,cookie=platform.cookie){
-    const response=await send(scopePath(tenant)+path,{method,headers:{Origin:origin,Cookie:cookie,
-      ...(data?{'Content-Type':'application/json',...idempotency()}:{}),
-    },body:data?JSON.stringify(data):undefined})
-    return {status:response.status,data:await response.json()}
-  }
-  const enter=tenant=>post('/platform/tenants/'+tenant+'/enter',platform.cookie,{})
-  expect(await post('/platform/tenants/'+alpha.tenant.id+'/enter',admin,{}),401)
-  const workA=expect(await enter(alpha.tenant.id),200)
-  assert.equal(new URL(workA.url,origin).pathname,'/platform/tenants/'+alpha.tenant.id+'/master/')
-  assert.match(await (await open(workA.url)).text(),/id="workspace"/)
-  expect(await enter(gamma.tenant.id),404)
-  expect(await scoped(gamma.tenant.id,'/session'),404)
-  expect(await scoped(alpha.tenant.id,'/session','GET',undefined,admin),401)
-  const one=expect(await scoped(alpha.tenant.id,'/session'),200)
-  assert.equal(one.actor.platform,true)
-  assert.deepEqual(one.stores.map(s=>s.id),alpha.stores.map(s=>s.id))
-  const created=expect(await scoped(alpha.tenant.id,'/stores','POST',storeData('北村さんが登録した検証店')),201).id
-  assert.ok(expect(await request('/session',{cookie:admin}),200).stores.some(s=>s.id===created))
-  assert.ok(!expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===created))
-  const trace=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/audit'),200).find(entry=>entry.operation==='store.create')
-  assert.equal(trace.actor,'全体管理者')
-  assert.equal(trace.details.platform_staff_id,supervisor.id)
-  const tenantTrace=expect(await request('/stores/'+created+'/audit',{cookie:admin}),200).find(entry=>entry.operation==='store.create')
-  assert.equal(tenantTrace.details.platform_staff_id,undefined)
-
-  const managerEmail='step-manager@example.test'
-  const next=expect(await post('/staff/invites',admin,{email:managerEmail,role:'manager',stores:[storeId]},idempotency()),201)
-  const manager=await activate(next,managerEmail,'alpha')
-  assert.deepEqual(expect(await request('/session',{cookie:manager}),200).stores.map(item=>item.id),[storeId])
-  const graph={...starter(),channel:c,name:'店舗別のステップ'}
-  const path='/stores/'+storeId+'/scenarios'
-  const step=expect(await post(path,manager,graph,idempotency()),201)
-  const saved=expect(await patch(path+'/'+step.id,manager,{revision:step.revision,graph:{...graph,name:'担当店舗のステップ更新'}}),200)
-  assert.equal(saved.graph.name,'担当店舗のステップ更新')
-  expect(await request('/stores/'+otherStore+'/scenarios',{cookie:manager}),404)
-  expect(await post('/stores/'+otherStore+'/scenarios',manager,graph,idempotency()),404)
-  expect(await request('/line-onboarding',{cookie:manager}),403)
-  expect(await request('/platform/tenants',{cookie:manager}),401)
-  expect(await post('/platform/logout',platform.cookie,{}),200)
-  expect(await scoped(alpha.tenant.id,'/session'),401)
-  expect(await scoped(gamma.tenant.id,'/session'),401)
-  await tx(owner,async db=>{
-    await scope(db,alpha.tenant.id)
-    await db.query('UPDATE staff SET agency_staff=false WHERE id=$1',[next.id])
-  })
-  expect(await request('/session',{cookie:manager}),401)
-  expect(await post('/auth/login',null,{tenant:'alpha',email:managerEmail,password:pass,code:code(next.setup_key,1)}),401)
-})
-
 test('店長引き継ぎは会話単位でステップ配信と管理会社の返信を停止し、終了後は新しい配信を再開する',async()=>{
   const {store,root,connection,inbound}=await workflowStore('店長返信検証','customer','9',{inbox_enabled:true,campaigns_enabled:true})
   const path=root+'/workflows/customer/inbox'
@@ -1657,4 +1579,137 @@ test('接続確認中の採用通知は検収済みのテスト利用者への�
   await booking(20,'検収期限切れの通知',one.cookie)
   await worker()
   assert.ok(!pushesLog.some(m=>m.messages[0].text.includes('検収期限切れの通知')))
+})
+
+test('北村さんはエールだけを管理し、エールの担当者のみ担当店舗で操作できる',async()=>{
+  const creator='lilu'
+  const email='kitamura@example.test'
+  const input={slug:creator,name:'リルコーポレーション',displayName:'北村さん',email,agency:'alpha'}
+  await assert.rejects(inviteSupervisor(pool,cfg,input),{code:'42501'})
+  const invite=await inviteSupervisor(owner,cfg,input)
+  await assert.rejects(inviteSupervisor(owner,cfg,{...input,slug:'another-supervisor'}),/既に登録/)
+  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)}),200)
+  const loginData={tenant:creator,email,password:pass,code:code(invite.setup_key)}
+  expect(await post('/auth/master/login',null,loginData),401)
+  expect(await post('/auth/login',null,loginData),401)
+  expect(await request('/platform/tenants',{cookie:admin}),401)
+  const platform=await post('/auth/platform/login',null,loginData)
+  expect(platform,200)
+  assert.match(platform.cookie,/^night_platform=/)
+  const {actor:supervisor}=expect(await request('/platform/session',{cookie:platform.cookie}),200)
+  assert.equal(supervisor.display_name,'北村さん')
+  assert.equal(supervisor.organization,'リルコーポレーション')
+  expect(await request('/session',{cookie:platform.cookie}),401)
+  expect(await request('/session',{cookie:platform.cookie.replace('night_platform=','night_session=')}),401)
+
+  const alpha=expect(await request('/session',{cookie:admin}),200)
+  const gamma=expect(await request('/session',{cookie:other}),200)
+  const legal=expect(await request('/platform/tenants',{cookie:platform.cookie}),200)
+  assert.deepEqual(legal.map(t=>t.id),[alpha.tenant.id])
+  const open=async path=>send(path,{headers:{Cookie:platform.cookie},redirect:'manual'})
+  assert.match(await (await open('/platform/')).text(),/管理会社の監督/)
+  const scopePath=tenant=>'/platform/tenants/'+tenant+'/api/v1'
+  async function scoped(tenant,path,method='GET',data,cookie=platform.cookie){
+    const response=await send(scopePath(tenant)+path,{method,headers:{Origin:origin,Cookie:cookie,
+      ...(data?{'Content-Type':'application/json',...idempotency()}:{}),
+    },body:data?JSON.stringify(data):undefined})
+    return {status:response.status,data:await response.json()}
+  }
+  const enter=tenant=>post('/platform/tenants/'+tenant+'/enter',platform.cookie,{})
+  expect(await post('/platform/tenants/'+alpha.tenant.id+'/enter',admin,{}),401)
+  const workA=expect(await enter(alpha.tenant.id),200)
+  assert.equal(new URL(workA.url,origin).pathname,'/platform/tenants/'+alpha.tenant.id+'/master/')
+  assert.match(await (await open(workA.url)).text(),/id="workspace"/)
+  expect(await enter(gamma.tenant.id),404)
+  expect(await scoped(gamma.tenant.id,'/session'),404)
+  expect(await scoped(alpha.tenant.id,'/session','GET',undefined,admin),401)
+  const one=expect(await scoped(alpha.tenant.id,'/session'),200)
+  assert.equal(one.actor.platform,true)
+  assert.deepEqual(one.stores.map(s=>s.id),alpha.stores.map(s=>s.id))
+  const created=expect(await scoped(alpha.tenant.id,'/stores','POST',storeData('北村さんが登録した検証店')),201).id
+  assert.ok(expect(await request('/session',{cookie:admin}),200).stores.some(s=>s.id===created))
+  assert.ok(!expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===created))
+  const trace=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/audit'),200).find(entry=>entry.operation==='store.create')
+  assert.equal(trace.actor,'全体管理者')
+  assert.equal(trace.details.platform_staff_id,supervisor.id)
+  const agency=expect(await request('/session',{cookie:admin}),200)
+  assert.equal(agency.actor.agency,true)
+  assert.equal(agency.actor.platform,false)
+  const portal=await send('/master/?store='+storeId,{headers:{Cookie:admin}})
+  const portalHTML=await portal.text()
+  assert.match(portalHTML,/id="agency-tools"/)
+  assert.doesNotMatch(portalHTML,/id="npl-tour"|id="manage-line"/)
+  assert.equal((await send('/static/tour.mjs',{headers:{Cookie:admin}})).status,401)
+  assert.equal((await open('/static/tour.mjs')).status,200)
+  const oldOperations=await send('/operations/',{headers:{Cookie:admin},redirect:'manual'})
+  assert.equal(oldOperations.status,302)
+  assert.equal(oldOperations.headers.get('location'),'/master/')
+  expect(await request('/stores/'+created+'/audit',{cookie:admin}),403)
+  expect(await request('/stores/'+storeId+'/interviews',{cookie:admin}),200)
+  expect(await request('/stores/'+storeId+'/interviews/availability',{cookie:admin}),200)
+  expect(await request('/stores/'+storeId+'/connections',{cookie:admin}),200)
+  expect(await request('/stores/'+storeId+'/campaigns',{cookie:admin}),403)
+  expect(await request('/stores/'+storeId+'/workflows/customer/inbox',{cookie:admin}),403)
+  expect(await request('/stores/'+storeId+'/workflows/recruitment/settings',{cookie:admin}),200)
+  expect(await request('/staff',{cookie:admin}),403)
+  expect(await request('/stores/'+storeId+'/line-module',{cookie:admin}),403)
+  expect(await post('/stores/'+storeId+'/line-module',admin,{purpose:'recruitment'}),403)
+  expect(await post('/stores/'+storeId+'/line-module/complete',admin,{state:'a'.repeat(96),code:'unused'}),403)
+  expect(await post('/stores/'+storeId+'/connections',admin,{},idempotency()),403)
+  expect(await request('/agency-master',{cookie:admin}),403)
+
+  cfg.lineModule=moduleConfig
+  try{
+    const config=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/line-module'),200)
+    assert.equal(config.configured,true)
+    const start=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/line-module','POST',{purpose:'recruitment'}),200)
+    const consent=new URL(start.url)
+    assert.equal(consent.origin+consent.pathname,'https://manager.line.biz/module/auth/v1/authorize')
+    assert.match(consent.searchParams.get('state'),/^[a-f0-9]{96}$/)
+    assert.equal(consent.searchParams.get('code_challenge_method'),'S256')
+  }finally{delete cfg.lineModule}
+
+  const managerEmail='step-manager@example.test'
+  const next=expect(await scoped(alpha.tenant.id,'/staff/invites','POST',{email:managerEmail,role:'manager',stores:[storeId]}),201)
+  const manager=await activate(next,managerEmail,'alpha')
+  assert.deepEqual(expect(await request('/session',{cookie:manager}),200).stores.map(item=>item.id),[storeId])
+  const graph={...starter(),channel:c,name:'店舗別のステップ'}
+  const path='/stores/'+storeId+'/scenarios'
+  const step=expect(await post(path,manager,graph,idempotency()),201)
+  const saved=expect(await patch(path+'/'+step.id,manager,{revision:step.revision,graph:{...graph,name:'担当店舗のステップ更新'}}),200)
+  assert.equal(saved.graph.name,'担当店舗のステップ更新')
+  expect(await request('/stores/'+otherStore+'/scenarios',{cookie:manager}),404)
+  expect(await post('/stores/'+otherStore+'/scenarios',manager,graph,idempotency()),404)
+  expect(await request('/line-onboarding',{cookie:manager}),403)
+  expect(await request('/platform/tenants',{cookie:manager}),401)
+  const state=expect(await scoped(alpha.tenant.id,'/agency-master'),200)
+  assert.equal(state.current_email,agency.actor.email)
+  const successor='new-agency-master@example.test'
+  const replacement=expect(await scoped(alpha.tenant.id,'/agency-master/invite','POST',{address:successor}),201)
+  expect(await scoped(alpha.tenant.id,'/agency-master/promote','POST',{pending:replacement.id}),409)
+  expect(await request('/session',{cookie:admin}),200)
+  expect(await post('/auth/activate',null,{invite:replacement.invite_code,password:pass,code:code(replacement.setup_key,-1)}),200)
+  const candidateLogin={tenant:'alpha',email:successor,password:pass,code:code(replacement.setup_key)}
+  expect(await post('/auth/master/login',null,candidateLogin),401)
+  await tx(pool,async db=>{
+    await scope(db,alpha.tenant.id)
+    const changed=await db.query('UPDATE tenant_master SET pending_staff_id=NULL WHERE tenant_id=$1',[alpha.tenant.id])
+    assert.equal(changed.rowCount,0)
+  })
+  const promoted=expect(await scoped(alpha.tenant.id,'/agency-master/promote','POST',{pending:replacement.id}),200)
+  assert.equal(promoted.current_email,successor)
+  assert.equal(promoted.pending_id,null)
+  expect(await request('/session',{cookie:admin}),401)
+  const finalLogin=await post('/auth/master/login',null,candidateLogin)
+  expect(finalLogin,200)
+  expect(await request('/stores/'+storeId+'/scenarios',{cookie:finalLogin.cookie}),200)
+  expect(await post('/platform/logout',platform.cookie,{}),200)
+  expect(await scoped(alpha.tenant.id,'/session'),401)
+  expect(await scoped(gamma.tenant.id,'/session'),401)
+  await tx(owner,async db=>{
+    await scope(db,alpha.tenant.id)
+    await db.query('UPDATE staff SET agency_staff=false WHERE id=$1',[next.id])
+  })
+  expect(await request('/session',{cookie:manager}),401)
+  expect(await post('/auth/login',null,{tenant:'alpha',email:managerEmail,password:pass,code:code(next.setup_key,1)}),401)
 })

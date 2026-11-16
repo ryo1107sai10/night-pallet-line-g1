@@ -21,6 +21,7 @@ function field(label,type,name,value='',max){
 
 export function drawAvailability(root,state,zone,controls){
   const busyList=el('section',null,'box stack')
+  busyList.id='google-calendar'
   busyList.append(el('h2','Googleカレンダー連携'))
   busyList.append(el('p',state.google_enabled===false?'この店舗ではGoogleカレンダーの照合を停止しています。':state.google.connected?(controls.demo?'サンプル予定を反映中 · 各日20:15〜21:00':state.google.shared?'共有カレンダーの空き時間を照合します。':'連携中 · '+state.google.calendar_id):
     '連携すると、予定ありの時間帯と重なる面談枠を受付対象から外します。'))
