@@ -708,7 +708,7 @@ async function start() {
   }
   addEventListener('beforeunload',event=>{if(dirty) event.preventDefault()})
   const session=demo?sessionDemo:await api('/session')
-  if(!demo&&!['admin','manager'].includes(session.actor.role)) throw new Error('シナリオ管理にはマスターまたは店舗管理マスターの権限が必要です。')
+  if(!demo&&!['admin','manager'].includes(session.actor.role)) throw new Error('ステップ配信の編集には管理会社の運用権限が必要です。')
   stores=session.stores
   const select=$('#store')
   for(const location of stores) select.add(new Option(location.name,location.id))

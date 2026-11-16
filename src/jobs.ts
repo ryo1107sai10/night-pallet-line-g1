@@ -81,7 +81,7 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
 async function sendCandidate(db: DB, r: Route, id?: string) {
   const { rows: [job] } = await db.query(`SELECT j.*, t.recipient,t.code_hash,t.user_key,t.expires_at,
     s.stopped AS store_stopped,f.disabled_at,
-    (f.role='admin' OR (f.role='manager' AND EXISTS(SELECT 1 FROM store_grant g
+    (f.role='admin' OR (f.role='manager' AND f.agency_staff AND EXISTS(SELECT 1 FROM store_grant g
       WHERE g.store_id=j.store_id AND g.staff_id=j.actor_id))) AS may_send,
     n.stopped AS tenant_stopped,
     (j.scenario_id IS NOT NULL AND (q.id IS NULL OR q.stopped OR q.revision<>j.scenario_revision OR q.channel_id<>j.channel_id))

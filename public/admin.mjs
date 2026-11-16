@@ -6,11 +6,11 @@ const masterEntry = /^\/master\/?$/i.test(location.pathname)
 const platformEntry = /^\/platform\/?$/i.test(location.pathname)
 const loginPath = platformEntry ? '/auth/platform/login' : masterEntry ? '/auth/master/login' : '/auth/login'
 scopeWorkspaceLinks()
-if (platformEntry) $('#login h1').textContent = '全体管理画面にログイン'
+if (platformEntry) $('#login h1').textContent = '管理会社の監督画面にログイン'
 const content = $('#content')
 const notice = $('#notice')
 const types = { customer:'顧客',recruitment:'採用',shared:'顧客・採用兼用' }
-const roles = { admin:'マスター',manager:'店舗管理マスター',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
+const roles = { admin:'管理会社マスター',manager:'管理会社の運用担当',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
 const staffRoles = Object.fromEntries(Object.entries(roles).filter(([role])=>role!=='admin'))
 const featureNames = {
   tags_enabled:'顧客タグ', visits_enabled:'来店予約',
@@ -237,7 +237,7 @@ async function refresh() {
   $('#workspace').hidden = false
   $('#manage-line').hidden = session.actor.role!=='admin'
   $('#back-to-platform').hidden = !session.actor.platform
-  $('#account').textContent = (session.actor.platform?'全体管理者':roles[session.actor.role]) + ' · ' + session.actor.email
+  $('#account').textContent = (session.actor.platform?'監督者':roles[session.actor.role]) + ' · ' + session.actor.email
   $('#tenant-name').textContent = session.tenant.legal_name
   if (!session.stores.some(store=>store.id===storeId)) storeId = session.stores[0]?.id
   await render()
@@ -301,7 +301,7 @@ function teamPanel(staff) {
       const row = el('div',null,'record')
       const state = member.disabled_at ? '無効' :
         member.role==='admin' && member.id!==session.actor.id ? 'マスター権限なし' :
-        member.activated ? '有効' : '招待中'
+        !member.agency_access ? '管理会社スタッフの権限なし' : member.activated ? '有効' : '招待中'
       row.append(el('p',member.email+' · '+roles[member.role]+' · '+state))
       if (member.id!==session.actor.id && !member.disabled_at) row.append(details('アカウントを無効化',
         formOf([field('無効化の理由','reason')],'セッションも失効',async ({reason})=>{
@@ -313,7 +313,9 @@ function teamPanel(staff) {
     }))
   }
   appendStaff(staff)
-  return panel('スタッフ招待と権限',details('スタッフを招待・再招待',form,result),details('スタッフ一覧',list))
+  return panel('管理会社スタッフの招待と権限',
+    el('p','この招待は管理会社の担当者に使用します。店長には、店舗のLINE公式アカウント側でチャットの権限を付与してください。'),
+    details('管理会社スタッフを招待・再招待',form,result),details('スタッフ一覧',list))
 }
 
 function connectedPanel(base, c, testers) {

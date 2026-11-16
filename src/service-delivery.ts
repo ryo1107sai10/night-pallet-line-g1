@@ -3,6 +3,7 @@ import { newId, scope, seal, tx, unseal, type Config, type DB, type Route } from
 import { channel, channelCredentials, channelReady, messagingReady, type LineAPI } from './line.js'
 import { deliveryScope, messageBudget } from './delivery-budget.js'
 import { locationOf } from './automation.js'
+import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { storeFeatures } from './store-features.js'
 import type { WorkflowSubject } from './forms.js'
@@ -37,7 +38,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId
     const {rows:[thread]}=await db.query<{address_box:string;user_key:string}>(`
       SELECT t.address_box,t.user_key FROM inbox_thread t JOIN staff f ON f.id=t.assigned_to
       WHERE t.id=$1 AND t.channel_id=$2 AND t.purpose=$3 AND t.state='handling' AND t.assigned_to=$4
-        AND f.disabled_at IS NULL AND (f.role='admin' OR (f.role IN ('manager',CASE WHEN t.purpose='recruitment' THEN 'recruiter' ELSE 'manager' END)
+        AND f.disabled_at IS NULL AND (f.role='admin' OR (f.agency_staff AND f.role IN ('manager',CASE WHEN t.purpose='recruitment' THEN 'recruiter' ELSE 'manager' END)
           AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=t.store_id AND g.staff_id=f.id)))
         AND (t.last_received_at>now()-interval '7 days' OR EXISTS (
           SELECT 1 FROM channel_relationship r WHERE r.channel_id=t.channel_id AND r.user_key=t.user_key AND r.following))
@@ -45,7 +46,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId
           AND kind IN ('follow','refollow','unfollow') ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1),false)`,
     [job.object_id,job.channel_id,job.purpose,job.actor_id])
     if(!thread||!job.body_box)return
-    return {to:unseal(cfg,'inbox-recipient:'+job.channel_id+':'+thread.user_key,thread.address_box),
+    return {userKey:thread.user_key,to:unseal(cfg,'inbox-recipient:'+job.channel_id+':'+thread.user_key,thread.address_box),
       body:unseal(cfg,'service:'+job.id,job.body_box)}
   }
   if(!liffId)return
@@ -70,7 +71,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId
         AND (b.slot_id=s.id OR (b.applicant_key=w.applicant_key AND EXISTS (SELECT 1 FROM interview_slot f WHERE f.id=b.slot_id AND f.starts_at>now()))))`,
     [job.channel_id,job.subject,slot])
     if(!rowCount)return
-    return {to,body:'面談の受付枠に変更がありました。LINE内の面談予約画面で最新の空き状況をご確認ください。\n'+link}
+    return {userKey:contact.user_key,to,body:'面談の受付枠に変更がありました。LINE内の面談予約画面で最新の空き状況をご確認ください。\n'+link}
   }
   const {rows:[booking]}=await db.query<{starts_at:Date;method:string;instructions:string}>(`SELECT s.starts_at,s.method,s.instructions
     FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id
@@ -79,7 +80,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId
   if(!booking)return
   const at=new Intl.DateTimeFormat('ja-JP',{dateStyle:'long',timeStyle:'short',timeZone:timezone}).format(booking.starts_at)
   const prefix=job.kind==='interview_reminder'?'面談のリマインドです。':'面談予約が確定しました。'
-  return {to,body:[prefix,at+'（'+(booking.method==='onsite'?'対面':'オンライン')+'）',booking.instructions,link].join('\n')}
+  return {userKey:contact.user_key,to,body:[prefix,at+'（'+(booking.method==='onsite'?'対面':'オンライン')+'）',booking.instructions,link].join('\n')}
 }
 
 export async function serviceHistory(db:DB,purpose:WorkflowSubject['purpose']){
@@ -137,6 +138,7 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     }
     const message=await messageFor(db,cfg,job,location.timezone,connection.liff_id)
     const hold=!message?'予約または通知の同意が変更されました':
+      await handoffUntil(db,job.channel_id,message.userKey)?'店長対応中':
       await messageBudget(db,location,null,undefined,job.id)||
       (quota===null?'LINEの通数を確認できません':quota<=0?'LINEの月間通数に達しました':null)
     if(!message||hold){await markStopped(db,fresh,hold??'通知対象外');return}

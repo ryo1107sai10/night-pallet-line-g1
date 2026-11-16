@@ -1,4 +1,4 @@
-import { authenticatePlatformWorkspace, enterPlatformTenant, platformTenants, platformWorkspace } from './platform.js'
+import { authenticatePlatformWorkspace, enterPlatformTenant, platformSession, platformTenants, platformWorkspace } from './platform.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
 import type pg from 'pg'
@@ -40,7 +40,7 @@ import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepar
 import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
 import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitlistInput } from './interview-notices.js'
 import { serviceHistory } from './service-delivery.js'
-import { changeThread, classifyThread, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
+import { changeThread, classifyThread, handoffInput, changeHandoff, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
 import { hostInput, queueGoogleSync, saveHost } from './interview-hosts.js'
 import { workflowChecks } from './workflow-checks.js'
 
@@ -202,8 +202,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     })
   }
   api.get('/platform/session',async(req,res)=>{
-    const actor=await tx(pool,db=>authenticate(db,platformCredential(req),'platform'))
-    res.json({actor:{id:actor.id,email:actor.email,role:'platform'}})
+    res.json(await tx(pool,db=>platformSession(db,platformCredential(req))))
   })
   api.get('/platform/tenants',async(req,res)=>{
     res.json(await tx(pool,db=>platformTenants(db,platformCredential(req))))
@@ -390,6 +389,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(workflow+'/inbox/:thread',workflowStaff((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),workPurpose(req),idOf(req,'thread'))))
   api.patch(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
     changeThread(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),inboxEdit.parse(req.body))))
+  api.patch(workflow+'/inbox/:thread/handoff',workflowStaff((db,actor,req)=>
+    changeHandoff(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),handoffInput.parse(req.body))))
   api.post(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
     writeInbox(db,cfg,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),keyOf(req),inboxText.parse(req.body)),201))
   const intake='/stores/:store/intake'
@@ -397,6 +398,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(intake+'/:thread',inStore((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),'unclassified',idOf(req,'thread'))))
   api.patch(intake+'/:thread',inStore((db,actor,req)=>
     classifyThread(db,actor,idOf(req,'store'),idOf(req,'thread'),inboxClassify.parse(req.body))))
+  api.patch(intake+'/:thread/handoff',inStore((db,actor,req)=>
+    changeHandoff(db,actor,idOf(req,'store'),'unclassified',idOf(req,'thread'),handoffInput.parse(req.body))))
   api.get(workflow+'/forms',workflowStaff((db,_actor,req)=>listForms(db,idOf(req,'store'),workPurpose(req))))
   api.put(workflow+'/forms',workflowStaff((db,actor,req)=>saveForm(db,cfg,actor,idOf(req,'store'),workPurpose(req),keyOf(req),formInput.parse(req.body))))
   api.get(workflow+'/responses',workflowStaff((db,_actor,req)=>responses(db,cfg,idOf(req,'store'),workPurpose(req))))
@@ -554,7 +557,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     requireAdmin(actor)
     await scope(db,actor.tenant_id,undefined,true)
     const { rows } = await db.query(`SELECT f.id,f.email,f.role,f.disabled_at,
-      f.password_hash IS NOT NULL AS activated,
+      f.password_hash IS NOT NULL AS activated, (f.role='admin' OR f.agency_staff) AS agency_access,
       coalesce((SELECT array_agg(g.store_id ORDER BY g.store_id) FROM store_grant g WHERE g.staff_id=f.id),'{}') AS stores
       FROM staff f WHERE NOT f.platform_actor ORDER BY f.email`)
     return rows
@@ -573,7 +576,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
 
   api.get('/stores/:store/staff-options',inStore(async(db)=>{
     const {rows}=await db.query(`SELECT f.id,f.email FROM staff f WHERE f.disabled_at IS NULL AND f.password_hash IS NOT NULL
-      AND (f.role='admin' OR EXISTS(SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=scope_store()))
+      AND (f.role='admin' OR (f.agency_staff AND EXISTS(SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=scope_store())))
       ORDER BY f.email LIMIT 150`)
     return rows
   }))

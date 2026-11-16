@@ -79,7 +79,7 @@ const blankField=()=>({key:crypto.randomUUID(),kind:'text',label:'',required:fal
 const stages={applied:'応募',interviewed:'面談実施',trial_scheduled:'体入予定',trial_done:'体入実施',hired:'入店',withdrawn:'辞退・終了'}
 const allowed={applied:['interviewed','withdrawn'],interviewed:['trial_scheduled','hired','withdrawn'],
   trial_scheduled:['trial_scheduled','trial_done','interviewed','withdrawn'],trial_done:['hired','withdrawn'],hired:[],withdrawn:[]}
-let stores,current,view=0
+let stores,current,openThread,view=0
 let actor
 
 function formEditor(root,data,path,refresh,use){
@@ -326,6 +326,7 @@ function checks(root,entries){
 function inbox(root,data,store,path,refresh,intake=false){
   root.append(el('h2',intake?'兼用LINEの受付保留':'LINE受信箱'))
   if(intake)root.append(el('p','兼用の公式LINEに届いたメッセージは、用途を確認してから該当する受信箱に移します。'))
+  root.append(el('p','店長に返信を頼むときは、会話を開いて「店長へ引き継ぐ」を選びます。'))
   const states={open:'未対応',handling:'対応中',resolved:'対応済み'}
   const state=field('対応状態','state','','',[['','すべて'],...Object.entries(states)])
   const unread=field('未確認だけ表示','unread','checkbox')
@@ -340,14 +341,38 @@ function inbox(root,data,store,path,refresh,intake=false){
       panel.append(el('p',store.name+' · '+thread.label+' · '+sender))
       const chat=el('div')
       const threadPath=path+'/'+thread.id
-      const title=[thread.unread?'未確認':null,sender,states[thread.state],dateLabel(thread.last_received_at,store.timezone)].filter(Boolean).join(' · ')
+      const handoff=thread.handoff_until && Date.parse(thread.handoff_until)>Date.now()
+      const title=[thread.unread?'未確認':null,sender,handoff?'店長対応中':states[thread.state],dateLabel(thread.last_received_at,store.timezone)].filter(Boolean).join(' · ')
       panel.append(chat)
+      if(['admin','manager'].includes(actor.role)){
+        const box=el('section',null,'record')
+        if(handoff){
+          const link=el('a','LINE公式アカウントのチャット管理を開く','studio-link')
+          link.href='https://manager.line.biz/'
+          link.target='_blank'
+          link.rel='noopener noreferrer'
+          box.append(el('strong','店長対応中 · '+dateLabel(thread.handoff_until,store.timezone)+'まで'),
+            el('p','店長はLINE公式アカウントアプリでこのトークに返信します。期限が来ると自動対応に戻ります。'),
+            controls(button('店長対応を終了する',async()=>{
+              await api(threadPath+'/handoff','PATCH',{revision:thread.revision,minutes:null})
+              await refresh('店長対応を終了しました。')
+            }),link))
+        }else{
+          box.append(el('p','この相手への自動配信を一時停止します。停止中の配信は見送ります。'),
+            form([field('引き継ぎ時間','minutes','','30',[[15,'15分'],[30,'30分'],[60,'1時間'],[120,'2時間']])],
+              '店長へ引き継ぐ',async values=>{
+                const result=await api(threadPath+'/handoff','PATCH',{revision:thread.revision,minutes:Number(values.minutes)})
+                await refresh(dateLabel(result.handoff_until,store.timezone)+'まで店長に引き継ぎました。')
+              }))
+        }
+        panel.append(box)
+      }
       if(intake){
         panel.append(form([field('振り分け先','purpose','','customer',[['customer','顧客'],['recruitment','採用']]),field('分類の根拠','reason')],
           '受信箱へ振り分ける',async values=>{
             await api(threadPath,'PATCH',{...values,revision:thread.revision});await refresh('会話を振り分けました。')
           }))
-      }else{
+      }else if(!handoff){
         const choices=[['','未割当'],...data.staff.map(person=>[person.id,person.id===actor.id?'自分':person.email])]
         panel.append(button('自分が担当する',async()=>{
           await api(threadPath,'PATCH',{revision:thread.revision,state:'handling',assigned_to:actor.id})
@@ -370,7 +395,8 @@ function inbox(root,data,store,path,refresh,intake=false){
       const row=details(title,panel)
       row.classList.add('record')
       row.ontoggle=async()=>{
-        if(!row.open)return
+        if(!row.open){if(openThread===threadPath)openThread=undefined;return}
+        openThread=threadPath
         chat.replaceChildren(el('p','読み込み中…'))
         try{
           const messages=await api(threadPath)
@@ -384,6 +410,7 @@ function inbox(root,data,store,path,refresh,intake=false){
           if(!messages.length)chat.append(el('p','表示できるメッセージがありません。'))
         }catch(error){chat.replaceChildren(el('p',error.message))}
       }
+      row.open=openThread===threadPath
       rows.append(row)
     }
     if(!rows.childElementCount)rows.append(el('p','該当する会話はありません。'))

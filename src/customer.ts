@@ -107,7 +107,7 @@ export async function updateProfile(db:DB,actor:Actor,id:string,p:z.infer<typeof
   if (tagsChanged) await requireFeature(db,current.store_id,'tags_enabled')
   if (p.assigned_to) {
     const {rowCount}=await db.query(`SELECT f.id FROM staff f WHERE f.id=$1 AND f.disabled_at IS NULL
-      AND (f.role='admin' OR EXISTS(SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=scope_store()))`,
+      AND (f.role='admin' OR (f.agency_staff AND EXISTS(SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=scope_store())))`,
       [p.assigned_to])
     if (!rowCount) throw missing()
   }

@@ -9,7 +9,7 @@ import EmbeddedPostgres from 'embedded-postgres'
 import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
-import { bootstrap, designateMaster, designatePlatformMaster, migrate } from '../dist/setup.js'
+import { bootstrap, designateMaster, inviteSupervisor, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
@@ -499,8 +499,8 @@ test('AT34 適合するテスト利用者にだけ差し込み済み本文を1�
   assert.equal(expect(await request(path+'/test-sends',{cookie:admin}),200)[0].status,'accepted')
 })
 
-async function publish(flow) {
-  const root='/stores/'+storeId+'/scenarios'
+async function publish(flow,store=storeId) {
+  const root='/stores/'+store+'/scenarios'
   const start=expect(await post(root,admin,flow,idempotency()),201)
   const url=root+'/'+start.id+'/transition'
   const fixture={start:'2026-11-14T12:00',bookingAt:'',dayCount:0,weekCount:0,booked:true,consent:true,adult:true,
@@ -1407,31 +1407,33 @@ test('公開入口からマスターを分離し、指定した法人管理者�
   expect(await request('/line-onboarding',{cookie:newMaster.cookie}),200)
 })
 
-test('全体管理と法人マスターの認証を分離し、店舗管理マスターのステップを店舗ごとに分ける',async()=>{
-  const creator='platform-control'
-  const email='platform-control@example.test'
-  const invite=await bootstrap(owner,cfg,{slug:creator,name:'全体管理の検証法人',email})
-  const sourceCookie=await activate(invite,email,creator)
-  const loginData={tenant:creator,email,password:pass,code:code(invite.setup_key,1)}
-  expect(await post('/auth/platform/login',null,loginData),401)
-  expect(await request('/platform/tenants',{cookie:sourceCookie}),401)
-  expect(await request('/platform/tenants',{cookie:sourceCookie.replace('night_session=','night_platform=')}),401)
-  await assert.rejects(designatePlatformMaster(pool,creator,email),{code:'42501'})
-  await designatePlatformMaster(owner,creator,email)
+test('北村さんはエールだけを管理し、エールの担当者のみ担当店舗で操作できる',async()=>{
+  const creator='lilu'
+  const email='kitamura@example.test'
+  const input={slug:creator,name:'リルコーポレーション',displayName:'北村さん',email,agency:'alpha'}
+  await assert.rejects(inviteSupervisor(pool,cfg,input),{code:'42501'})
+  const invite=await inviteSupervisor(owner,cfg,input)
+  await assert.rejects(inviteSupervisor(owner,cfg,{...input,slug:'another-supervisor'}),/既に登録/)
+  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)}),200)
+  const loginData={tenant:creator,email,password:pass,code:code(invite.setup_key)}
+  expect(await post('/auth/master/login',null,loginData),401)
+  expect(await post('/auth/login',null,loginData),401)
+  expect(await request('/platform/tenants',{cookie:admin}),401)
   const platform=await post('/auth/platform/login',null,loginData)
   expect(platform,200)
   assert.match(platform.cookie,/^night_platform=/)
-  expect(await request('/platform/session',{cookie:platform.cookie}),200)
+  const {actor:supervisor}=expect(await request('/platform/session',{cookie:platform.cookie}),200)
+  assert.equal(supervisor.display_name,'北村さん')
+  assert.equal(supervisor.organization,'リルコーポレーション')
   expect(await request('/session',{cookie:platform.cookie}),401)
   expect(await request('/session',{cookie:platform.cookie.replace('night_platform=','night_session=')}),401)
 
   const alpha=expect(await request('/session',{cookie:admin}),200)
   const gamma=expect(await request('/session',{cookie:other}),200)
   const legal=expect(await request('/platform/tenants',{cookie:platform.cookie}),200)
-  assert.ok(legal.some(t=>t.id===alpha.tenant.id))
-  assert.ok(legal.some(t=>t.id===gamma.tenant.id))
+  assert.deepEqual(legal.map(t=>t.id),[alpha.tenant.id])
   const open=async path=>send(path,{headers:{Cookie:platform.cookie},redirect:'manual'})
-  assert.match(await (await open('/platform/')).text(),/法人一覧/)
+  assert.match(await (await open('/platform/')).text(),/管理会社の監督/)
   const scopePath=tenant=>'/platform/tenants/'+tenant+'/api/v1'
   async function scoped(tenant,path,method='GET',data,cookie=platform.cookie){
     const response=await send(scopePath(tenant)+path,{method,headers:{Origin:origin,Cookie:cookie,
@@ -1440,31 +1442,24 @@ test('全体管理と法人マスターの認証を分離し、店舗管理マ�
     return {status:response.status,data:await response.json()}
   }
   const enter=tenant=>post('/platform/tenants/'+tenant+'/enter',platform.cookie,{})
-  expect(await scoped(gamma.tenant.id,'/session'),404)
-  expect(await post('/platform/tenants/'+gamma.tenant.id+'/enter',admin,{}),401)
+  expect(await post('/platform/tenants/'+alpha.tenant.id+'/enter',admin,{}),401)
   const workA=expect(await enter(alpha.tenant.id),200)
-  const workB=expect(await enter(gamma.tenant.id),200)
   assert.equal(new URL(workA.url,origin).pathname,'/platform/tenants/'+alpha.tenant.id+'/master/')
-  assert.match(await (await open(workB.url)).text(),/id="workspace"/)
-  expect(await scoped(gamma.tenant.id,'/session','GET',undefined,admin),401)
+  assert.match(await (await open(workA.url)).text(),/id="workspace"/)
+  expect(await enter(gamma.tenant.id),404)
+  expect(await scoped(gamma.tenant.id,'/session'),404)
+  expect(await scoped(alpha.tenant.id,'/session','GET',undefined,admin),401)
   const one=expect(await scoped(alpha.tenant.id,'/session'),200)
-  const two=expect(await scoped(gamma.tenant.id,'/session'),200)
   assert.equal(one.actor.platform,true)
-  assert.equal(one.tenant.id,alpha.tenant.id)
-  assert.equal(two.tenant.id,gamma.tenant.id)
-  assert.ok(one.stores.some(s=>s.id===storeId))
-  assert.ok(!two.stores.some(s=>s.id===storeId))
-  expect(await scoped(gamma.tenant.id,'/stores/'+storeId+'/connections'),404)
-  const created=expect(await scoped(gamma.tenant.id,'/stores','POST',storeData('全体管理が登録した検証店')),201).id
-  assert.ok(expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===created))
-  assert.ok(!expect(await request('/session',{cookie:admin}),200).stores.some(s=>s.id===created))
-  const sourceId=expect(await request('/platform/session',{cookie:platform.cookie}),200).actor.id
-  const trace=expect(await scoped(gamma.tenant.id,'/stores/'+created+'/audit'),200).find(entry=>entry.operation==='store.create')
+  assert.deepEqual(one.stores.map(s=>s.id),alpha.stores.map(s=>s.id))
+  const created=expect(await scoped(alpha.tenant.id,'/stores','POST',storeData('北村さんが登録した検証店')),201).id
+  assert.ok(expect(await request('/session',{cookie:admin}),200).stores.some(s=>s.id===created))
+  assert.ok(!expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===created))
+  const trace=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/audit'),200).find(entry=>entry.operation==='store.create')
   assert.equal(trace.actor,'全体管理者')
-  assert.equal(trace.details.platform_staff_id,sourceId)
-  const tenantTrace=expect(await request('/stores/'+created+'/audit',{cookie:other}),200).find(entry=>entry.operation==='store.create')
+  assert.equal(trace.details.platform_staff_id,supervisor.id)
+  const tenantTrace=expect(await request('/stores/'+created+'/audit',{cookie:admin}),200).find(entry=>entry.operation==='store.create')
   assert.equal(tenantTrace.details.platform_staff_id,undefined)
-  assert.equal(tenantTrace.actor,'全体管理者')
 
   const managerEmail='step-manager@example.test'
   const next=expect(await post('/staff/invites',admin,{email:managerEmail,role:'manager',stores:[storeId]},idempotency()),201)
@@ -1482,5 +1477,87 @@ test('全体管理と法人マスターの認証を分離し、店舗管理マ�
   expect(await post('/platform/logout',platform.cookie,{}),200)
   expect(await scoped(alpha.tenant.id,'/session'),401)
   expect(await scoped(gamma.tenant.id,'/session'),401)
-  expect(await request('/session',{cookie:sourceCookie}),200)
+  await tx(owner,async db=>{
+    await scope(db,alpha.tenant.id)
+    await db.query('UPDATE staff SET agency_staff=false WHERE id=$1',[next.id])
+  })
+  expect(await request('/session',{cookie:manager}),401)
+  expect(await post('/auth/login',null,{tenant:'alpha',email:managerEmail,password:pass,code:code(next.setup_key,1)}),401)
+})
+
+test('店長引き継ぎは会話単位でステップ配信と管理会社の返信を停止し、終了後は新しい配信を再開する',async()=>{
+  const {store,root,connection,inbound}=await workflowStore('店長返信検証','customer','9',{inbox_enabled:true,campaigns_enabled:true})
+  const path=root+'/workflows/customer/inbox'
+  const draft=starter()
+  const body='店長対応の自動配信テスト'
+  await publish({...draft,name:'店長対応の検証',channel:connection,trigger:'manual',rejoin:true,cooldownDays:1,
+    entry:'message',nodes:[{id:'message',type:'message',name:'案内',category:'service',body,next:'end'},
+      {id:'end',type:'end',name:'完了'}]},store)
+  const customer=await post('/customer/login',null,{connection,id_token:'signed-token-first-user'})
+  const second=await post('/customer/login',null,{connection,id_token:'signed-token-second-user'})
+  for(const person of [customer,second]){
+    const account=expect(await request('/customer/account',{cookie:person.cookie}),200)
+    expect(await patch('/customer/preferences',person.cookie,{revision:account.revision,version:account.policy_version,
+      preferences:{service_consent:true,marketing_consent:true,all_stop:false}}),200)
+  }
+  for(const item of expect(await request(root+'/customers',{cookie:admin}),200)){
+    expect(await patch(root+'/customers/'+item.id,admin,{revision:item.revision,display_name:'店長対応の検証',memo:'',
+      assigned_to:null,verified20:true,active_chat:false,reason:'検証用の本人確認'}),200)
+  }
+  await inbound([event('handoff-follow-first','follow',Date.now()),
+    {...event('handoff-follow-second','follow',Date.now()),source:{type:'user',userId:user2}},
+    {...event('handoff-message-first','message',Date.now()),message:{id:'91001',type:'text',text:'店長へ質問'}}])
+  await worker()
+  const nowHour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tokyo',hour:'2-digit',hourCycle:'h23'}).format(new Date()))
+  const clock=hour=>String((hour+24)%24).padStart(2,'0')+':00'
+  const broadcast='店長対応の絞り込み配信テスト'
+  const campaign=expect(await post(root+'/campaigns',admin,{channel:connection,title:broadcast,body:broadcast,
+    scheduled_at:new Date().toISOString(),criteria:{tags:[],match:'all',last_visit_days:null,assigned_to:null,
+      windowStart:clock(nowHour-1),windowEnd:clock(nowHour+2)}},idempotency()),201)
+  assert.equal(campaign.eligible,2)
+  expect(await post(root+'/campaigns/'+campaign.id+'/approve',admin,{recipients:2,approved:true}),200)
+  const getThread=async()=>(expect(await request(path,{cookie:admin}),200).threads)[0]
+  const thread=await getThread()
+  const url=path+'/'+thread.id
+  const {actor}=expect(await request('/session',{cookie:admin}),200)
+  const {revision}=expect(await patch(url,admin,{revision:thread.revision,assigned_to:actor.id,state:'handling'}),200)
+  const reply='引き継ぎ前に準備した返信'
+  expect(await post(url,admin,{revision,body:reply,internal:false},idempotency()),201)
+  const ready=await getThread()
+  expect(await patch(url+'/handoff',other,{revision:ready.revision,minutes:30}),404)
+  expect(await patch(url+'/handoff',admin,{revision:ready.revision,minutes:1}),400)
+  const hold=expect(await patch(url+'/handoff',admin,{revision:ready.revision,minutes:30}),200)
+  assert.ok(Date.parse(hold.handoff_until)>Date.now()+28*60000)
+  const held=await getThread()
+  assert.equal(held.handoff_until,hold.handoff_until)
+  assert.equal(held.state,'open')
+  expect(await patch(url+'/handoff',admin,{revision:ready.revision,minutes:null}),409)
+  expect(await patch(url,admin,{revision:held.revision,state:'handling',assigned_to:actor.id}),409)
+  const people=await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    return (await db.query(`SELECT c.id,t.id IS NOT NULL AS held FROM customer c LEFT JOIN inbox_thread t
+      ON c.channel_id=t.channel_id AND c.user_key=t.user_key ORDER BY held DESC`)).rows
+  })
+  const start=id=>post(root+'/customers/'+id+'/enroll',admin,{reason:'店長対応を検証'},idempotency())
+  for(const person of people)expect(await start(person.id),202)
+  for(let i=0;i<4;i++)await worker()
+  assert.deepEqual(pushesLog.filter(item=>item.messages[0].text===body).map(item=>item.to),[user2])
+  assert.deepEqual(pushesLog.filter(item=>item.messages[0].text===broadcast).map(item=>item.to),[user2])
+  assert.ok(!pushesLog.some(item=>item.messages[0].text===reply))
+  const messages=expect(await request(url,{cookie:admin}),200)
+  assert.equal(messages.find(item=>item.body===reply).status,'cancelled')
+
+  await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    await db.query("UPDATE line_handoff SET until_at=now()-interval '1 second' WHERE channel_id=$1",[connection])
+    await db.query("UPDATE enrollment SET ended_at=now()-interval '2 days' WHERE customer_id=$1 AND ended_at IS NOT NULL",[people[0].id])
+  })
+  const expired=await getThread()
+  assert.equal(expired.handoff_until,null)
+  expect(await start(people[0].id),202)
+  for(let i=0;i<4;i++)await worker()
+  assert.deepEqual(pushesLog.filter(item=>item.messages[0].text===body).map(item=>item.to),[user2,user])
+  expect(await patch(url+'/handoff',admin,{revision:expired.revision,minutes:15}),200)
+  expect(await patch(url+'/handoff',admin,{revision:(await getThread()).revision,minutes:null}),200)
+  assert.equal((await getThread()).handoff_until,null)
 })

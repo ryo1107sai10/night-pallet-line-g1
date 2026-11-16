@@ -34,6 +34,8 @@ async function target(db:DB,channelId:string,filter:Criteria,customer?:string){
   const {rows}=await db.query<{id:string;reason:string|null;address:string;user_key:string}>(`SELECT c.id,c.user_key,c.line_address AS address,
     CASE WHEN c.all_stop OR c.marketing_stop OR NOT c.marketing_consent THEN '販促同意なし・配信停止'
       WHEN c.verified_20_at IS NULL THEN '20歳以上の確認なし'
+      WHEN EXISTS (SELECT 1 FROM line_handoff h WHERE h.channel_id=c.channel_id AND h.user_key=c.user_key
+        AND h.until_at>now()) THEN '店長対応中'
       WHEN c.active_chat OR EXISTS (SELECT 1 FROM inbox_thread x JOIN store s ON s.id=x.store_id WHERE
         x.channel_id=c.channel_id AND x.user_key=c.user_key AND x.purpose='customer' AND x.state='handling' AND s.inbox_enabled) THEN '有人対応中'
       WHEN (SELECT e.kind FROM webhook_event e WHERE e.channel_id=c.channel_id AND e.user_key=c.user_key

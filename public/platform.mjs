@@ -34,14 +34,14 @@ logout.onclick = async()=>{
 
 try {
   const [{actor},records]=await Promise.all([platformApi('/session'),platformApi('/tenants')])
-  document.querySelector('#account').textContent='全体管理者 · '+actor.email
-  if (!records.length) notice.textContent='登録されている法人がありません。'
+  document.querySelector('#account').textContent=actor.organization+' · '+actor.display_name
+  if (!records.length) notice.textContent='管理を担当する会社が登録されていません。'
   for (const tenant of records) {
     const row=element('li',null,'record')
     const detail=element('div',null,'onboarding-store')
     detail.append(element('strong',tenant.legal_name),element('span',tenant.stores+'店舗 · 法人ID '+tenant.slug,'muted'))
     if (tenant.stopped) detail.append(element('span','配信停止中','status bad'))
-    const open=element('button','法人の管理画面を開く')
+    const open=element('button','契約店舗の管理を開く')
     open.type='button'
     open.onclick=async()=>{
       open.disabled=true

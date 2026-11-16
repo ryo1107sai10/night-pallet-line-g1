@@ -1,14 +1,14 @@
 import { readFile } from 'node:fs/promises'
 import type pg from 'pg'
 import { z } from 'zod'
-import { audit, configFromEnvironment, email, newId, poolFor, scope, slug, text, tx } from './core.js'
+import { audit, configFromEnvironment, email, newId, poolFor, scope, slug, text, tx, type DB } from './core.js'
 import { createInvite } from './auth.js'
 
 export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
   const versions = ['001_g1','002_scenarios','003_operations','004_interviews','005_interview_hours',
     '006_interview_availability','007_store_features','008_forms_sources','009_campaigns','010_contact_menus','011_inbox',
-    '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master']
+    '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -36,6 +36,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.campaign,night.campaign_delivery TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.workflow_contact,night.workflow_menu,night.service_delivery TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.interview_waitlist TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.line_handoff TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.inbox_thread,night.inbox_message TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.interview_host,night.interview_google_sync TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.interview_google_session,night.interview_google_calendar TO ${role}`)
@@ -51,28 +52,53 @@ export async function migrate(pool: pg.Pool, role: string) {
   })
 }
 
-export async function bootstrap(pool: pg.Pool, cfg: ReturnType<typeof configFromEnvironment>,
-  data: { slug: string; name: string; email: string; billing_contact?: string }) {
-  return tx(pool, async db => {
-    const id = newId()
-    await scope(db,id,undefined,true)
-    const { rows: [registered] } = await db.query('SELECT tenant_id FROM tenant_route WHERE slug=$1',[data.slug])
-    if (registered) {
-      await scope(db,registered.tenant_id)
-      const { rows: [first] } = await db.query(`SELECT f.id FROM staff f WHERE tenant_id=$2 AND email=$1 AND role='admin'
-        AND password_hash IS NULL AND disabled_at IS NULL AND NOT platform_actor
-        AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND m.staff_id<>f.id)`,[data.email,registered.tenant_id])
-      if (!first) throw new Error('法人IDは既に使用されています。')
-      const invite=await createInvite(db,cfg,registered.tenant_id,{email:data.email,role:'admin',stores:[]},null)
-      await db.query('INSERT INTO tenant_master (tenant_id,staff_id) VALUES ($1,$2) ON CONFLICT (tenant_id) DO NOTHING',
-        [registered.tenant_id,invite.id])
-      return invite
-    }
-    await db.query('INSERT INTO tenant(id,slug,legal_name,billing_contact) VALUES($1,$2,$3,$4)',
-      [id,data.slug,data.name,data.billing_contact ?? data.email])
+type BootstrapInput = { slug: string; name: string; email: string; billing_contact?: string }
+
+async function firstInvite(db:DB,cfg:ReturnType<typeof configFromEnvironment>,data:BootstrapInput,supervisorOnly:boolean) {
+  const {rows:[registered]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[data.slug])
+  const id=registered?.tenant_id??newId()
+  await scope(db,id,undefined,true)
+  if (registered) {
+    const {rows:[first]}=await db.query(`SELECT f.id FROM staff f JOIN tenant t ON t.id=f.tenant_id
+      WHERE f.tenant_id=$2 AND f.email=$1 AND f.role='admin' AND NOT f.platform_actor AND t.supervisor_only=$3
+      AND f.password_hash IS NULL AND f.disabled_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND m.staff_id<>f.id)`,
+    [data.email,id,supervisorOnly])
+    if (!first) throw new Error('法人IDは既に使用されています。')
+  } else {
+    await db.query('INSERT INTO tenant(id,slug,legal_name,billing_contact,supervisor_only) VALUES($1,$2,$3,$4,$5)',
+      [id,data.slug,data.name,data.billing_contact??data.email,supervisorOnly])
     await db.query('INSERT INTO tenant_route VALUES($1,$2)',[data.slug,id])
-    const invite=await createInvite(db,cfg,id,{email:data.email,role:'admin',stores:[]},null)
-    await db.query('INSERT INTO tenant_master (tenant_id,staff_id) VALUES ($1,$2)',[id,invite.id])
+  }
+  const invite=await createInvite(db,cfg,id,{email:data.email,role:'admin',stores:[]},null)
+  await db.query('INSERT INTO tenant_master (tenant_id,staff_id) VALUES ($1,$2) ON CONFLICT (tenant_id) DO NOTHING',
+    [id,invite.id])
+  return {invite,id}
+}
+
+export async function bootstrap(pool:pg.Pool,cfg:ReturnType<typeof configFromEnvironment>,data:BootstrapInput) {
+  return tx(pool,async db=>(await firstInvite(db,cfg,data,false)).invite)
+}
+
+export async function inviteSupervisor(pool:pg.Pool,cfg:ReturnType<typeof configFromEnvironment>,
+  data:BootstrapInput & { agency: string; displayName: string }) {
+  return tx(pool,async db=>{
+    await db.query("SELECT pg_advisory_xact_lock(hashtext('night.platform_master'))")
+    const {rows:[agency]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[data.agency])
+    if (!agency) throw new Error('管理対象の法人が見つかりません。')
+    await scope(db,agency.tenant_id)
+    if (!(await db.query('SELECT 1 FROM tenant WHERE NOT supervisor_only')).rowCount) {
+      throw new Error('管理会社の法人IDを指定してください。')
+    }
+    const {invite,id}=await firstInvite(db,cfg,data,true)
+    const result=await db.query(`INSERT INTO platform_master (tenant_id,staff_id,agency_id,display_name)
+      VALUES ($1,$2,$3,$4) ON CONFLICT (singleton) DO UPDATE
+      SET tenant_id=excluded.tenant_id,staff_id=excluded.staff_id,agency_id=excluded.agency_id,display_name=excluded.display_name
+      WHERE platform_master.agency_id IS NULL
+        OR (platform_master.tenant_id,platform_master.staff_id)=(excluded.tenant_id,excluded.staff_id)`,
+    [id,invite.id,agency.tenant_id,data.displayName])
+    if (!result.rowCount) throw new Error('監督者が既に登録されています。')
+    await audit(db,id,null,null,'platform.designated',invite.id,null,{agency_id:agency.tenant_id})
     return invite
   })
 }
@@ -98,37 +124,18 @@ export async function designateMaster(pool:pg.Pool,tenantSlug:string,address:str
   })
 }
 
-export async function designatePlatformMaster(pool:pg.Pool,tenantSlug:string,address:string) {
-  return tx(pool,async db=>{
-    await db.query("SELECT pg_advisory_xact_lock(hashtext('night.platform_master'))")
-    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[tenantSlug])
-    if (!tenant) throw new Error('該当する法人が見つかりません。')
-    await scope(db,tenant.tenant_id,undefined,true)
-    const {rows:[staff]}=await db.query<{id:string}>(`SELECT id FROM staff WHERE tenant_id=$1 AND email=$2
-      AND NOT platform_actor AND disabled_at IS NULL AND password_hash IS NOT NULL FOR UPDATE`,[tenant.tenant_id,address])
-    if (!staff) throw new Error('有効な個人アカウントを指定してください。')
-    const {rows:[previous]}=await db.query<{tenant_id:string;staff_id:string}>('SELECT tenant_id,staff_id FROM platform_master')
-    if (previous?.staff_id===staff.id && previous.tenant_id===tenant.tenant_id) return
-    if (previous) {
-      await scope(db,previous.tenant_id)
-      await db.query("DELETE FROM staff_session WHERE staff_id=$1 AND session_kind='platform'",[previous.staff_id])
-      await scope(db,tenant.tenant_id,undefined,true)
-    }
-    await db.query(`INSERT INTO platform_master (tenant_id,staff_id) VALUES ($1,$2)
-      ON CONFLICT (singleton) DO UPDATE SET tenant_id=excluded.tenant_id,staff_id=excluded.staff_id`,[tenant.tenant_id,staff.id])
-    await audit(db,tenant.tenant_id,null,null,'platform.designated',staff.id)
-  })
-}
-
 if (import.meta.main) {
   const migrationPool = poolFor(process.env.MIGRATION_DATABASE_URL)
   const url = process.env.DATABASE_URL
   try {
     await migrate(migrationPool, decodeURIComponent(new URL(url ?? '').username))
     const [tenant, name, address, billing] = process.argv.slice(2)
-    if (tenant==='--platform-master') {
-      await designatePlatformMaster(migrationPool,slug.parse(name),email.parse(address))
-      console.log('全体管理者のアカウントを指定しました。')
+    if (tenant==='--invite-supervisor') {
+      const [agency,supervisor,organization,displayName,recipient]=process.argv.slice(3)
+      const data=z.object({agency:slug,slug,name:text(120),displayName:text(120),email})
+        .parse({agency,slug:supervisor,name:organization,displayName,email:recipient})
+      const invite=await inviteSupervisor(migrationPool,configFromEnvironment(),data)
+      console.log(JSON.stringify(invite,null,2))
     } else if (tenant==='--master') {
       await designateMaster(migrationPool,slug.parse(name),email.parse(address))
       console.log('マスターアカウントを指定しました。')

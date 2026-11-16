@@ -1,9 +1,10 @@
 import { z } from 'zod'
-import { audit, conflict, missing, newId, once, revision, seal, text, unseal, uuid,
+import { audit, conflict, forbidden, Fault, missing, newId, once, revision, seal, text, unseal, uuid,
   type Actor, type Config, type DB } from './core.js'
 import type { Channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { interruptService,queueService } from './service-delivery.js'
+import { handoffUntil } from './line-handoff.js'
 import { requireFeature } from './store-features.js'
 
 type Use='customer'|'recruitment'|'unclassified'
@@ -12,6 +13,9 @@ type Thread={id:string;tenant_id:string;store_id:string;channel_id:string;purpos
   assigned_to:string|null;state:'open'|'handling'|'resolved';unread:boolean;last_received_at:Date;revision:number}
 export const inboxEdit=z.strictObject({revision,state:z.enum(['open','handling','resolved']),assigned_to:uuid.nullable()})
 export const inboxText=z.strictObject({revision,body:text(3500),internal:z.boolean()})
+export const handoffInput=z.strictObject({
+  revision, minutes:z.union([z.literal(15),z.literal(30),z.literal(60),z.literal(120)]).nullable(),
+})
 export const inboxClassify=z.strictObject({revision,purpose:z.enum(['customer','recruitment']),reason:text(200)})
 
 export async function recordInboxEvent(db:DB,cfg:Config,c:Channel,key:string,user:string,event:Incoming,enabled:boolean){
@@ -51,14 +55,15 @@ async function getThread(db:DB,id:string,use:Use){
 export async function inboxOverview(db:DB,store:string,use:Use,platformActor?:string){
   await requireFeature(db,store,'inbox_enabled')
   const {rows:threads}=await db.query(`SELECT t.id,t.state,t.unread,t.assigned_to,t.last_received_at,t.revision,ch.label,
-    CASE WHEN $1='customer' THEN c.display_name END AS name
+    CASE WHEN $1='customer' THEN c.display_name END AS name,h.until_at AS handoff_until
     FROM inbox_thread t JOIN channel ch ON ch.id=t.channel_id
     LEFT JOIN customer c ON $1='customer' AND c.channel_id=t.channel_id AND c.user_key=t.user_key
+    LEFT JOIN line_handoff h ON h.channel_id=t.channel_id AND h.user_key=t.user_key AND h.until_at>now()
     WHERE t.purpose=$1 AND t.last_received_at>=now()-interval '12 months'
     ORDER BY t.unread DESC,t.last_received_at DESC,t.id LIMIT 150`,[use])
   const {rows:staff}=await db.query(`SELECT f.id,CASE WHEN f.platform_actor THEN '全体管理者' ELSE f.email END AS email
     FROM staff f WHERE f.disabled_at IS NULL AND (f.password_hash IS NOT NULL OR f.platform_actor AND f.id=$3)
-    AND (f.role='admin' OR (f.role IN ('manager',CASE WHEN $1='recruitment' THEN 'recruiter' ELSE 'manager' END)
+    AND (f.role='admin' OR (f.agency_staff AND f.role IN ('manager',CASE WHEN $1='recruitment' THEN 'recruiter' ELSE 'manager' END)
       AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id))) ORDER BY f.email`,[use,store,platformActor ?? null])
   return {threads,staff}
 }
@@ -79,11 +84,14 @@ export async function changeThread(db:DB,actor:Actor,store:string,use:Use,id:str
   await requireFeature(db,store,'inbox_enabled')
   const thread=await getThread(db,id,use)
   if(thread.revision!==data.revision)throw conflict()
+  if(data.state==='handling' && await handoffUntil(db,thread.channel_id,thread.user_key)){
+    throw new Fault(409,'MANUAL_HANDOFF','店長の対応を終了してから、担当を変更してください。')
+  }
   if(actor.role==='recruiter'&&((thread.assigned_to&&thread.assigned_to!==actor.id)||(data.assigned_to&&data.assigned_to!==actor.id)))throw missing()
   if(data.assigned_to){
     const valid=await db.query(`SELECT 1 FROM staff f WHERE f.id=$1 AND f.disabled_at IS NULL
       AND (NOT f.platform_actor OR f.id=$4)
-      AND (f.role='admin' OR (f.role IN ('manager',CASE WHEN $3='recruitment' THEN 'recruiter' ELSE 'manager' END)
+      AND (f.role='admin' OR (f.agency_staff AND f.role IN ('manager',CASE WHEN $3='recruitment' THEN 'recruiter' ELSE 'manager' END)
         AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id)))`,[data.assigned_to,store,use,actor.platform?actor.id:null])
     if(!valid.rowCount)throw missing()
   }
@@ -113,6 +121,32 @@ export async function classifyThread(db:DB,actor:Actor,store:string,id:string,da
   return {classified:true}
 }
 
+export async function changeHandoff(db:DB,actor:Actor,store:string,use:Use,id:string,data:z.infer<typeof handoffInput>){
+  if(!['admin','manager'].includes(actor.role))throw forbidden()
+  await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'inbox_enabled')
+  const thread=await getThread(db,id,use)
+  if(thread.revision!==data.revision)throw conflict()
+  let until:Date|null=null
+  if(data.minutes!==null){
+    const {rows:[saved]}=await db.query<{until_at:Date}>(`INSERT INTO line_handoff (tenant_id,store_id,channel_id,user_key,until_at)
+      VALUES($1,$2,$3,$4,now()+make_interval(mins=>$5))
+      ON CONFLICT(channel_id,user_key) DO UPDATE SET until_at=excluded.until_at RETURNING until_at`,
+    [actor.tenant_id,store,thread.channel_id,thread.user_key,data.minutes])
+    until=saved.until_at
+    // Replies queued by the agency must not compete with the store manager.
+    const {rows:threads}=await db.query<{id:string}>(`UPDATE inbox_thread
+      SET state=CASE WHEN state='handling' THEN 'open' ELSE state END,revision=revision+1
+      WHERE channel_id=$1 AND user_key=$2 RETURNING id`,[thread.channel_id,thread.user_key])
+    for(const entry of threads)await interruptService(db,'object_id',entry.id,'店長へ引き継ぎ',['chat_reply'])
+  }else{
+    await db.query('DELETE FROM line_handoff WHERE channel_id=$1 AND user_key=$2',[thread.channel_id,thread.user_key])
+    await db.query('UPDATE inbox_thread SET revision=revision+1 WHERE channel_id=$1 AND user_key=$2',[thread.channel_id,thread.user_key])
+  }
+  await audit(db,actor.tenant_id,store,actor.id,until?'inbox.handoff_started':'inbox.handoff_ended',id,null,{until})
+  return {handoff_until:until}
+}
+
 export async function writeInbox(db:DB,cfg:Config,actor:Actor,store:string,use:Use,id:string,key:string,data:z.infer<typeof inboxText>){
   return once(db,cfg,actor,'inbox.write',key,{store,use,id,data},async()=>{
     await lockDispatch(db,actor.tenant_id)
@@ -120,6 +154,9 @@ export async function writeInbox(db:DB,cfg:Config,actor:Actor,store:string,use:U
     const thread=await getThread(db,id,use)
     if(thread.revision!==data.revision)throw conflict()
     if(use==='unclassified'||thread.assigned_to!==actor.id||thread.state!=='handling')throw missing()
+    if(!data.internal && await handoffUntil(db,thread.channel_id,thread.user_key)){
+      throw new Fault(409,'MANUAL_HANDOFF','店長が対応中です。返信はLINE公式アカウントアプリから行ってください。')
+    }
     const message=newId()
     const expiry=new Date(Date.now()+15*60000)
     let job:string|undefined

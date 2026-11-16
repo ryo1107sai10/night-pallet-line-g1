@@ -15,7 +15,7 @@ export const memberRole = z.enum(['admin', 'manager', 'sales', 'recruiter', 'rep
 const loginSchema = z.strictObject({ tenant: slug, email, password: loginPassword, code: factor })
 const acceptSchema = z.strictObject({ invite: opaque, password, code: factor })
 type StaffRow = Actor & {
-  disabled_at: Date | null; password_hash: string | null; totp_secret: string; last_totp_step: string
+  disabled_at: Date | null; password_hash: string | null; totp_secret: string; last_totp_step: string; agency_staff:boolean
 }
 
 function derive(pass: string, salt: string) {
@@ -79,15 +79,17 @@ export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: stri
   const result = await tx(pool, async db => {
     const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE slug=$1', [data.tenant])
     if (directory) await scope(db, directory.tenant_id)
-    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean}>(`SELECT f.*,
+    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean; supervisor_only:boolean}>(`SELECT f.*,
       EXISTS(SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_master,
-      EXISTS(SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_platform
-      FROM staff f WHERE f.email=$1 AND NOT f.platform_actor FOR UPDATE OF f`, [data.email])
+      EXISTS(SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
+        AND m.agency_id IS NOT NULL) AS designated_platform,
+      t.supervisor_only
+      FROM staff f JOIN tenant t ON t.id=f.tenant_id WHERE f.email=$1 AND NOT f.platform_actor FOR UPDATE OF f`, [data.email])
     const passOk = await verifyPassword(data.password, staff?.password_hash)
     if (!staff || staff.disabled_at || !passOk) return null
     const step = consumeFactor(cfg, staff, data.code)
     const authorized = mode==='platform' ? staff.designated_platform :
-      staff.role==='admin' ? staff.designated_master : mode==='staff'
+      !staff.supervisor_only && (staff.role==='admin' ? staff.designated_master : mode==='staff' && staff.agency_staff)
     if (step === null || !authorized) return null
     const raw = token()
     await db.query('UPDATE staff SET last_totp_step=$2 WHERE id=$1', [staff.id, step])
@@ -109,14 +111,14 @@ export async function authenticate(db: DB, credential: string | undefined, kind:
   }
   await scope(db, tenantId)
   const { rows: [actor] } = await db.query<Actor>(`SELECT f.id,f.tenant_id,f.role,f.email
-    FROM staff_session s JOIN staff f ON (s.tenant_id,s.staff_id)=(f.tenant_id,f.id)
+    FROM staff_session s JOIN staff f ON (s.tenant_id,s.staff_id)=(f.tenant_id,f.id) JOIN tenant t ON t.id=f.tenant_id
     WHERE s.token_hash=$1 AND s.session_kind=$2 AND s.expires_at>now()
       AND NOT f.platform_actor AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL
       AND CASE WHEN $2='platform' THEN EXISTS (
-        SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
-      ) ELSE f.role<>'admin' OR EXISTS (
+        SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id) AND m.agency_id IS NOT NULL
+      ) ELSE NOT t.supervisor_only AND CASE WHEN f.role='admin' THEN EXISTS (
         SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
-      ) END
+      ) ELSE f.agency_staff END END
     FOR SHARE OF f`,
     [digest(raw),kind])
   if (!actor) throw unauthenticated()
@@ -166,11 +168,11 @@ export async function createInvite(db: DB, cfg: Config, tenant: string,
   if (existing) {
     await db.query('DELETE FROM invite WHERE staff_id=$1', [id])
     await db.query('DELETE FROM store_grant WHERE staff_id=$1', [id])
-    await db.query('UPDATE staff SET role=$2,totp_secret=$3 WHERE id=$1', [id, data.role, encrypted])
+    await db.query('UPDATE staff SET role=$2,totp_secret=$3,agency_staff=$4 WHERE id=$1', [id, data.role, encrypted, actorId!==null])
   } else {
-    const staff = await db.query(`INSERT INTO staff(id,tenant_id,email,role,totp_secret)
-      VALUES($1,$2,$3,$4,$5) ON CONFLICT (tenant_id,email) DO NOTHING RETURNING id`,
-      [id, tenant, data.email, data.role, encrypted])
+    const staff = await db.query(`INSERT INTO staff(id,tenant_id,email,role,totp_secret,agency_staff)
+      VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,email) DO NOTHING RETURNING id`,
+      [id, tenant, data.email, data.role, encrypted, actorId!==null])
     if (!staff.rowCount) throw conflict()
   }
   await db.query(`INSERT INTO store_grant(tenant_id,staff_id,store_id)
@@ -198,7 +200,8 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
       ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND NOT f.platform_actor AND f.disabled_at IS NULL
         AND f.password_hash IS NULL
-        AND (f.role<>'admin' OR EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)))
+        AND CASE WHEN f.role='admin' THEN EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id))
+          ELSE f.agency_staff END
       FOR UPDATE OF f`, [hash])
     if (!staff) throw invalid()
     const step = consumeFactor(cfg, staff, data.code)

@@ -3,6 +3,7 @@ import { localPart, nextWindow, renderMessage, waitUntil } from '../public/studi
 import { audit, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
 import { channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
 import { customerById, emitDelivery, endCustomerRuns, ensureCustomer, stopFromLine, type Customer } from './customer.js'
+import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
 import type { Graph } from './scenario.js'
 import { messageBudget } from './delivery-budget.js'
@@ -164,7 +165,7 @@ async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,cst:Customer,boo
   let staff=''
   if (cst.assigned_to) {
     const {rows:[owner]}=await db.query(`SELECT f.id FROM staff f WHERE f.id=$1 AND f.disabled_at IS NULL
-      AND (f.role='admin' OR EXISTS (SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=$2))`,[cst.assigned_to,s.id])
+      AND (f.role='admin' OR (f.agency_staff AND EXISTS (SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=$2)))`,[cst.assigned_to,s.id])
     if (owner) staff='店舗担当者'
   }
   const display=booking?new Intl.DateTimeFormat('ja-JP',{timeZone:s.timezone,dateStyle:'long',timeStyle:'short'}).format(booking.starts_at):''
@@ -190,6 +191,7 @@ async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer
   if (pending.rowCount) return 'LINEで配信停止を受信'
   const handling=await db.query(`SELECT 1 FROM inbox_thread x JOIN store s ON s.id=x.store_id WHERE x.channel_id=$1
     AND x.user_key=$2 AND x.purpose='customer' AND x.state='handling' AND s.inbox_enabled`,[c.id,cst.user_key])
+  if (await handoffUntil(db,c.id,cst.user_key)) return '店長対応中'
   if (cst.active_chat||handling.rowCount) return '有人対応中'
   if (category==='service') return cst.service_consent?null:'業務案内の同意がありません'
   if (!cst.marketing_consent||cst.marketing_stop) return '販促の同意がありません'
