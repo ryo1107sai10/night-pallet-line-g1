@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import { newId, scope, seal, tx, unseal, type Config, type DB, type Route } from './core.js'
-import { channel, channelCredentials, channelReady, messagingReady, type LineAPI } from './line.js'
+import { channel, channelCredentials, channelReady, messagingReady, testDeliveryConfirmed, type Channel, type LineAPI } from './line.js'
 import { deliveryScope, messageBudget } from './delivery-budget.js'
 import { locationOf } from './automation.js'
 import { handoffUntil } from './line-handoff.js'
@@ -33,7 +33,17 @@ export async function interruptService(db:DB,clause:'object_id'|'subject'|'chann
     AND status IN ('queued','submitting','unknown')`,[value,reason,kinds])
 }
 
-async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId:string|null){
+async function testRecipient(db:DB,connection:Channel,userKey:string) {
+  const {rowCount}=await db.query(`SELECT 1 FROM tester t JOIN test_send j ON j.tester_id=t.id
+    WHERE t.channel_id=$1 AND t.user_key=$2 AND t.generation=$3 AND t.purpose='recruitment'
+      AND t.verified_at IS NOT NULL AND t.expires_at>now() AND j.status='accepted'
+      AND j.channel_id=t.channel_id AND j.generation=t.generation AND j.scenario_id IS NULL LIMIT 1`,
+  [connection.id,userKey,connection.generation])
+  return !!rowCount
+}
+
+async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connection:Channel,verificationOnly:boolean){
+  const liffId=connection.liff_id
   if(job.kind==='chat_reply'){
     const {rows:[thread]}=await db.query<{address_box:string;user_key:string}>(`
       SELECT t.address_box,t.user_key FROM inbox_thread t JOIN staff f ON f.id=t.assigned_to
@@ -54,13 +64,16 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,liffId
     SELECT user_key,recipient_box,notices FROM workflow_contact WHERE channel_id=$1 AND purpose=$2 AND subject=$3`,
   [job.channel_id,job.purpose,job.subject])
   if(!contact?.notices)return
-  const {rows:[activity]}=await db.query<{kind:string;stop:boolean}>(`SELECT
+  if(verificationOnly&&!await testRecipient(db,connection,contact.user_key))return
+  const {rows:[activity]}=await db.query<{kind:string|null;stop:boolean;recent_message:boolean}>(`SELECT
+    EXISTS (SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$4
+      AND kind='message' AND occurred_at BETWEEN now()-interval '7 days' AND now()) AS recent_message,
     (SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow','unfollow')
       ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1) AS kind,
     EXISTS (SELECT 1 FROM webhook_event e WHERE e.channel_id=$1 AND e.user_key=$2 AND e.stop_signal='all' AND e.processed_at IS NULL
       AND e.occurred_at>=coalesce((SELECT notices_changed_at FROM workflow_contact WHERE channel_id=$1 AND purpose='recruitment' AND subject=$3),'-infinity')) AS stop`,
-  [job.channel_id,contact.user_key,job.subject])
-  if(!activity.kind||activity.kind==='unfollow'||activity.stop)return
+  [job.channel_id,contact.user_key,job.subject,connection.generation])
+  if(activity.stop||activity.kind==='unfollow'||!activity.kind&&!(verificationOnly&&activity.recent_message))return
   const to=contactAddress(cfg,{...job,recipient_box:contact.recipient_box})
   const link='https://liff.line.me/'+liffId+'?use=recruitment'
   if(job.kind==='interview_waitlist'){
@@ -130,13 +143,14 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
       job.kind==='interview_waitlist'?features.waitlist_enabled&&features.interviews_enabled:features.reminders_enabled
     const belongs=connection.purpose==='shared'||connection.purpose===job.purpose
     const connected=job.kind==='chat_reply'?messagingReady(connection):channelReady(connection)
-    const ready=enabled&&belongs&&connected&&job.generation===connection.generation&&
+    const verificationOnly=!connected&&job.kind==='interview_confirm'&&!!connection.liff_id&&testDeliveryConfirmed(connection)
+    const ready=enabled&&belongs&&(connected||verificationOnly)&&job.generation===connection.generation&&
       !connection.stopped&&!location.stopped&&!location.tenant_stopped&&location.contract_active&&!!location.eligible_at
     if(fresh.next_at===Infinity||+job.expires_at<=Date.now()||!ready||job.scope_version!==await deliveryScope(db,r.id)){
       await markStopped(db,fresh,'店舗設定・停止状態・認証が変更されました')
       return
     }
-    const message=await messageFor(db,cfg,job,location.timezone,connection.liff_id)
+    const message=await messageFor(db,cfg,job,location.timezone,connection,verificationOnly)
     const hold=!message?'予約または通知の同意が変更されました':
       await handoffUntil(db,job.channel_id,message.userKey)?'店長対応中':
       await messageBudget(db,location,null,undefined,job.id)||

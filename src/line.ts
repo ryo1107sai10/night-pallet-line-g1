@@ -50,8 +50,10 @@ export type Channel = Route & {
 type ConnectionState = Pick<Channel,'module_channel_id'|'module_status'|'checks'>
 export const channelTestReady = (c:ConnectionState) => !!(c.checks.ownership_verified && c.checks.token_verified && c.checks.webhook_verified &&
   (c.module_channel_id ? c.module_status==='active' :
-    c.checks.provider_verified && c.checks.redelivery_enabled && c.checks.auto_reply_checked && c.checks.login_published && c.checks.non_developer))
-export const messagingReady = (c:ConnectionState) => channelTestReady(c) && c.checks.delivery_confirmed===true
+    c.checks.provider_verified && c.checks.redelivery_enabled && c.checks.auto_reply_checked && c.checks.login_published))
+export const testDeliveryConfirmed = (c:ConnectionState) => channelTestReady(c) && c.checks.delivery_confirmed===true
+export const messagingReady = (c:ConnectionState) => testDeliveryConfirmed(c) &&
+  (!!c.module_channel_id || c.checks.non_developer===true)
 export const channelReady = (c:Channel) => !!c.liff_id && messagingReady(c)
 
 export async function channel(db: DB, id: string) {

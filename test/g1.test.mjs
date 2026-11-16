@@ -1607,3 +1607,52 @@ test('採用専用LINEでは店長対応中の面談通知を見送り、終了�
   assert.equal(delivered('引き継ぎ終了後の試験'),1)
   assert.equal(delivered('引き継ぎ中の試験'),0)
 })
+
+test('接続確認中の採用通知は検収済みのテスト利用者への確定通知だけを送る',async()=>{
+  const {store,root,connection,inbound}=await workflowStore('採用通知の実機検収','recruitment','2',{reminders_enabled:true})
+  const connectionPath=root+'/connections/'+connection
+  const channelRevision=async()=>(expect(await request(root+'/connections',{cookie:admin}),200))[0].revision
+  expect(await patch(connectionPath+'/console',admin,{...consoleChecks,non_developer:false,
+    reason:'開発者のテスト端末で確認',revision:await channelRevision()}),200)
+  const tester=expect(await post(connectionPath+'/tests',admin,{purpose:'recruitment'},idempotency()),201)
+  expect(await post('/auth/line/verify',null,{connection,purpose:'recruitment',code:tester.code,
+    id_token:'signed-token-first-user',allow_test_message:true}),200)
+  assert.equal((await inbound([
+    {...event(randomUUID(),'message',Date.now()),message:{id:'21801',type:'text',text:'検収の受信確認'}},
+    {...event(randomUUID(),'follow',Date.now()),source:{type:'user',userId:user2}},
+  ])).status,200)
+  expect(await post(connectionPath+'/tests/'+tester.id+'/send',admin,{},idempotency()),202)
+  await worker()
+  const confirmed=expect(await patch(connectionPath+'/console',admin,{...consoleChecks,non_developer:false,
+    delivery_confirmed:true,reason:'開発者のLINE端末に到着',revision:await channelRevision()}),200)
+  assert.notEqual(confirmed.status,'connected')
+
+  const one=await post('/interview/login',null,{connection,id_token:'signed-token-first-user'})
+  const two=await post('/interview/login',null,{connection,id_token:'signed-token-second-user'})
+  for(const user of [one,two]){
+    expect(user,200)
+    expect(await put('/interview/notices',user.cookie,{enabled:true}),200)
+  }
+  const {today}=expect(await request('/interview/calendar',{cookie:one.cookie}),200)
+  const day=Date.parse(today+'T00:00:00+09:00')+3*86400000
+  const booking=async(hour,label,client)=>{
+    const slot=expect(await post(root+'/interviews/slots',admin,{channel:connection,published:true,
+      starts_at:new Date(day+hour*3600000).toISOString(),ends_at:new Date(day+(hour+.5)*3600000).toISOString(),
+      instructions:label},idempotency()),201)
+    return expect(await confirmation(client,slot.id,'試験応募者'),201)
+  }
+  const pilot=await booking(18,'開発者向けの検収通知',one.cookie)
+  await booking(19,'対象外の応募者通知',two.cookie)
+  await worker()
+  await worker()
+  assert.ok(pushesLog.some(m=>m.to===user&&m.messages[0].text.includes('開発者向けの検収通知')))
+  assert.ok(!pushesLog.some(m=>m.messages[0].text.includes('対象外の応募者通知')))
+  expect(await patch('/interview/bookings/'+pilot.id,one.cookie,{action:'cancel',revision:pilot.revision}),200)
+  await tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    await db.query("UPDATE tester SET expires_at=now()-interval '1 second' WHERE id=$1",[tester.id])
+  })
+  await booking(20,'検収期限切れの通知',one.cookie)
+  await worker()
+  assert.ok(!pushesLog.some(m=>m.messages[0].text.includes('検収期限切れの通知')))
+})
