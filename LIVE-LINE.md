@@ -11,7 +11,7 @@
 
 ## アプリとワーカーを起動
 
-1. [非公開リポジトリ](https://github.com/ryo1107sai10/night-pallet-line-g1) の `main` を取得し、`npm ci` と `npm run build` を実行します。リポジトリにはDockerfileも同梱しています。`GET /healthz` がDB疎通を確認します。
+1. [非公開リポジトリ](https://github.com/ryo1107sai10/night-pallet-line-g1) の `main` を取得し、`npm ci` と `npm run build` を実行します。リポジトリにはDockerfileも同梱しています。`GET /api/health` がDB疎通を確認します。
 2. `PUBLIC_ORIGIN` を公開HTTPSのオリジンに設定し、`MASTER_KEY` は `openssl rand -base64 32` で発行します。移行用DBロール（スキーマ所有）とアプリ用DBロール（`LOGIN NOSUPERUSER NOBYPASSRLS`、所有者のメンバー権限なし）を準備します。アプリ用は `DATABASE_URL`、移行時だけ `MIGRATION_DATABASE_URL` を設定します。既存環境の更新前にDBをバックアップします。
 3. 初回は `npm run setup -- pilot "検証法人" 管理者のメール` で法人と最初の管理者招待を作成します。既存環境の更新では `npm run setup` で `003_operations` を適用します。秘密情報を含む招待は本人に渡し、使い終わった出力は保護または消去します。
 4. 最初は `AUTO_SEND_ENABLED=false` で、アプリ `npm start` と独立したワーカー `npm run worker` を起動します。コンテナの場合、同じイメージでアプリは既定コマンド、ワーカーは `node dist/worker.js`、移行は `node dist/setup.js` を使用します。リバースプロキシでは受信本文を改変せず、認証情報をアクセスログに記録しない設定にします。

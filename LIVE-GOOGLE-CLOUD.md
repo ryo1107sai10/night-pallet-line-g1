@@ -16,7 +16,7 @@ LINEのチャネルシークレットとアクセストークンは公開後の�
 2. Node.js 24で `npm ci` と `npm run build` を実行します。ローカルの初期化コマンドに `PILOT_ADMIN_DATABASE_URL`、`MIGRATION_DATABASE_URL`（`night_owner`）、`DATABASE_URL`（`night_app`）を渡します。すべてAuth Proxy経由の同じ `night` DBを指定し、各ロールに異なるパスワードを使用します。`PUBLIC_ORIGIN` は `https://night-pro-line-<PROJECT_NUMBER>.asia-northeast1.run.app`、`MASTER_KEY` は `openssl rand -base64 32` で生成した値です。
 3. `node dist/pilot-db.js pilot "検証法人" <管理者メール> <非公開の招待ファイル>` を実行します。2つのDBロールが作成され、マイグレーションと管理者の招待が準備されます。招待の内容は権限を絞ったファイルに保存されます。既存環境のマイグレーションのみの場合は `npm run setup` を使用します。
 4. Secret Managerにアプリ用の `night-master-key` と `night-db-url` を登録します。クラウド用のDB接続先は `postgresql://night_app:<URLエンコードしたパスワード>@localhost/night?host=/cloudsql/<INSTANCE_CONNECTION_NAME>` です。Google連携用に `night-google-client-id` と `night-google-client-secret` も登録できます。[Cloud RunのCloud SQL接続](https://cloud.google.com/sql/docs/postgres/connect-run)
-5. `docker buildx build --platform linux/amd64 --load --tag night-pro-line:pilot .` で公開用イメージを作ります。`bash deploy/cloud-run.sh <PROJECT_ID> <INSTANCE_ID> night-pro-line:pilot` を実行すると、Webサービスと必要時に実行する非公開のワーカージョブが配置されます。`/healthz` がデータベースに接続できることを確認します。[Cloud Runの公開URL](https://cloud.google.com/run/docs/triggering/https-request)
+5. `docker buildx build --platform linux/amd64 --load --tag night-pro-line:pilot .` で公開用イメージを作ります。`bash deploy/cloud-run.sh <PROJECT_ID> <INSTANCE_ID> night-pro-line:pilot` を実行すると、Webサービスと必要時に実行する非公開のワーカージョブが配置されます。`/api/health` がデータベースに接続できることを確認します。[Cloud Runの公開URL](https://cloud.google.com/run/docs/triggering/https-request)
 
 ワーカーは `gcloud run jobs execute night-pro-line-worker --project <PROJECT_ID> --region asia-northeast1 --wait` で処理を1回実行できます。今回の応募・対面予約・Googleの予定照合はWeb側で処理します。最初は自動LINE送信を無効にし、検証対象の配信機能を試すときに公開環境とワーカーの設定を進めます。
 

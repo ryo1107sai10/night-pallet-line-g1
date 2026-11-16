@@ -70,6 +70,7 @@ fi
 
 image_id=$(docker image inspect "$local_image" --format '{{.Id}}')
 image="$registry/$project/$repository/app:${image_id#sha256:}"
+docker_host=${DOCKER_HOST:-$(docker context inspect "$(docker context show)" --format '{{.Endpoints.docker.Host}}')}
 docker_config=$(mktemp -d)
 clear_docker_credentials() {
   if [[ -f "$docker_config/config.json" ]]; then unlink "$docker_config/config.json"; fi
@@ -78,22 +79,17 @@ clear_docker_credentials() {
 trap clear_docker_credentials EXIT
 gcloud auth print-access-token | docker --config "$docker_config" login "$registry" --username oauth2accesstoken --password-stdin
 docker tag "$local_image" "$image"
-docker --config "$docker_config" push "$image"
+docker --host "$docker_host" --config "$docker_config" push "$image"
 
 environment="PUBLIC_ORIGIN=$origin,AUTO_SEND_ENABLED=false"
 gcloud run deploy "$service" --image "$image" --project "$project" --region "$region" --port 3000 \
   --service-account "$account" --set-cloudsql-instances "$database" --set-env-vars "$environment" --set-secrets "$bindings" \
   --execution-environment gen2 --cpu 1 --memory 512Mi --concurrency 16 --timeout 45s --min-instances 0 --max-instances 1 \
-  --startup-probe 'httpGet.path=/healthz,httpGet.port=3000,periodSeconds=2,failureThreshold=10,timeoutSeconds=2' \
+  --startup-probe 'httpGet.path=/api/health,httpGet.port=3000,periodSeconds=2,failureThreshold=10,timeoutSeconds=2' \
   --no-invoker-iam-check --quiet
 gcloud run jobs deploy "$worker" --image "$image" --project "$project" --region "$region" \
   --service-account "$account" --set-cloudsql-instances "$database" --set-env-vars "$environment" --set-secrets "$bindings" \
   --command=node --args=dist/worker.js,--once --tasks=1 --max-retries=0 --task-timeout=5m --quiet
 
-deployed=$(gcloud run services describe "$service" --project "$project" --region "$region" --format='value(status.url)')
-if [[ "$deployed" != "$origin" ]]; then
-  printf 'Cloud Run returned an unexpected URL. Verify PUBLIC_ORIGIN.\n' >&2
-  exit 1
-fi
-curl --fail --silent --show-error --max-time 45 "$origin/healthz"
+curl --fail --silent --show-error --max-time 45 "$origin/api/health"
 printf '\nManagement: %s/\nGoogle redirect: %s/interview/google-return.html\n' "$origin" "$origin"

@@ -81,7 +81,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.use('/interview',express.static(here('../public/interview')))
   app.use('/operations',express.static(here('../public/operations')))
   app.use('/workflows',express.static(here('../public/workflows')))
-  app.get('/healthz',async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
+  app.get(['/api/health','/healthz'],async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
   app.use('/static',express.static(here('../public'),{index:false}))
