@@ -6,6 +6,7 @@ import {
 } from './core.js'
 import { channel, type LineAPI } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
+import { requireFeature, storeFeatures } from './store-features.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
 
@@ -99,6 +100,7 @@ async function locationFor(db:DB,id:string) {
 
 export async function saveInterviewHours(db:DB,actor:Actor,store:string,input:z.infer<typeof interviewHours>) {
   await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'interviews_enabled')
   const {rows:[saved]}=await db.query<Hours>(`UPDATE store SET interview_open_minute=$2,interview_close_minute=$3,
     interview_hours_revision=interview_hours_revision+1 WHERE id=$1 AND interview_hours_revision=$4
     RETURNING interview_open_minute AS start,interview_close_minute AS end,interview_hours_revision AS revision`,
@@ -116,22 +118,21 @@ function assertSlotHours(location:Location,start:Date,end:Date) {
 }
 
 export async function staffInterviewOverview(db:DB,store:string) {
-  const [location,{rows:channels},{rows:slots}]=await Promise.all([
-    locationFor(db,store),
-    db.query("SELECT id,label FROM channel WHERE store_id=$1 AND purpose<>'customer' ORDER BY label",[store]),
-    db.query(`SELECT f.*,c.label AS channel_label,b.applicant_name,b.id AS booking_id
-      FROM interview_slot f JOIN channel c ON c.id=f.channel_id
-      LEFT JOIN interview_booking b ON b.slot_id=f.id AND b.status='confirmed'
-      WHERE f.store_id=$1 AND f.ends_at>now()-interval '1 day' ORDER BY f.starts_at LIMIT 200`,[store]),
-  ])
-  return {channels,hours:location.hours,today:location.today,timezone:location.timezone,
+  const location=await locationFor(db,store)
+  const features=await storeFeatures(db,store)
+  const {rows:channels}=await db.query("SELECT id,label FROM channel WHERE store_id=$1 AND purpose<>'customer' ORDER BY label",[store])
+  const {rows:slots}=await db.query(`SELECT f.*,c.label AS channel_label,b.applicant_name,b.id AS booking_id
+    FROM interview_slot f JOIN channel c ON c.id=f.channel_id
+    LEFT JOIN interview_booking b ON b.slot_id=f.id AND b.status='confirmed'
+    WHERE f.store_id=$1 AND f.ends_at>now()-interval '1 day' ORDER BY f.starts_at LIMIT 200`,[store])
+  return {channels,hours:location.hours,today:location.today,timezone:location.timezone,interviews_enabled:features.interviews_enabled,
     slots:slots.map(slot=>({...slot,in_hours:fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours)}))}
-
 }
 
 export async function publishInterviewSlot(db:DB,cfg:Config,actor:Actor,store:string,key:string,input:z.infer<typeof interviewSlotInput>) {
   await lockDispatch(db,actor.tenant_id)
   return once(db,cfg,actor,'interview.slot',key,{store,input},async()=>{
+    await requireFeature(db,store,'interviews_enabled')
     await recruitmentConnection(db,input.channel)
     const start=new Date(input.starts_at),end=new Date(input.ends_at)
     const duration=+end-+start
@@ -162,6 +163,7 @@ export async function changeInterviewVisibility(db:DB,actor:Actor,store:string,i
   if (!slot) throw missing()
   if (slot.revision!==input.revision) throw conflict()
   if (input.published) {
+    await requireFeature(db,store,'interviews_enabled')
     if (+slot.starts_at<=Date.now()) throw taken()
     assertSlotHours(await locationFor(db,store),slot.starts_at,slot.ends_at)
     await checkOverlap(db,store,slot.starts_at,slot.ends_at,id)
@@ -182,6 +184,7 @@ async function ownBooking(db:DB,a:Applicant,id:string) {
 
 export async function interviewCalendar(db:DB,a:Applicant,google:InterviewGoogle,requested?:string) {
   const location=await locationFor(db,a.store_id)
+  const features=await storeFeatures(db,a.store_id)
   const start=requested??location.today
   const date=new Date(start+'T00:00:00Z')
   if (!Number.isFinite(+date) || date.toISOString().slice(0,10)!==start) {
@@ -191,10 +194,10 @@ export async function interviewCalendar(db:DB,a:Applicant,google:InterviewGoogle
   if (start<location.today || start>max) throw new Fault(422,'INTERVIEW_DATE','本日から90日以内の日付を選択してください。')
   const {rows:slots}=await db.query<Pick<Range,'id'|'starts_at'|'ends_at'|'method'>&{available:boolean}>(`SELECT s.id,s.starts_at,s.ends_at,s.method,s.starts_at>now() AND
     NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed') AS available
-    FROM interview_slot s WHERE s.channel_id=$1 AND s.published
+    FROM interview_slot s WHERE s.channel_id=$1 AND s.published AND $4
       AND s.starts_at >= ($2::date::timestamp AT TIME ZONE $3)
       AND s.starts_at < (($2::date+7)::timestamp AT TIME ZONE $3)
-    ORDER BY s.starts_at`,[a.channel_id,start,location.timezone])
+    ORDER BY s.starts_at`,[a.channel_id,start,location.timezone,features.interviews_enabled])
   const {rows:bookings}=await db.query<Booking>(selectBooking+` WHERE b.channel_id=$1 AND b.applicant_key=$2
     ORDER BY (b.status='confirmed' AND s.starts_at>now()) DESC, b.updated_at DESC LIMIT 10`,[a.channel_id,a.applicant_key])
   const visible=slots.filter(slot=>fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours))
@@ -214,7 +217,7 @@ export async function interviewCalendar(db:DB,a:Applicant,google:InterviewGoogle
     }
   }
   return {store:location.name,timezone:location.timezone,today:location.today,hours:location.hours,
-    availability_warning:googleUnavailable,slots:visible,bookings:bookings.map(visibleBooking)}
+    interviews_enabled:features.interviews_enabled,availability_warning:googleUnavailable,slots:visible,bookings:bookings.map(visibleBooking)}
 }
 
 function visibleBooking(booking:Booking) {
@@ -223,6 +226,7 @@ function visibleBooking(booking:Booking) {
 }
 
 async function availableSlot(db:DB,a:Applicant,id:string,google:InterviewGoogle) {
+  await requireFeature(db,a.store_id,'interviews_enabled')
   const {rows:[slot]}=await db.query<Range>(`SELECT s.id,s.starts_at,s.ends_at FROM interview_slot s WHERE s.id=$1 AND s.channel_id=$2
     AND s.published AND s.starts_at>clock_timestamp()
     AND NOT EXISTS (SELECT 1 FROM interview_booking b WHERE b.slot_id=s.id AND b.status='confirmed')`,[id,a.channel_id])

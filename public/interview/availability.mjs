@@ -22,12 +22,12 @@ function field(label,type,name,value='',max){
 export function drawAvailability(root,state,zone,controls){
   const busyList=el('section',null,'box stack')
   busyList.append(el('h2','Googleカレンダー連携'))
-  busyList.append(el('p',state.google.connected?(controls.demo?'サンプル予定を反映中 · 各日20:15〜21:00':'連携中 · '+state.google.calendar_id):
+  busyList.append(el('p',state.google_enabled===false?'この店舗ではGoogleカレンダーの照合を停止しています。':state.google.connected?(controls.demo?'サンプル予定を反映中 · 各日20:15〜21:00':'連携中 · '+state.google.calendar_id):
     '連携すると、予定ありの時間帯と重なる面談枠を受付対象から外します。'))
   if(controls.demo){
     busyList.append(button(state.google.connected?'サンプル予定の反映を停止':'サンプル予定を反映',
       event=>run(event.currentTarget,()=>controls.toggleDemo(!state.google.connected))))
-  }else if(state.google.configured){
+  }else if(state.google_enabled!==false&&state.google.configured){
     const link=el('form',null,'stack')
     const calendar=field('GoogleカレンダーID','text','calendar_id',state.google.calendar_id??'primary',250)
     calendar.querySelector('input').required=true
@@ -39,7 +39,7 @@ export function drawAvailability(root,state,zone,controls){
       run(link.querySelector('button'),()=>controls.connect(id))
     }
     busyList.append(link)
-  }else busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
+  }else if(state.google_enabled!==false)busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
   if(!controls.demo&&state.google.connected){
     const remove=el('details')
     remove.append(el('summary','連携を解除する'),el('p','解除後はGoogleの予定を照合せず、店内の確定予約と受付停止時間で空きを判定します。'),
@@ -65,7 +65,8 @@ export function drawAvailability(root,state,zone,controls){
       await controls.add({starts_at:new Date(start).toISOString(),ends_at:new Date(end).toISOString(),note:input.get('note')})
     })
   }
-  blocks.append(el('p','停止時間に重なる枠の新規予約・日程変更を止めます。確定済みの面談は維持されます。'),form)
+  blocks.append(el('p','停止時間に重なる枠の新規予約・日程変更を止めます。確定済みの面談は維持されます。'))
+  if(state.interviews_enabled!==false)blocks.append(form)
   for(const block of state.blocks) {
     const row=el('div',null,'record stack')
     row.append(el('strong',minuteDate(block.starts_at,zone)+' 〜 '+minuteDate(block.ends_at,zone)))

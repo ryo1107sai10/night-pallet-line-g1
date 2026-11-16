@@ -23,7 +23,8 @@ const user2 = 'U'+'3'.repeat(32)
 const channelSecret = 'a'.repeat(32)
 const accessToken = 'test-channel-token'
 const pass = 'Only used in local tests!'
-const ids = { messaging:'1234567890', login:'1234567891' }
+const ids = { messaging:'1234567890', login:'1234567891', redLogin:'1234567894' }
+const redCalendar='red-store@example.test'
 const endpoint = id => '/api/v1/webhooks/line/'+id
 const signup = {}
 let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line
@@ -98,10 +99,12 @@ before(async ()=>{
       case '/v2/bot/channel/webhook/test':
         assert.equal((await web({destination:bot,events:[]})).status,200)
         return Response.json({success:true})
-      case '/oauth2/v2.1/verify':
-        assert.equal(options.body.get('client_id'),ids.login)
-        return Response.json({iss:'https://access.line.me',sub:options.body.get('id_token').includes('second')?user2:user,exp:Date.now()/1000+600,
-          aud:options.body.get('id_token').includes('bad')?'9999999999':ids.login})
+      case '/oauth2/v2.1/verify': {
+        assert.ok([ids.login,ids.redLogin].includes(options.body.get('client_id')))
+        const proof=options.body.get('id_token')
+        return Response.json({iss:'https://access.line.me',sub:proof.includes('second')?user2:user,exp:Date.now()/1000+600,
+          aud:proof.includes('bad')?'9999999999':proof.includes('red-store')?ids.redLogin:ids.login})
+      }
       case '/v2/bot/message/quota': return Response.json({type:'limited',value:200})
       case '/v2/bot/message/quota/consumption': return Response.json({totalUsage:200-remainingQuota})
       case '/v2/bot/message/push': {
@@ -122,18 +125,24 @@ before(async ()=>{
   const google=new InterviewGoogle(cfg,{clientId:'calendar-client',secret:'calendar-server-secret'},async(url,options)=>{
     if(url==='https://oauth2.googleapis.com/token'){
       const grant=options.body.get('grant_type')
+      const red=options.body.get('code')==='test-red-oauth-code'||options.body.get('refresh_token')==='red-refresh-secret'
       assert.equal(options.body.get('client_secret'),'calendar-server-secret')
       if(grant==='authorization_code') {
         assert.match(options.body.get('code_verifier'),/^[A-Za-z0-9_-]{43}$/)
         assert.equal(options.body.get('redirect_uri'),origin+'/interview/google-return.html')
-      } else assert.equal(options.body.get('refresh_token'),'calendar-refresh-secret')
-      return Response.json({access_token:'calendar-access-secret',refresh_token:'calendar-refresh-secret',expires_in:3600})
+      } else assert.equal(options.body.get('refresh_token'),red?'red-refresh-secret':'calendar-refresh-secret')
+      return Response.json({access_token:red?'red-access-secret':'calendar-access-secret',
+        refresh_token:red?'red-refresh-secret':'calendar-refresh-secret',expires_in:3600})
     }
     assert.equal(url,'https://www.googleapis.com/calendar/v3/freeBusy')
-    assert.equal(options.headers.Authorization,'Bearer calendar-access-secret')
     const query=JSON.parse(options.body)
-    assert.deepEqual(query.items,[{id:'primary'}])
     googleCalls.push(query)
+    if (query.items[0].id===redCalendar) {
+      assert.equal(options.headers.Authorization,'Bearer red-access-secret')
+      return Response.json({calendars:{[redCalendar]:{busy:[]}}})
+    }
+    assert.equal(options.headers.Authorization,'Bearer calendar-access-secret')
+    assert.deepEqual(query.items,[{id:'primary'}])
     return Response.json({calendars:{'example@example.test':fakeGoogleError?
       {errors:[{reason:'internalError'}]}:{busy:fakeBusy}}})
   })
@@ -633,4 +642,126 @@ test('面談の受付停止時間とGoogle予定: 境界、再確認、障害時
   assert.equal((await calendar()).slots.find(slot=>slot.id===blocked).available,true)
   expect(await request(settings+'/google',{method:'DELETE',cookie:admin,data:{}}),200)
   assert.equal(expect(await request(settings,{cookie:admin}),200).google.connected,false)
+  expect(await patch('/interview/bookings/'+first.id,applicant.cookie,{action:'cancel',revision:1}),200)
+})
+
+test('同一法人の店舗ごとにOA・Google予定・タグ・機能設定を分離する',async()=>{
+  const blue='/stores/'+storeId
+  const red='/stores/'+otherStore
+  const email='blue-manager@example.test'
+  const invite=expect(await post('/staff/invites',admin,{email,role:'manager',stores:[storeId]},idempotency()),201)
+  const blueManager=await activate(invite,email,'alpha')
+  const registered=expect(await post(red+'/connections',admin,{
+    label:'赤店の公式LINE',purpose:'shared',owner_name:'甲法人',provider_id:'provider',
+    messaging_id:'1234567893',login_id:ids.redLogin,liff_id:ids.redLogin+'-red',bot_user_id:'U'+'4'.repeat(32),
+    account_type:'unverified',management_authority:'テスト用',channel_secret:channelSecret,
+    access_token:accessToken,token_type:'console',
+  },idempotency()),201)
+  expect(await patch(red+'/connections/'+registered.id+'/console',admin,{...consoleChecks,revision:1,reason:'検証用'}),200)
+  assert.ok(expect(await request(blue+'/connections',{cookie:admin}),200).some(item=>item.id===c))
+  assert.deepEqual(expect(await request(red+'/connections',{cookie:admin}),200).map(item=>item.id),[registered.id])
+  expect(await request(red+'/connections',{cookie:blueManager}),404)
+  const blueProof='signed-token-from-blue-store'
+  const redProof='signed-token-from-red-store'
+  const login=(connection,id_token)=>post('/interview/login',null,{connection,id_token})
+  const a=await login(c,blueProof),b=await login(registered.id,redProof)
+  expect(a,200);expect(b,200)
+  expect(await login(registered.id,blueProof),401)
+  expect(await login(c,redProof),401)
+  assert.equal(expect(await request('/liff/'+registered.id),200).liff_id,ids.redLogin+'-red')
+
+  const settings=store=>store+'/interviews/availability'
+  const startLink=async(store,calendar_id)=>{
+    const {url}=expect(await post(settings(store)+'/google',admin,{calendar_id}),200)
+    return new URL(url).searchParams.get('state').split('.')[1]
+  }
+  const finishLink=(store,state,code)=>post(settings(store)+'/google/complete',admin,{state,code})
+  const redState=await startLink(red,redCalendar)
+  expect(await finishLink(blue,redState,'test-red-oauth-code'),409)
+  expect(await finishLink(red,redState,'test-red-oauth-code'),200)
+  expect(await finishLink(blue,await startLink(blue,'primary'),'test-oauth-code'),200)
+  assert.equal(expect(await request(settings(blue),{cookie:admin}),200).google.calendar_id,'primary')
+  assert.equal(expect(await request(settings(red),{cookie:admin}),200).google.calendar_id,redCalendar)
+
+  const calendar=async cookie=>expect(await request('/interview/calendar',{cookie}),200)
+  const day=Date.parse((await calendar(a.cookie)).today+'T00:00:00+09:00')+4*86400000
+  const at=hour=>new Date(day+hour*3600000).toISOString()
+  const offer=(store,channel)=>post(store+'/interviews/slots',admin,{
+    channel,starts_at:at(18),ends_at:at(18.5),instructions:'対面会場の案内',published:true,
+  },idempotency())
+  const one=expect(await offer(blue,c),201)
+  const two=expect(await offer(red,registered.id),201)
+  fakeBusy=[{start:at(18.25),end:at(19)}]
+  const blueView=await calendar(a.cookie)
+  assert.equal(blueView.slots.find(slot=>slot.id===one.id).available,false)
+  assert.ok(!blueView.slots.some(slot=>slot.id===two.id))
+  assert.deepEqual((await calendar(b.cookie)).slots.map(slot=>[slot.id,slot.available]),[[two.id,true]])
+  const book=(cookie,slot)=>post('/interview/bookings',cookie,{slot,name:'面談テスト'})
+  assert.equal(expect(await book(a.cookie,one.id),409).code,'INTERVIEW_SLOT_BLOCKED')
+  expect(await book(a.cookie,two.id),409)
+  const interview=expect(await book(b.cookie,two.id),201)
+  assert.equal(interview.method,'onsite')
+  assert.equal(interview.instructions,'対面会場の案内')
+  const overview=expect(await request(red+'/interviews',{cookie:admin}),200)
+  assert.equal(overview.slots.find(slot=>slot.id===two.id).booking_id,interview.id)
+
+  const rule=(store,name,trigger)=>request(store+'/tags',{method:'PUT',cookie:admin,data:{name,trigger}})
+  expect(await rule(red,'来店予約済み','booking_created'),200)
+  expect(await rule(red,'常連',null),200)
+  const customer=await post('/customer/login',null,{connection:registered.id,id_token:redProof})
+  expect(customer,200)
+  const customerList=store=>request(store+'/customers',{cookie:admin})
+  const record=expect(await customerList(red),200)[0]
+  assert.deepEqual(record.tags,[])
+  const visit=expect(await post(red+'/slots',admin,{label:'来店用',starts_at:at(20),ends_at:at(20.5),capacity:5,published:true},idempotency()),201)
+  expect(await post(red+'/bookings',admin,{customer:record.id,slot:visit.id,party:1,confirm:true},idempotency()),201)
+  const secondVisit=expect(await post(red+'/slots',admin,{label:'別の来店枠',starts_at:at(21),ends_at:at(21.5),capacity:5,published:true},idempotency()),201)
+  const tagged=expect(await customerList(red),200)[0]
+  assert.deepEqual(tagged.tags,['来店予約済み'])
+  assert.ok(!expect(await request(blue+'/tags',{cookie:admin}),200).some(tag=>tag.name==='来店予約済み'))
+  expect(await patch(red+'/customers/'+record.id+'/tags',admin,{revision:record.revision,tags:[]}),409)
+  const manual=expect(await patch(red+'/customers/'+record.id+'/tags',admin,{revision:tagged.revision,tags:['来店予約済み','常連']}),200)
+  assert.equal(manual.tags.length,2)
+  const filter=async (tags,match)=>{
+    const query=new URLSearchParams({match})
+    for(const tag of tags)query.append('tag',tag)
+    return expect(await request(red+'/customers?'+query,{cookie:admin}),200)
+  }
+  assert.deepEqual((await filter(['来店予約済み','常連'],'all')).map(item=>item.id),[record.id])
+  assert.deepEqual(await filter(['常連','初回'],'all'),[])
+  assert.deepEqual((await filter(['常連','初回'],'any')).map(item=>item.id),[record.id])
+  const segment={name:'次回のご案内候補',tags:['来店予約済み','常連'],match:'all'}
+  expect(await request(red+'/tag-filters',{method:'PUT',cookie:blueManager,data:segment}),404)
+  expect(await request(red+'/tag-filters',{method:'PUT',cookie:admin,data:segment}),200)
+  assert.deepEqual(expect(await request(red+'/tag-filters',{cookie:admin}),200),[segment])
+  assert.deepEqual(expect(await request(blue+'/tag-filters',{cookie:admin}),200),[])
+  expect(await patch(blue+'/customers/'+record.id+'/tags',admin,{revision:manual.revision,tags:[]}),404)
+
+  const storeFlags=async(store,cookie=admin)=>expect(await request(store+'/features',{cookie}),200)
+  const blueWithoutGoogle=expect(await patch(blue+'/features',admin,{
+    ...await storeFlags(blue),google_calendar_enabled:false,
+  }),200)
+  const googleQueries=googleCalls.length
+  assert.equal((await calendar(a.cookie)).slots.find(slot=>slot.id===one.id).available,true)
+  assert.equal(googleCalls.length,googleQueries)
+  expect(await patch(blue+'/features',admin,{...blueWithoutGoogle,google_calendar_enabled:true}),200)
+  const flags=await storeFlags(red)
+  const next={...flags,tags_enabled:false,visits_enabled:false,interviews_enabled:false,google_calendar_enabled:false}
+  expect(await patch(red+'/features',blueManager,next),404)
+  expect(await patch(blue+'/features',blueManager,{...await storeFlags(blue,blueManager),tags_enabled:false}),403)
+  expect(await patch(red+'/features',admin,next),200)
+  expect(await patch(red+'/features',admin,next),409)
+  expect(await request(red+'/tags',{cookie:admin}),409)
+  expect(await request(red+'/tag-filters',{cookie:admin}),409)
+  expect(await patch(red+'/customers/'+record.id+'/tags',admin,{revision:manual.revision,tags:[]}),409)
+  expect(await post(red+'/interviews/availability/google',admin,{calendar_id:redCalendar}),409)
+  assert.equal(expect(await post('/customer/bookings',customer.cookie,{slot:secondVisit.id,party:2}),409).code,'STORE_FEATURE_DISABLED')
+  const redView=await calendar(b.cookie)
+  assert.deepEqual(redView.slots,[])
+  assert.equal(redView.bookings.find(item=>item.id===interview.id).status,'confirmed')
+  expect(await patch('/interview/bookings/'+interview.id,b.cookie,{action:'cancel',revision:interview.revision}),200)
+  assert.equal((await storeFlags(blue)).interviews_enabled,true)
+  assert.equal((await calendar(a.cookie)).slots.find(slot=>slot.id===one.id).available,false)
+  assert.equal(expect(await request(settings(red),{cookie:admin}),200).google.calendar_id,redCalendar)
+  fakeBusy=[]
 })

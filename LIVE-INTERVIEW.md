@@ -11,9 +11,9 @@
 
 ## アプリとGoogleを設定する
 
-1. [アプリとワーカーを起動する手順](LIVE-LINE.md#アプリとワーカーを起動) に従い、公開先とPostgreSQLを用意します。`PUBLIC_ORIGIN` を実際の公開HTTPSオリジンに設定し、`npm run setup` で `006_interview_availability.sql` まで適用します。接続検収は `AUTO_SEND_ENABLED=false` のまま進められます。
+1. [アプリとワーカーを起動する手順](LIVE-LINE.md#アプリとワーカーを起動) に従い、公開先とPostgreSQLを用意します。`PUBLIC_ORIGIN` を実際の公開HTTPSオリジンに設定し、`npm run setup` で最新のマイグレーションを適用します。接続検収は `AUTO_SEND_ENABLED=false` のまま進められます。
 2. Google CloudでGoogle Calendar APIを有効にします。OAuthのウェブアプリケーション用クライアントに、`PUBLIC_ORIGIN` の末尾に `/interview/google-return.html` を付けたURLを「承認済みのリダイレクトURI」として登録します。外部アプリをテストモードで使う場合は、連携に使うGoogleアカウントをテストユーザーに追加します。クライアントID・シークレットはサーバーの `GOOGLE_CALENDAR_CLIENT_ID`・`GOOGLE_CALENDAR_CLIENT_SECRET` に設定します。
-3. Night PRO LINEの「面談枠の管理」で検証する店舗を選び、「Googleカレンダー連携」から接続します。メインカレンダーなら `primary`、共有・検証専用カレンダーならそのカレンダーIDを指定します。Googleの画面で空き状況の参照を許可し、店舗の管理画面に「連携中」と表示されることを確認します。
+3. Night PRO LINEの「店舗で使う機能」で、検証する店舗の面談予約とGoogleカレンダーの照合を有効にします。「面談枠の管理 → Googleカレンダー連携」で接続します。メインカレンダーなら `primary`、共有・検証専用カレンダーならそのカレンダーIDを指定します。Googleの画面で空き状況の参照を許可し、店舗の管理画面に「連携中」と表示されることを確認します。
 
 Google連携は空き状況を参照します。確定した面談はNight PRO LINEに保存されます。Google Calendarに予約を書き込む機能は含まれていません。
 

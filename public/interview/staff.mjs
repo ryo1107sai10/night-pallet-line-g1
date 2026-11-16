@@ -24,20 +24,25 @@ async function show(){
   if(!selected)throw new Error('採用を管理できる店舗がありません。')
   form.hidden=true
   hoursForm.hidden=true
+  $('#slots').replaceChildren()
+  $('#slot-help').textContent=''
   $('#availability').replaceChildren()
   const store=selected
   const availabilityPath=path(store)+'/availability'
-  const [{channels,slots,hours,today},availability]=await Promise.all([api(path(store)),api(availabilityPath)])
+  const [{channels,slots,hours,today,interviews_enabled},availability]=await Promise.all([api(path(store)),api(availabilityPath)])
   if(current!==requestNumber)return
   const refresh=async message=>{
-    if(selected.id===store.id) await show()
-    notice(message)
+    if(selected.id!==store.id)return
+    await show()
+    if(selected.id===store.id)notice(message)
   }
-  drawAvailability($('#availability'),availability,store.timezone,{
-    localInstant,report:notice,
+  drawAvailability($('#availability'),{...availability,interviews_enabled},store.timezone,{
+    localInstant,report:message=>{
+      if(selected.id===store.id)notice(message)
+    },
     connect:async calendar_id=>{
       const result=await api(availabilityPath+'/google','POST',{calendar_id})
-      location.assign(result.url)
+      if(current===requestNumber)location.assign(result.url)
     },
     disconnect:async()=>{
       await api(availabilityPath+'/google','DELETE',{})
@@ -54,7 +59,7 @@ async function show(){
     },
   })
   configureHours(hoursForm,hours)
-  hoursForm.hidden=false
+  hoursForm.hidden=!interviews_enabled
   hoursForm.onsubmit=async event=>{
     event.preventDefault()
     const button=hoursForm.querySelector('button')
@@ -82,8 +87,9 @@ async function show(){
   minutes.onchange=updateTimes
   updateTimes()
   form.elements.channel.replaceChildren(...channels.map(channel=>new Option(channel.label,channel.id)))
-  form.hidden=!channels.length
-  $('#slot-help').textContent=channels.length?'':'先に採用用または兼用の公式アカウントを登録してください。'
+  form.hidden=!interviews_enabled||!channels.length
+  $('#slot-help').textContent=!interviews_enabled?'この店舗では面談予約の新規受付を停止しています。':
+    channels.length?'':'先に採用用または兼用の公式アカウントを登録してください。'
   $('#slots').replaceChildren(...slots.map(slot=>{
     const section=el('article','');section.className='record stack'
     const stopped=availability.blocks.some(block=>Date.parse(slot.starts_at)<Date.parse(block.ends_at)&&
@@ -91,7 +97,7 @@ async function show(){
     section.append(el('strong',formatAppointment(slot,store.timezone)),
       el('p',(slot.method==='online'?'オンライン':'対面')+' · '+slot.channel_label+' · '+
       (stopped?'受付停止中':slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+(slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')))
-    if(Date.parse(slot.starts_at)>Date.now()&&(slot.published||slot.in_hours)){
+    if(Date.parse(slot.starts_at)>Date.now()&&(slot.published||(slot.in_hours&&interviews_enabled))){
       const toggle=el('button',slot.published?'公開を停止':'公開する')
       toggle.type='button';toggle.onclick=async()=>{
         toggle.disabled=true
@@ -121,10 +127,13 @@ form.onsubmit=async event=>{
     const fingerprint=JSON.stringify([store.id,settings])
     if(fingerprint!==pendingInput){pendingInput=fingerprint;pendingKey=crypto.randomUUID()}
     await api(path(store)+'/slots','POST',settings,pendingKey)
-    pendingInput=null
-    if(selected.id===store.id){form.reset();await show()}
-    notice('面談枠を登録しました。')
-  }catch(error){notice(error.message)}finally{button.disabled=false}
+    if(selected.id===store.id){
+      pendingInput=null
+      form.reset()
+      await show()
+      if(selected.id===store.id)notice('面談枠を登録しました。')
+    }
+  }catch(error){if(selected.id===store.id)notice(error.message)}finally{button.disabled=false}
 }
 try{
   const session=await api('/session')
@@ -133,7 +142,25 @@ try{
   $('#stores').append(...stores.map(store=>new Option(store.name,store.id)))
   const query=new URLSearchParams(location.search)
   if(stores.some(store=>store.id===query.get('store')))$('#stores').value=query.get('store')
-  $('#stores').onchange=()=>show().catch(error=>notice(error.message))
+  function storeNavigation(){
+    const store=$('#stores').value
+    $('#back-to-admin').href=store?'/?store='+encodeURIComponent(store):'/'
+    $('#back-to-operations').href='/operations/'+(store?'?store='+encodeURIComponent(store):'')
+    const url=new URL(location.href)
+    if(store)url.searchParams.set('store',store)
+    else url.searchParams.delete('store')
+    url.searchParams.delete('google')
+    history.replaceState(null,'',url)
+  }
+  storeNavigation()
+  $('#stores').onchange=async()=>{
+    storeNavigation()
+    const store=$('#stores').value
+    form.reset()
+    pendingInput=null
+    notice('')
+    try{await show()}catch(error){if($('#stores').value===store)notice(error.message)}
+  }
   await show()
-  if(query.get('google')==='connected')notice('Googleカレンダーの空き状況を確認できました。')
+  if(query.get('google')==='connected'&&selected.id===query.get('store'))notice('Googleカレンダーの空き状況を確認できました。')
 }catch(error){notice(error.message)}

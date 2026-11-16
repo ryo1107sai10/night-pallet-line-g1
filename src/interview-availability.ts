@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { audit, digest, Fault, missing, newId, once, opaque, seal, token, unseal,
   type Actor, type Config, type DB } from './core.js'
 import { lockDispatch } from './dispatch-lock.js'
+import { requireFeature, storeFeatures } from './store-features.js'
 
 const scope='https://www.googleapis.com/auth/calendar.events.freebusy'
 const timestamp=z.iso.datetime({offset:true})
@@ -107,6 +108,7 @@ export async function beginCalendarLink(db:DB,actor:Actor,store:string,calendar:
   const state=token(),verifier=token()
   const url=google.authorization(store,state,verifier)
   await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'google_calendar_enabled')
   await db.query(`INSERT INTO interview_google_session
     (store_id,tenant_id,actor_id,state_hash,calendar_id,verifier,expires_at)
     VALUES($1,$2,$3,$4,$5,$6,clock_timestamp()+interval '10 minutes')
@@ -117,6 +119,7 @@ export async function beginCalendarLink(db:DB,actor:Actor,store:string,calendar:
 }
 
 export async function claimCalendarLink(db:DB,actor:Actor,store:string,state:string){
+  await requireFeature(db,store,'google_calendar_enabled')
   const {rows:[pending]}=await db.query<{calendar_id:string;verifier:string}>(`UPDATE interview_google_session SET used=true
     WHERE store_id=$1 AND actor_id=$2 AND state_hash=$3 AND NOT used AND expires_at>clock_timestamp()
     RETURNING calendar_id,verifier`,[store,actor.id,digest(state)])
@@ -126,6 +129,7 @@ export async function claimCalendarLink(db:DB,actor:Actor,store:string,state:str
 
 export async function finishCalendarLink(db:DB,cfg:Config,actor:Actor,store:string,state:string,refresh:string){
   await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'google_calendar_enabled')
   const {rows:[pending]}=await db.query<{calendar_id:string}>(`DELETE FROM interview_google_session
     WHERE store_id=$1 AND actor_id=$2 AND state_hash=$3 AND used AND expires_at>clock_timestamp()
     RETURNING calendar_id`,[store,actor.id,digest(state)])
@@ -149,15 +153,18 @@ async function calendarRecord(db:DB,store:string){
 }
 
 export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range:Interval){
+  if (!(await storeFeatures(db,store)).google_calendar_enabled) return []
   const record=await calendarRecord(db,store)
   return record?google.busy(record,range):[]
 }
 
 export async function availabilityOverview(db:DB,store:string,google:InterviewGoogle){
   const record=await calendarRecord(db,store)
+  const features=await storeFeatures(db,store)
   const {rows:blocks}=await db.query(`SELECT id,starts_at,ends_at,note FROM interview_block
     WHERE store_id=$1 AND ends_at>now() ORDER BY starts_at LIMIT 200`,[store])
-  return {google:{configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null},blocks}
+  return {google:{configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null},
+    google_enabled:features.google_calendar_enabled,blocks}
 }
 
 export async function localBlocks(db:DB,store:string,range:Interval){
@@ -167,6 +174,7 @@ export async function localBlocks(db:DB,store:string,range:Interval){
 
 export async function addBlock(db:DB,cfg:Config,actor:Actor,store:string,key:string,input:z.infer<typeof blockInput>){
   await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'interviews_enabled')
   return once(db,cfg,actor,'interview.block',key,{store,input},async()=>{
     const start=new Date(input.starts_at),end=new Date(input.ends_at)
     if(+end<=Date.now()||+end<=+start||+end-+start>31*day) {

@@ -88,6 +88,10 @@ export async function mountInterview(root,service) {
 
   function calendar(){
     const cal=box('空き枠を選ぶ')
+    if(data.interviews_enabled===false){
+      cal.append(el('p','この店舗では現在、新規の面談予約を受け付けていません。'))
+      return cal
+    }
     const dates=Array.from({length:range},(_,i)=>shift(start,i))
     const hours=data.hours??defaultHours
     const times=timeOptions(hours.start,hours.end)
@@ -220,9 +224,10 @@ export async function mountInterview(root,service) {
       const row=el('div',null,'record stack')
       row.append(el('strong',active?'確定済み':booking.status==='cancelled'?'取消済み':'過去の予約'),item(booking,data.timezone))
       if(booking.instructions)row.append(el('p',booking.instructions,'wrap'))
-      if(active)row.append(group(action('日程変更',()=>{
+      const change=data.interviews_enabled===false?[]:[action('日程変更',()=>{
         existing=booking;method=booking.method;selected=null;message='';chooseFirstAvailableDay();show(true)
-      }),action('取り消す',()=>{
+      })]
+      if(active)row.append(group(...change,action('取り消す',()=>{
         complete=booking;stage='cancel';show(true)
       })))
       list.append(row)

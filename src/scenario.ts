@@ -16,7 +16,7 @@ const nodes = z.discriminatedUnion('type',[
     days:z.int().optional(),time:clock.optional(),next}),
   z.strictObject({...base,type:z.literal('branch'),condition:z.enum(['booked','consent','adult','responded','tag','assigned']),
     tag:z.string().max(80).optional(),yes:next,no:next}),
-  z.strictObject({...base,type:z.literal('tag'),tag:z.string().max(80),next}),
+  z.strictObject({...base,type:z.literal('tag'),tag:z.string().max(80),action:z.enum(['add','remove']).optional(),next}),
   z.strictObject({...base,type:z.literal('task'),note:z.string().max(400),next}),
   z.strictObject({...base,type:z.literal('end')}),
 ])

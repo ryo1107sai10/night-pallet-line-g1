@@ -24,6 +24,9 @@ import { changeInterviewVisibility, confirmInterview, interviewAccess, interview
   interviewHours, saveInterviewHours, startInterviewSession, updateInterview } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
   googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
+import { featureInput, requireFeature, saveStoreFeatures, storeFeatures } from './store-features.js'
+import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, tagRuleInput,
+  listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
 
 
 
@@ -126,9 +129,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     res.json(await tx(pool,async db=>{
       const c=await authenticateCustomer(db,localCustomerSession(req))
       const location=await locationOf(db,c.store_id)
+      const features=await storeFeatures(db,c.store_id)
       return {revision:c.revision,service_consent:c.service_consent,marketing_consent:c.marketing_consent,
         all_stop:c.all_stop,policy_version:consentVersion,store:location.name,timezone:location.timezone,
-        slots:await listSlots(db,true),bookings:(await listBookings(db,c.id)).map(({customer_id,display_name,...booking})=>booking)}
+        visits_enabled:features.visits_enabled,slots:features.visits_enabled?await listSlots(db,true):[],
+        bookings:(await listBookings(db,c.id)).map(({customer_id,display_name,...booking})=>booking)}
     }))
   })
   api.patch('/customer/preferences',async(req,res)=>{
@@ -301,14 +306,40 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       ORDER BY f.email LIMIT 150`)
     return rows
   }))
-  api.get('/stores/:store/customers',inStore(async(db)=>{
+  api.get('/stores/:store/features',inStore((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
+  api.patch('/stores/:store/features',inStore((db,actor,req)=>{
+    requireAdmin(actor)
+    return saveStoreFeatures(db,actor,idOf(req,'store'),featureInput.parse(req.body))
+  }))
+  api.get('/stores/:store/tags',inStore(async(db,_actor,req)=>{
+    await requireFeature(db,idOf(req,'store'),'tags_enabled')
+    return listTags(db)
+  }))
+  api.put('/stores/:store/tags',inStore((db,actor,req)=>
+    saveTagRule(db,actor,idOf(req,'store'),tagRuleInput.parse(req.body))))
+  api.get('/stores/:store/tag-filters',inStore(async(db,_actor,req)=>{
+    await requireFeature(db,idOf(req,'store'),'tags_enabled')
+    return listTagSegments(db)
+  }))
+  api.put('/stores/:store/tag-filters',inStore((db,actor,req)=>
+    saveTagSegment(db,actor,idOf(req,'store'),tagSegmentInput.parse(req.body))))
+  api.delete('/stores/:store/tag-filters',inStore((db,actor,req)=>
+    removeTagSegment(db,actor,idOf(req,'store'),tagSegmentDelete.parse(req.body).name)))
+  api.get('/stores/:store/customers',inStore(async(db,_actor,req)=>{
+    const filter=tagFilter.parse(req.query)
+    const tags=typeof filter.tag==='string'?[filter.tag]:filter.tag??[]
+    if (tags.length) await requireFeature(db,idOf(req,'store'),'tags_enabled')
     const {rows}=await db.query(`SELECT c.*,ch.label AS channel_label FROM (
-      SELECT ${customerFields} FROM customer ORDER BY updated_at DESC,id LIMIT 150) c
-      JOIN channel ch ON ch.id=c.channel_id`)
+      SELECT ${customerFields} FROM customer
+      WHERE cardinality($1::text[])=0 OR CASE WHEN $2='all' THEN tags @> $1 ELSE tags && $1 END
+      ORDER BY updated_at DESC,id LIMIT 150) c
+      JOIN channel ch ON ch.id=c.channel_id`,[tags,filter.match])
     return rows
   }))
   api.patch('/stores/:store/customers/:customer',inStore(async(db,actor,req)=>
     updateProfile(db,actor,idOf(req,'customer'),profileInput.parse(req.body))))
+  api.patch('/stores/:store/customers/:customer/tags',inStore((db,actor,req)=>
+    saveCustomerTags(db,actor,idOf(req,'store'),idOf(req,'customer'),customerTagInput.parse(req.body))))
   api.post('/stores/:store/customers/:customer/enroll',inStore(async(db,actor,req)=>{
     const reason=z.strictObject({reason:text(200)}).parse(req.body).reason
     const c=await customerById(db,idOf(req,'customer'))

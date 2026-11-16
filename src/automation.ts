@@ -10,7 +10,8 @@ const minute=60000
 const day=1440*minute
 type Event = { id:string;customer_id:string;kind:string;booking_id:string|null;booking_revision:number|null;happened_at:Date;scope_version:string }
 type Location = { id:string;name:string;timezone:string;cutoff:string;auto_enabled:boolean;eligible_at:Date|null
-  contract_active:boolean;auto_enabled_at:Date|null;scope_version:string;monthly_limit:number;stopped:boolean;tenant_stopped:boolean }
+  contract_active:boolean;auto_enabled_at:Date|null;scope_version:string;monthly_limit:number;stopped:boolean;tenant_stopped:boolean
+  tags_enabled:boolean;visits_enabled:boolean;tags_enabled_at:Date|null;visits_enabled_at:Date|null }
 type Run = { id:string;tenant_id:string;store_id:string;channel_id:string;scenario_id:string;customer_id:string
   node_id:string;wait_node:string|null;due_at:Date;event_kind:string;graph:Graph;booking_id:string|null
   booking_revision:number|null;event_at:Date;stopped:boolean;ended_at:Date|null;end_reason:string|null }
@@ -48,7 +49,9 @@ export async function processCustomerWebhook(db:DB,cfg:Config,c:Channel,event:{
 
 export async function locationOf(db:DB,id:string) {
   const {rows:[entry]}=await db.query<Location>(`SELECT s.id,s.name,s.timezone,to_char(s.cutoff,'HH24:MI') AS cutoff,
-    s.auto_enabled,s.auto_enabled_at,s.eligible_at,s.contract_active,s.monthly_limit,s.stopped,t.stopped AS tenant_stopped,concat_ws(':',t.delivery_version,s.delivery_version) AS scope_version
+    s.auto_enabled,s.auto_enabled_at,s.eligible_at,s.contract_active,s.monthly_limit,s.stopped,
+    s.tags_enabled,s.visits_enabled,s.tags_enabled_at,s.visits_enabled_at,
+    t.stopped AS tenant_stopped,concat_ws(':',t.delivery_version,s.delivery_version) AS scope_version
     FROM store s JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[id])
   return entry
 }
@@ -57,6 +60,13 @@ const isEnabled=(cfg:Config,s:Location,c:Channel)=>cfg.external&&cfg.automation=
   !!s.eligible_at&&!s.stopped&&!s.tenant_stopped&&!c.stopped&&c.purpose!=='recruitment'
 const channelReady=(c:Channel)=>['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked','login_published',
   'non_developer','token_verified','webhook_verified','delivery_confirmed'].every(key=>c.checks[key as keyof Channel['checks']]===true)
+const featureStop=(s:Location,graph:Graph,event:string,happenedAt:Date)=>{
+  if ((!s.visits_enabled || (s.visits_enabled_at && happenedAt<s.visits_enabled_at)) &&
+    ['booking_created','booking_changed','booking_cancelled','visit'].includes(event)) return '来店予約が停止または切り替えられました'
+  if ((!s.tags_enabled || (s.tags_enabled_at && happenedAt<s.tags_enabled_at)) &&
+    graph.nodes.some(node=>node.type==='tag'||(node.type==='branch'&&node.condition==='tag'))) return '顧客タグが停止または切り替えられました'
+  return null
+}
 
 export async function endScope(db:DB, filter:'store_id=$1'|'channel_id=$1'|'true',args:string[],reason:string) {
   const arg='$'+(args.length+1)
@@ -108,6 +118,7 @@ async function enroll(db:DB,c:Channel,s:Location,cfg:Config) {
         WHERE q.stopped=false AND v.published_at<=$1 AND q.delivery_floor<=$1 AND v.graph->>'channel'=$2 AND v.graph->>'purpose'='customer'
         AND v.graph->>'trigger'=$3`,[ev.happened_at,c.id,ev.kind])
       for (const item of scenarios) {
+        if (featureStop(s,item.graph,ev.kind,ev.happened_at)) continue
         const cst=await customerById(db,ev.customer_id)
         if (cst.all_stop || !cst.service_consent&&!cst.marketing_consent) continue
         const last=await db.query(`SELECT starts_at,ended_at FROM enrollment WHERE scenario_id=$1 AND customer_id=$2
@@ -166,6 +177,8 @@ async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer
   booking:Booking|undefined,category:'service'|'marketing') {
   if (!isEnabled(cfg,s,c) || !channelReady(c)) return '店舗またはLINE接続の配信条件が未成立'
   if (run.stopped||run.ended_at) return 'シナリオ停止'
+  const disabled=featureStop(s,run.graph,run.event_kind,run.event_at)
+  if (disabled) return disabled
   if (run.event_kind==='booking_cancelled' && category!=='service') return '予約取消では業務案内だけを送信できます'
   if (run.booking_id && (!booking||booking.revision!==run.booking_revision)) return '予約が更新されました'
   if (cst.all_stop) return '全配信停止'
@@ -206,6 +219,8 @@ async function allowance(db:DB,s:Location,run:Run,cst:Customer,category:string,e
 async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|null> {
   const node=run.graph.nodes.find(n=>n.id===run.node_id)
   if (!node || run.stopped || !isEnabled(cfg,s,c)) { await end(db,run,'シナリオ停止または配信無効');return null }
+  const disabled=featureStop(s,run.graph,run.event_kind,run.event_at)
+  if (disabled) {await end(db,run,disabled);return null}
   const p=await customerById(db,run.customer_id)
   const booking=await currentBooking(db,run,p)
   if (p.all_stop || run.booking_id && booking?.revision!==run.booking_revision) {
@@ -232,9 +247,13 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|n
     return null
   }
   if (node.type==='tag'||node.type==='task') {
-    if (node.type==='tag') await db.query(`UPDATE customer SET tags=array_append(tags,$2),revision=revision+1
-      WHERE id=$1 AND NOT $2=ANY(tags) AND cardinality(tags)<30`,[p.id,node.tag])
-    await note(db,run,node.type,node.type==='tag'?node.tag:node.note)
+    if (node.type==='tag') {
+      if (node.action==='remove') await db.query(`UPDATE customer SET tags=array_remove(tags,$2),revision=revision+1,updated_at=now()
+        WHERE id=$1 AND $2=ANY(tags)`,[p.id,node.tag])
+      else await db.query(`UPDATE customer SET tags=array_append(tags,$2),revision=revision+1,updated_at=now()
+        WHERE id=$1 AND NOT $2=ANY(tags) AND cardinality(tags)<30`,[p.id,node.tag])
+    }
+    await note(db,run,node.type,node.type==='tag'?(node.action==='remove'?'解除：':'付与：')+node.tag:node.note)
     await advance(db,run,node.next,run.due_at)
     return null
   }

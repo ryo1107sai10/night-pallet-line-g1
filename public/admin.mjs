@@ -3,6 +3,10 @@ const content = $('#content')
 const notice = $('#notice')
 const types = { customer:'顧客',recruitment:'採用',shared:'顧客・採用兼用' }
 const roles = { admin:'法人管理者',manager:'店舗責任者',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
+const featureNames = {
+  tags_enabled:'顧客タグ', visits_enabled:'来店予約',
+  interviews_enabled:'面談予約', google_calendar_enabled:'面談時にGoogleカレンダーを照合',
+}
 const sendStatus = { queued:'待機中',submitting:'LINEへ提出中',accepted:'LINE受付済',failed:'送信失敗',unknown:'結果不明',cancelled:'取消' }
 const checks = {
   ownership_verified:'法人が所有する公式アカウントと管理権限を確認した',
@@ -14,7 +18,7 @@ const checks = {
   delivery_confirmed:'テスト利用者の端末でメッセージの受信を確認した',
 }
 let session
-let storeId
+let storeId = new URLSearchParams(location.search).get('store')
 let channelId
 let view = 0
 
@@ -298,22 +302,45 @@ async function render() {
   const base = store ? '/stores/'+store.id : ''
   const staffPromise = admin ? api('/staff') : Promise.resolve([])
   const connectionPromise = manage && store ? api(base+'/connections') : Promise.resolve([])
-  const [staff,connections] = await Promise.all([staffPromise,connectionPromise])
+  const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
+  const [staff,connections,features] = await Promise.all([staffPromise,connectionPromise,featurePromise])
   if (generation!==view) return
   if (!connections.some(item=>item.id===channelId)) channelId = connections[0]?.id
   const current = connections.find(item=>item.id===channelId)
   const testers = current ? await api(base+'/connections/'+current.id+'/tests') : []
   if (generation!==view) return
+  const url = new URL(location.href)
+  if (store) url.searchParams.set('store',store.id)
+  else url.searchParams.delete('store')
+  history.replaceState(null,'',url)
+  $('#manage-interviews').href = '/interview/staff.html'+(store ? '?store='+encodeURIComponent(store.id) : '')
+  $('#manage-operations').href = '/operations/'+(store ? '?store='+encodeURIComponent(store.id) : '')
   const layout = el('div',null,'controls')
   const main = el('div')
   const side = el('div')
   const selector = field('操作する店舗','store',{
     choices:Object.fromEntries(session.stores.map(item=>[item.id,item.name])),value:storeId,
   })
-  selector.querySelector('select').onchange = event => {
-    storeId = event.target.value
+  selector.querySelector('select').onchange = async event => {
+    const select = event.target
+    const previousChannel = channelId
+    storeId = select.value
     channelId = undefined
-    render().catch(report)
+    content.inert = true
+    $('#workspace .actions').inert = true
+    feedback('')
+    try { await render() }
+    catch (error) {
+      if (session) {
+        storeId = store.id
+        channelId = previousChannel
+        select.value = store.id
+      }
+      report(error)
+    } finally {
+      content.inert = false
+      $('#workspace .actions').inert = false
+    }
   }
   const storePanel = panel('店舗',store ? selector : el('p','利用できる店舗がありません。'))
   if (store) {
@@ -322,6 +349,14 @@ async function render() {
     if (manage) storePanel.append(details('店舗設定を編集',
       formOf([template('store-fields',store)],'店舗設定を保存',
         data=>change(base,'PATCH',{...data,revision:store.revision},'店舗設定を保存しました。'))))
+    if (features) storePanel.append(details('店舗で使う機能',
+      el('p','Googleカレンダーの照合をオフにすると、Googleの予定を空き枠の判定に使いません。','muted'),
+      formOf(Object.entries(featureNames).map(([key,label])=>field(label,key,{type:'checkbox',value:features[key]})),
+        '機能設定を保存',async data=>{
+          const settings=Object.fromEntries(Object.keys(featureNames).map(key=>[key,data[key]==='on']))
+          await change(base+'/features','PATCH',{...settings,revision:features.revision},'この店舗の機能設定を保存しました。')
+        }),
+      el('p','LINE自動配信は「顧客・予約 → 自動配信」で店舗ごとに設定できます。','muted')))
     if (admin) storePanel.append(details('店舗の利用適格性',formOf([
       field('許可・届出およびLINE利用条件を確認済み','verified',{type:'checkbox',value:store.eligible_at}),
       field('確認記録の参照番号または理由','reference'),

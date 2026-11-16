@@ -4,6 +4,8 @@ import { digest, Fault, audit, conflict, missing, newId, revision, route, scope,
   type Actor, type Config, type DB } from './core.js'
 import { channel, LineAPI, userKey, type Channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
+import { applyTagRules } from './customer-tags.js'
+import { requireFeature } from './store-features.js'
 
 export const consentVersion = 'customer-line-v1'
 export const customerFields = 'id,channel_id,display_name,memo,assigned_to,verified_20_at,tags,active_chat,service_consent,marketing_consent,all_stop,marketing_stop,last_reply_at,verified_at,revision'
@@ -19,7 +21,7 @@ export const preferenceInput = z.strictObject({
 export type Preferences = z.infer<typeof preferenceInput>
 export const profileInput = z.strictObject({revision,display_name:z.string().trim().max(100),memo:z.string().max(1000),
   assigned_to:z.uuid().nullable(),verified20:z.boolean(),active_chat:z.boolean(),
-  tags:z.array(text(80)).max(30),reason:text(200)})
+  tags:z.array(text(80)).max(30).optional(),reason:text(200)})
 export const lineCustomerLogin = z.strictObject({connection:z.uuid(),id_token:z.string().min(20).max(12000)})
 export const selfPreferenceInput = z.strictObject({preferences:preferenceInput,version:z.literal(consentVersion),revision})
 const safeSession = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
@@ -42,13 +44,16 @@ export async function ensureCustomer(db:DB,cfg:Config,c:Channel,user:string,veri
 
 export async function emitDelivery(db:DB,customer:Customer,key:string,kind:string,time=new Date(),
   booking?:{id:string;revision:number}) {
-  await db.query(`INSERT INTO delivery_event
+  const emitted=await db.query(`INSERT INTO delivery_event
     (id,tenant_id,store_id,channel_id,customer_id,origin_key,kind,booking_id,booking_revision,happened_at,scope_version)
     SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,concat_ws(':',t.delivery_version,s.delivery_version,c.delivery_version)
       FROM tenant t JOIN store s ON s.tenant_id=t.id JOIN channel c ON c.store_id=s.id
       WHERE t.id=$2 AND s.id=$3 AND c.id=$4 AND NOT (t.stopped OR s.stopped OR c.stopped)
     ON CONFLICT(channel_id,origin_key) DO NOTHING`,
     [newId(),customer.tenant_id,customer.store_id,customer.channel_id,customer.id,key,kind,booking?.id??null,booking?.revision??null,time])
+  if (emitted.rowCount && ['follow','booking_created','visit'].includes(kind)) {
+    await applyTagRules(db,customer.id,customer.store_id,kind,time)
+  }
 }
 
 export async function endCustomerRuns(db:DB,customer:string,reason:string) {
@@ -95,6 +100,9 @@ export async function stopFromLine(db:DB,c:Customer,signal:string,eventAt:Date) 
 export async function updateProfile(db:DB,actor:Actor,id:string,p:z.infer<typeof profileInput>) {
   await lockDispatch(db,actor.tenant_id)
   const current=await customerById(db,id)
+  const tags=p.tags===undefined?current.tags:[...new Set(p.tags)]
+  const tagsChanged=tags.length!==current.tags.length || tags.some(tag=>!current.tags.includes(tag))
+  if (tagsChanged) await requireFeature(db,current.store_id,'tags_enabled')
   if (p.assigned_to) {
     const {rowCount}=await db.query(`SELECT f.id FROM staff f WHERE f.id=$1 AND f.disabled_at IS NULL
       AND (f.role='admin' OR EXISTS(SELECT 1 FROM store_grant g WHERE g.staff_id=f.id AND g.store_id=scope_store()))`,
@@ -105,10 +113,10 @@ export async function updateProfile(db:DB,actor:Actor,id:string,p:z.infer<typeof
     verified_20_at=CASE WHEN $5 THEN coalesce(verified_20_at,now()) END,
     active_chat=$6,tags=$7,revision=revision+1,updated_at=now()
     WHERE id=$1 AND revision=$8 RETURNING ${customerFields}`,
-    [id,p.display_name||null,p.memo,p.assigned_to,p.verified20,p.active_chat,[...new Set(p.tags)],p.revision])
+    [id,p.display_name||null,p.memo,p.assigned_to,p.verified20,p.active_chat,tags,p.revision])
   if (!result.rowCount) throw conflict()
   await audit(db,actor.tenant_id,current.store_id,
-    actor.id,'customer.profile',id,p.reason,{verified20:p.verified20,active_chat:p.active_chat})
+    actor.id,'customer.profile',id,p.reason,{verified20:p.verified20,active_chat:p.active_chat,tags_changed:tagsChanged})
   return result.rows[0]
 }
 

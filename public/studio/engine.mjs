@@ -207,8 +207,9 @@ export function simulate(flow, person) {
       line.detail=conditions[node.condition]+' → '+(passed?'はい':'いいえ')
       id=passed?node.yes:node.no
     } else if (node.type==='tag') {
-      tags.add(node.tag)
-      line.detail='付与：'+node.tag
+      if(node.action==='remove')tags.delete(node.tag)
+      else tags.add(node.tag)
+      line.detail=(node.action==='remove'?'解除：':'付与：')+node.tag
     } else if (node.type==='task') {
       line.detail=(person.assigned?'担当者：':flow.missingAssignee==='manager'?'店舗責任者へ：':'保留：')+node.note
     } else if (node.type==='message') {

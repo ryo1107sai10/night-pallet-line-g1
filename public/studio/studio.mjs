@@ -451,7 +451,9 @@ function editStep() {
     if (item.condition==='tag') wrap.append(field('タグ名',item.tag,set('tag',false),{event:'input',attributes:{maxlength:'80'}}))
     wrap.append(field('条件を満たす場合',item.yes,set('yes'),{items:destinations}),field('条件を満たさない場合',item.no,set('no'),{items:destinations}))
   } else if (item.type!=='end') wrap.append(field('次のステップ',item.next,set('next'),{items:destinations}))
-  if (item.type==='tag') wrap.append(field('付与するタグ',item.tag,set('tag',false),{event:'input',attributes:{maxlength:'80'}}))
+  if (item.type==='tag') wrap.append(
+    field('タグ操作',item.action??'add',set('action'),{items:{add:'付ける',remove:'外す'}}),
+    field('タグ名',item.tag,set('tag',false),{event:'input',attributes:{maxlength:'80'}}))
   if (item.type==='task') wrap.append(field('担当者へ渡す内容',item.note,set('note',false),{type:'textarea',event:'input',attributes:{maxlength:'400'}}))
   wrap.append(button('ステップを削除',()=>{
     const ok=button('削除を確定',()=>{$('#dialog').close();removeStep(item)},'danger')

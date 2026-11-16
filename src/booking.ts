@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { audit, conflict, Fault, missing, newId, once, revision, text, uuid, type DB, type Actor, type Config } from './core.js'
 import { customerById, emitDelivery, type Customer } from './customer.js'
 import { lockDispatch } from './dispatch-lock.js'
+import { requireFeature } from './store-features.js'
 
 export const slotInput=z.strictObject({label:text(100),starts_at:z.iso.datetime({offset:true}),
   ends_at:z.iso.datetime({offset:true}),capacity:z.int().min(1).max(200),published:z.boolean()})
@@ -19,6 +20,7 @@ type Slot={id:string;starts_at:Date;ends_at:Date;capacity:number;published:boole
 export async function createSlot(db:DB,cfg:Config,actor:Actor,store:string,key:string,input:z.infer<typeof slotInput>) {
   return once(db,cfg,actor,'booking.slot',key,{store,input},async()=>{
     await lockDispatch(db,actor.tenant_id)
+    await requireFeature(db,store,'visits_enabled')
     const start=new Date(input.starts_at),end=new Date(input.ends_at)
     if (start<=new Date()||end<=start) throw new Fault(422,'INVALID_SLOT','将来の空き枠と有効な終了時刻を指定してください。')
     const overlap=await db.query('SELECT 1 FROM booking_slot WHERE starts_at<$2 AND ends_at>$1 LIMIT 1',[start,end])
@@ -69,6 +71,7 @@ export async function requestBooking(db:DB,customer:Customer,slotId:string,party
     if (existing.party!==party || confirm&&existing.status!=='confirmed') throw conflict()
     return {id:existing.id,revision:existing.revision,status:existing.status}
   }
+  await requireFeature(db,customer.store_id,'visits_enabled')
   await fit(db,slot,party,confirm)
   const id=newId(), status=confirm?'confirmed':'pending'
   await db.query(`INSERT INTO visit_booking(id,tenant_id,store_id,customer_id,slot_id,party,status,business_date)
@@ -100,7 +103,10 @@ export async function changeBooking(db:DB,actor:Actor|null,id:string,input:z.inf
   if (!allowed[previous.status].includes(input.status)) throw conflict()
   const slot=await slotFor(db,input.slot,!!own && input.slot!==previous.slot_id)
   if (own && input.status==='confirmed') throw conflict()
-  if (input.status==='pending'||input.status==='confirmed') await fit(db,slot,input.party,input.status==='confirmed',id)
+  if (input.status==='pending'||input.status==='confirmed') {
+    await requireFeature(db,previous.store_id,'visits_enabled')
+    await fit(db,slot,input.party,input.status==='confirmed',id)
+  }
   else if (previous.slot_id!==input.slot || previous.party!==input.party) throw conflict()
   if (['visited','no_show'].includes(input.status) && +slot.starts_at>Date.now()) {
     throw new Fault(422,'TOO_EARLY','予約時刻を過ぎてから来店・不来店を記録してください。')

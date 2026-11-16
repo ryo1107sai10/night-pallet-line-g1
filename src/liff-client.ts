@@ -93,7 +93,7 @@ async function openInterviews() {
 type Slot = {id:string;label:string;starts_at:string;remaining:number}
 type Booking = {id:string;slot_id:string;party:number;status:string;revision:number;starts_at:string}
 type Account = {revision:number;service_consent:boolean;marketing_consent:boolean;all_stop:boolean;policy_version:string;
-  store:string;timezone:string;slots:Slot[];bookings:Booking[]}
+  store:string;timezone:string;visits_enabled:boolean;slots:Slot[];bookings:Booking[]}
 const bookingStates:Record<string,string>={pending:'仮受付',confirmed:'確定',cancelled:'取消',visited:'来店済',no_show:'不来店'}
 async function accountRequest(path:string,method='GET',body?:unknown) {
   const response=await fetch('/api/v1/customer'+path,{method,headers:body?{'Content-Type':'application/json'}:{},
@@ -140,6 +140,7 @@ async function drawAccount(){
     status.textContent='配信設定を保存しました。'
   })
   const reservation=document.querySelector<HTMLFormElement>('#reservation')!
+  reservation.hidden=!account.visits_enabled
   const options=(select:HTMLSelectElement)=>{
     select.replaceChildren(new Option('空き枠を選択',''),...account.slots.filter(s=>s.remaining>0)
       .map(slot=>new Option(date(slot.starts_at)+' '+slot.label+'（残り '+slot.remaining+'人）',slot.id)))
@@ -165,6 +166,10 @@ async function drawAccount(){
         await accountRequest('/bookings/'+booking.id,'PATCH',{slot:booking.slot_id,party:booking.party,revision:booking.revision,status:'cancelled'})
         await drawAccount();status.textContent='予約を取り消しました。'
       })
+      if (!account.visits_enabled) {
+        rows.append(row)
+        continue
+      }
       const detail=item('details')
       detail.append(item('summary','日時・人数の変更を申し込む'))
       const change=item('form')
