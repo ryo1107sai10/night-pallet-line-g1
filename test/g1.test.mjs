@@ -9,7 +9,7 @@ import EmbeddedPostgres from 'embedded-postgres'
 import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
-import { bootstrap, designateMaster, migrate } from '../dist/setup.js'
+import { bootstrap, designateMaster, designatePlatformMaster, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
@@ -1405,4 +1405,82 @@ test('公開入口からマスターを分離し、指定した法人管理者�
   const newMaster=await post('/auth/master/login',null,nextCode)
   expect(newMaster,200)
   expect(await request('/line-onboarding',{cookie:newMaster.cookie}),200)
+})
+
+test('全体管理と法人マスターの認証を分離し、店舗管理マスターのステップを店舗ごとに分ける',async()=>{
+  const creator='platform-control'
+  const email='platform-control@example.test'
+  const invite=await bootstrap(owner,cfg,{slug:creator,name:'全体管理の検証法人',email})
+  const sourceCookie=await activate(invite,email,creator)
+  const loginData={tenant:creator,email,password:pass,code:code(invite.setup_key,1)}
+  expect(await post('/auth/platform/login',null,loginData),401)
+  expect(await request('/platform/tenants',{cookie:sourceCookie}),401)
+  expect(await request('/platform/tenants',{cookie:sourceCookie.replace('night_session=','night_platform=')}),401)
+  await assert.rejects(designatePlatformMaster(pool,creator,email),{code:'42501'})
+  await designatePlatformMaster(owner,creator,email)
+  const platform=await post('/auth/platform/login',null,loginData)
+  expect(platform,200)
+  assert.match(platform.cookie,/^night_platform=/)
+  expect(await request('/platform/session',{cookie:platform.cookie}),200)
+  expect(await request('/session',{cookie:platform.cookie}),401)
+  expect(await request('/session',{cookie:platform.cookie.replace('night_platform=','night_session=')}),401)
+
+  const alpha=expect(await request('/session',{cookie:admin}),200)
+  const gamma=expect(await request('/session',{cookie:other}),200)
+  const legal=expect(await request('/platform/tenants',{cookie:platform.cookie}),200)
+  assert.ok(legal.some(t=>t.id===alpha.tenant.id))
+  assert.ok(legal.some(t=>t.id===gamma.tenant.id))
+  const open=async path=>send(path,{headers:{Cookie:platform.cookie},redirect:'manual'})
+  assert.match(await (await open('/platform/')).text(),/法人一覧/)
+  const scopePath=tenant=>'/platform/tenants/'+tenant+'/api/v1'
+  async function scoped(tenant,path,method='GET',data,cookie=platform.cookie){
+    const response=await send(scopePath(tenant)+path,{method,headers:{Origin:origin,Cookie:cookie,
+      ...(data?{'Content-Type':'application/json',...idempotency()}:{}),
+    },body:data?JSON.stringify(data):undefined})
+    return {status:response.status,data:await response.json()}
+  }
+  const enter=tenant=>post('/platform/tenants/'+tenant+'/enter',platform.cookie,{})
+  expect(await scoped(gamma.tenant.id,'/session'),404)
+  expect(await post('/platform/tenants/'+gamma.tenant.id+'/enter',admin,{}),401)
+  const workA=expect(await enter(alpha.tenant.id),200)
+  const workB=expect(await enter(gamma.tenant.id),200)
+  assert.equal(new URL(workA.url,origin).pathname,'/platform/tenants/'+alpha.tenant.id+'/master/')
+  assert.match(await (await open(workB.url)).text(),/id="workspace"/)
+  expect(await scoped(gamma.tenant.id,'/session','GET',undefined,admin),401)
+  const one=expect(await scoped(alpha.tenant.id,'/session'),200)
+  const two=expect(await scoped(gamma.tenant.id,'/session'),200)
+  assert.equal(one.actor.platform,true)
+  assert.equal(one.tenant.id,alpha.tenant.id)
+  assert.equal(two.tenant.id,gamma.tenant.id)
+  assert.ok(one.stores.some(s=>s.id===storeId))
+  assert.ok(!two.stores.some(s=>s.id===storeId))
+  expect(await scoped(gamma.tenant.id,'/stores/'+storeId+'/connections'),404)
+  const created=expect(await scoped(gamma.tenant.id,'/stores','POST',storeData('全体管理が登録した検証店')),201).id
+  assert.ok(expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===created))
+  assert.ok(!expect(await request('/session',{cookie:admin}),200).stores.some(s=>s.id===created))
+  const sourceId=expect(await request('/platform/session',{cookie:platform.cookie}),200).actor.id
+  const trace=expect(await scoped(gamma.tenant.id,'/stores/'+created+'/audit'),200).find(entry=>entry.operation==='store.create')
+  assert.equal(trace.actor,'全体管理者')
+  assert.equal(trace.details.platform_staff_id,sourceId)
+  const tenantTrace=expect(await request('/stores/'+created+'/audit',{cookie:other}),200).find(entry=>entry.operation==='store.create')
+  assert.equal(tenantTrace.details.platform_staff_id,undefined)
+  assert.equal(tenantTrace.actor,'全体管理者')
+
+  const managerEmail='step-manager@example.test'
+  const next=expect(await post('/staff/invites',admin,{email:managerEmail,role:'manager',stores:[storeId]},idempotency()),201)
+  const manager=await activate(next,managerEmail,'alpha')
+  assert.deepEqual(expect(await request('/session',{cookie:manager}),200).stores.map(item=>item.id),[storeId])
+  const graph={...starter(),channel:c,name:'店舗別のステップ'}
+  const path='/stores/'+storeId+'/scenarios'
+  const step=expect(await post(path,manager,graph,idempotency()),201)
+  const saved=expect(await patch(path+'/'+step.id,manager,{revision:step.revision,graph:{...graph,name:'担当店舗のステップ更新'}}),200)
+  assert.equal(saved.graph.name,'担当店舗のステップ更新')
+  expect(await request('/stores/'+otherStore+'/scenarios',{cookie:manager}),404)
+  expect(await post('/stores/'+otherStore+'/scenarios',manager,graph,idempotency()),404)
+  expect(await request('/line-onboarding',{cookie:manager}),403)
+  expect(await request('/platform/tenants',{cookie:manager}),401)
+  expect(await post('/platform/logout',platform.cookie,{}),200)
+  expect(await scoped(alpha.tenant.id,'/session'),401)
+  expect(await scoped(gamma.tenant.id,'/session'),401)
+  expect(await request('/session',{cookie:sourceCookie}),200)
 })

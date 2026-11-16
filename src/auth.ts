@@ -63,39 +63,46 @@ export async function gate(pool: pg.Pool, cfg: Config, key: string, limit: numbe
   }
 }
 
-export function sessionCookie(cfg: Config, value = '') {
+type LoginMode = 'staff'|'master'|'platform'
+
+export function sessionCookie(cfg: Config, value = '', kind: 'staff'|'platform' = 'staff') {
   const duration = value ? sessionHours * 3600 : 0
-  return `night_session=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${duration}` +
+  return `night_${kind==='platform'?'platform':'session'}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${duration}` +
     (cfg.origin.startsWith('https:') ? '; Secure' : '')
 }
 
-export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: string, masterOnly = false) {
+export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: string, mode: LoginMode = 'staff') {
   const data = loginSchema.parse(input)
+  const kind=mode==='platform'?'platform':'staff'
   await gate(pool, cfg, 'login-ip:' + ip, 40)
   await gate(pool, cfg, 'login-account:' + data.tenant + ':' + data.email, 8)
   const result = await tx(pool, async db => {
     const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE slug=$1', [data.tenant])
     if (directory) await scope(db, directory.tenant_id)
-    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean}>(`SELECT f.*,
-      EXISTS(SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_master
-      FROM staff f WHERE f.email=$1 FOR UPDATE OF f`, [data.email])
+    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean}>(`SELECT f.*,
+      EXISTS(SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_master,
+      EXISTS(SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_platform
+      FROM staff f WHERE f.email=$1 AND NOT f.platform_actor FOR UPDATE OF f`, [data.email])
     const passOk = await verifyPassword(data.password, staff?.password_hash)
     if (!staff || staff.disabled_at || !passOk) return null
     const step = consumeFactor(cfg, staff, data.code)
-    if (step === null || (staff.role==='admin' ? !staff.designated_master : masterOnly)) return null
+    const authorized = mode==='platform' ? staff.designated_platform :
+      staff.role==='admin' ? staff.designated_master : mode==='staff'
+    if (step === null || !authorized) return null
     const raw = token()
     await db.query('UPDATE staff SET last_totp_step=$2 WHERE id=$1', [staff.id, step])
-    await db.query(`INSERT INTO staff_session VALUES ($1,$2,$3,now()+ interval '8 hours')`,
-      [digest(raw), staff.tenant_id, staff.id])
+    await db.query(`INSERT INTO staff_session(token_hash,tenant_id,staff_id,expires_at,session_kind)
+      VALUES ($1,$2,$3,now()+interval '8 hours',$4)`,
+      [digest(raw),staff.tenant_id,staff.id,kind])
     await db.query('SELECT set_config(\'night.all_stores\', \'yes\', true)')
-    await audit(db, staff.tenant_id, null, staff.id, 'staff.login', staff.id)
+    await audit(db,staff.tenant_id,null,staff.id,kind==='platform'?'platform.login':'staff.login',staff.id)
     return staff.tenant_id + '.' + raw
   })
   if (!result) throw new Fault(401, 'INVALID_LOGIN', '法人ID・メール・パスワード・認証コードを確認してください。')
   return result
 }
 
-export async function authenticate(db: DB, credential: string | undefined) {
+export async function authenticate(db: DB, credential: string | undefined, kind: 'staff'|'platform' = 'staff') {
   const [tenantId, raw, extra] = (credential ?? '').split('.')
   if (extra !== undefined || !uuid.safeParse(tenantId).success || !opaque.safeParse(raw).success) {
     throw unauthenticated()
@@ -103,10 +110,15 @@ export async function authenticate(db: DB, credential: string | undefined) {
   await scope(db, tenantId)
   const { rows: [actor] } = await db.query<Actor>(`SELECT f.id,f.tenant_id,f.role,f.email
     FROM staff_session s JOIN staff f ON (s.tenant_id,s.staff_id)=(f.tenant_id,f.id)
-    WHERE s.token_hash=$1 AND s.expires_at>now() AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL
-      AND (f.role<>'admin' OR EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)))
+    WHERE s.token_hash=$1 AND s.session_kind=$2 AND s.expires_at>now()
+      AND NOT f.platform_actor AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL
+      AND CASE WHEN $2='platform' THEN EXISTS (
+        SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
+      ) ELSE f.role<>'admin' OR EXISTS (
+        SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
+      ) END
     FOR SHARE OF f`,
-    [digest(raw)])
+    [digest(raw),kind])
   if (!actor) throw unauthenticated()
   return actor
 }
@@ -142,9 +154,9 @@ export function requireAdmin(actor: Actor) {
 export async function createInvite(db: DB, cfg: Config, tenant: string,
   data: { email: string; role: string; stores: string[] }, actorId: string | null) {
   await scope(db, tenant, undefined, true)
-  const { rows: [existing] } = await db.query<{ id: string; disabled_at: Date | null; password_hash: string | null }>(
-    'SELECT id,disabled_at,password_hash FROM staff WHERE tenant_id=$1 AND email=$2 FOR UPDATE', [tenant,data.email])
-  if (existing && (existing.disabled_at || existing.password_hash)) throw conflict()
+  const { rows: [existing] } = await db.query<{ id: string; disabled_at: Date | null; password_hash: string | null; platform_actor:boolean }>(
+    'SELECT id,disabled_at,password_hash,platform_actor FROM staff WHERE tenant_id=$1 AND email=$2 FOR UPDATE', [tenant,data.email])
+  if (existing && (existing.disabled_at || existing.password_hash || existing.platform_actor)) throw conflict()
   const id = existing?.id ?? newId()
   const raw = token()
   const secret = new Secret({ size: 20 }).base32
@@ -184,7 +196,7 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
     await scope(db, tenant, undefined, true)
     const { rows: [staff] } = await db.query<StaffRow>(`SELECT f.* FROM invite i JOIN staff f
       ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id)
-      WHERE i.token_hash=$1 AND i.expires_at>now() AND f.disabled_at IS NULL
+      WHERE i.token_hash=$1 AND i.expires_at>now() AND NOT f.platform_actor AND f.disabled_at IS NULL
         AND f.password_hash IS NULL
         AND (f.role<>'admin' OR EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)))
       FOR UPDATE OF f`, [hash])
@@ -203,7 +215,8 @@ export async function disableStaff(db: DB, actor: Actor, id: string, reason: str
   requireAdmin(actor)
   if (id === actor.id) throw forbidden()
   await scope(db, actor.tenant_id, undefined, true)
-  const updated = await db.query('UPDATE staff SET disabled_at=now() WHERE id=$1 AND disabled_at IS NULL RETURNING id', [id])
+  const updated = await db.query(`UPDATE staff SET disabled_at=now() WHERE id=$1 AND disabled_at IS NULL AND NOT platform_actor
+    AND NOT EXISTS (SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(staff.tenant_id,staff.id)) RETURNING id`, [id])
   if (!updated.rowCount) throw missing()
   await db.query('DELETE FROM staff_session WHERE staff_id=$1', [id])
   await db.query('DELETE FROM invite WHERE staff_id=$1', [id])

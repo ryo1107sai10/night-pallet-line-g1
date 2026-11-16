@@ -1,8 +1,11 @@
+import {workspacePath,scopeWorkspaceLinks,rememberReturnWorkspace} from '/static/workspace-path.mjs'
 import {formatAppointment} from './calendar.mjs'
 import {localInstant} from '../studio/engine.mjs'
 import {clockLabel, timeOptions, interval} from './hours.mjs'
 import {configureHours} from './hours-form.mjs'
 import {drawAvailability} from './availability.mjs'
+scopeWorkspaceLinks()
+
 const $=value=>document.querySelector(value)
 let stores,selected,requestNumber=0
 const form=$('#new-slot')
@@ -10,7 +13,7 @@ const hoursForm=$('#interview-hours')
 function notice(text){$('#notice').textContent=text;$('#notice').hidden=!text}
 function el(tag,text){const node=document.createElement(tag);node.textContent=text;return node}
 async function api(path,method='GET',body,key){
-  const response=await fetch('/api/v1'+path,{method,headers:{
+  const response=await fetch(workspacePath('/api/v1'+path),{method,headers:{
     ...(body?{'Content-Type':'application/json'}:{}),...(key?{'Idempotency-Key':key}:{}),
   },body:body?JSON.stringify(body):undefined})
   const result=await response.json()
@@ -86,7 +89,10 @@ async function show(){
     },
     connect:async calendar_id=>{
       const result=await api(availabilityPath+'/google','POST',{calendar_id})
-      if(current===requestNumber)location.assign(result.url)
+      if(current===requestNumber){
+        rememberReturnWorkspace('google',store.id)
+        location.assign(result.url)
+      }
     },
     disconnect:async()=>{
       await api(availabilityPath+'/google','DELETE',{})
@@ -196,9 +202,9 @@ try{
   if(stores.some(store=>store.id===query.get('store')))$('#stores').value=query.get('store')
   function storeNavigation(){
     const store=$('#stores').value
-    $('#back-to-admin').href=store?'/staff/?store='+encodeURIComponent(store):'/staff/'
-    $('#back-to-operations').href='/operations/'+(store?'?store='+encodeURIComponent(store):'')
-    $('#recruitment-operations').href='/workflows/?'+new URLSearchParams({store,use:'recruitment'})
+    $('#back-to-admin').href=workspacePath('/staff/'+(store?'?store='+encodeURIComponent(store):''))
+    $('#back-to-operations').href=workspacePath('/operations/'+(store?'?store='+encodeURIComponent(store):''))
+    $('#recruitment-operations').href=workspacePath('/workflows/?'+new URLSearchParams({store,use:'recruitment'}))
     const url=new URL(location.href)
     if(store)url.searchParams.set('store',store)
     else url.searchParams.delete('store')

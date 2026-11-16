@@ -1,3 +1,4 @@
+import { authenticatePlatformWorkspace, enterPlatformTenant, platformTenants, platformWorkspace } from './platform.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
 import type pg from 'pg'
@@ -60,8 +61,16 @@ const eligibilitySchema = z.strictObject({ revision, verified:z.boolean(), refer
 const inviteSchema = z.strictObject({ email, role:memberRole.exclude(['admin']), stores:z.array(uuid).min(1).max(100) })
   .refine(data => new Set(data.stores).size === data.stores.length,{path:['stores']})
 
-const credential = (req: Request) => req.headers.cookie?.split(';').map(value=>value.trim())
-  .find(value=>value.startsWith('night_session='))?.slice('night_session='.length)
+const cookie = (req:Request,name:string) => req.headers.cookie?.split(';').map(value=>value.trim())
+  .find(value=>value.startsWith(name+'='))?.slice(name.length+1)
+const credential = (req:Request) => cookie(req,'night_session')
+const platformCredential = (req:Request) => cookie(req,'night_platform')
+const scoped = (req:Request) => req.params.platformTenant!==undefined
+const staffCredential = (req:Request) => scoped(req)?platformCredential(req):credential(req)
+const workspacePrefix = (req:Request) => scoped(req)?platformWorkspace+'/'+uuid.parse(req.params.platformTenant):''
+const requestActor = (db:DB,req:Request) => scoped(req)
+  ? authenticatePlatformWorkspace(db,platformCredential(req),uuid.parse(req.params.platformTenant))
+  : authenticate(db,credential(req))
 const idOf = (req: Request, key: string) => uuid.parse(req.params[key])
 const keyOf = (req: Request) => z.string().regex(/^[a-zA-Z0-9_-]{16,100}$/).parse(req.get('Idempotency-Key'))
 const address = (req: Request) => req.socket.remoteAddress ?? 'unknown'
@@ -69,7 +78,8 @@ const here = (path: string) => fileURLToPath(new URL(path,import.meta.url))
 
 export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), google = googleFromEnvironment(cfg)) {
   const app = express()
-  const api = express.Router()
+  const api = express.Router({mergeParams:true})
+  const workspace = express.Router({mergeParams:true})
   app.disable('x-powered-by')
   app.use((req,res,next) => {
     res.locals.correlation = newId()
@@ -81,32 +91,31 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     next()
   })
   const pageActor = async(req:Request) => {
-    const session=credential(req)
-    if (!session) return
-    try { return await tx(pool,db=>authenticate(db,session)) }
+    if (!staffCredential(req)) return
+    try { return await tx(pool,db=>requestActor(db,req)) }
     catch (error) {
-      if (error instanceof Fault && error.status===401) return
+      if (error instanceof Fault && (error.status===401 || scoped(req) && error.status===404)) return
       throw error
     }
   }
   const staffPage = async(req:Request,res:Response,next:NextFunction) => {
     if (await pageActor(req)) next()
-    else res.redirect(302,'/staff/')
+    else res.redirect(302,scoped(req)?'/platform/':'/staff/')
   }
   for (const section of ['studio','operations','workflows']) {
     const path='/'+section
-    app.get(path+'/',staffPage,(req,res)=>{
-      if (!req.path.endsWith('/')) res.redirect(302,path+'/')
+    workspace.get(path+'/',staffPage,(req,res)=>{
+      if (!req.path.endsWith('/')) res.redirect(302,workspacePrefix(req)+path+'/')
       else res.sendFile(here('../public/'+section+'/index.html'))
     })
-    app.use(path,staffPage,express.static(here('../public/'+section),{index:false,redirect:false}))
+    workspace.use(path,staffPage,express.static(here('../public/'+section),{index:false,redirect:false}))
   }
-  app.get('/interview/staff.html',staffPage,(_req,res)=>res.sendFile(here('../public/interview/staff.html')))
+  workspace.get('/interview/staff.html',staffPage,(_req,res)=>res.sendFile(here('../public/interview/staff.html')))
   for (const page of ['google-return.html','guest.html']) {
     app.get('/interview/'+page,(_req,res)=>res.sendFile(here('../public/interview/'+page)))
   }
   const interviewAssets=express.static(here('../public/interview'),{index:false,redirect:false})
-  app.use('/interview',(req,res,next)=>{
+  workspace.use('/interview',(req,res,next)=>{
     if (/\.(mjs|css)$/i.test(req.path)) interviewAssets(req,res,next)
     else next()
   })
@@ -116,10 +125,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     else res.sendFile(here('../public/home.html'))
   })
   for (const area of ['master','staff']) {
-    app.get('/'+area+'/',async(req,res)=>{
+    workspace.get('/'+area+'/',async(req,res)=>{
       res.set('X-Robots-Tag','noindex, nofollow')
       const actor=await pageActor(req)
-      if (!actor) {
+      if (!actor && scoped(req)) {
+        res.redirect(302,'/platform/')
+      } else if (!actor) {
         res.sendFile(here('../public/staff-login.html'))
       } else if (area==='master' && actor.role!=='admin') {
         res.redirect(302,'/')
@@ -129,12 +140,20 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
           const value=uuid.safeParse(req.query[name])
           if (value.success) params.set(name,value.data)
         }
-        res.redirect(302,'/master/'+(params.size?'?'+params:''))
+        res.redirect(302,workspacePrefix(req)+'/master/'+(params.size?'?'+params:''))
       } else {
         res.sendFile(here('../public/index.html'))
       }
     })
   }
+  app.get('/platform/',async(req,res)=>{
+    res.set('X-Robots-Tag','noindex, nofollow')
+    const signedIn=await tx(pool,db=>authenticate(db,platformCredential(req),'platform')).then(()=>true,error=>{
+      if (error instanceof Fault && error.status===401) return false
+      throw error
+    })
+    res.sendFile(here(signedIn?'../public/platform.html':'../public/staff-login.html'))
+  })
   app.get(guidePath,(_req,res)=>res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/line-invite.html')))
   app.get(moduleReturnPath,(_req,res)=>res.sendFile(here('../public/line-module-return.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
@@ -142,13 +161,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.sendFile(here('../public/interview/guest.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs'])
   app.get('/static/:asset',(req,res,next)=>{
     if (staticAssets.has(req.params.asset)) res.sendFile(here('../public/'+req.params.asset))
     else next()
   })
   app.use('/assets',express.static(here('./assets'),{index:false}))
-  app.use('/api/v1',api)
+  workspace.use('/api/v1',api)
+  app.use(platformWorkspace+'/:platformTenant',workspace)
+  app.use(workspace)
 
   api.post('/webhooks/line/:connection',express.raw({ type:'application/json',limit:'1mb',inflate:false }),
     async (req,res)=>{
@@ -172,12 +193,35 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     next()
   })
   api.use(express.json({ limit:'32kb',strict:true }))
-  for (const path of ['/auth/login','/auth/master/login']) {
+  for (const [path,mode] of [
+    ['/auth/login','staff'],['/auth/master/login','master'],['/auth/platform/login','platform'],
+  ] as const) {
     api.post(path,async(req,res)=>{
-      const session=await login(pool,cfg,req.body,address(req),path==='/auth/master/login')
-      res.set('Set-Cookie',sessionCookie(cfg,session)).json({signed_in:true})
+      const session=await login(pool,cfg,req.body,address(req),mode)
+      res.set('Set-Cookie',sessionCookie(cfg,session,mode==='platform'?'platform':'staff')).json({signed_in:true})
     })
   }
+  api.get('/platform/session',async(req,res)=>{
+    const actor=await tx(pool,db=>authenticate(db,platformCredential(req),'platform'))
+    res.json({actor:{id:actor.id,email:actor.email,role:'platform'}})
+  })
+  api.get('/platform/tenants',async(req,res)=>{
+    res.json(await tx(pool,db=>platformTenants(db,platformCredential(req))))
+  })
+  api.post('/platform/tenants/:tenant/enter',async(req,res)=>{
+    z.strictObject({}).parse(req.body)
+    res.json(await tx(pool,db=>enterPlatformTenant(db,platformCredential(req),idOf(req,'tenant'))))
+  })
+  api.post('/platform/logout',async(req,res)=>{
+    await tx(pool,async db=>{
+      const session=platformCredential(req)
+      if (!session) return
+      try { await authenticate(db,session,'platform') }
+      catch(error) { if (error instanceof Fault && error.status===401) return; throw error }
+      await logout(db,session)
+    })
+    res.set('Set-Cookie',sessionCookie(cfg,'','platform')).json({signed_out:true})
+  })
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
   api.get('/liff/:connection',async (req,res)=>{
     await gate(pool,cfg,'liff-config:' + address(req),120)
@@ -317,7 +361,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
 
   type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
   const staff = (action: Action, status=200) => async (req: Request,res: Response) => {
-    const data = await tx(pool,async db=>action(db,await authenticate(db,credential(req)),req))
+    const data = await tx(pool,async db=>action(db,await requestActor(db,req),req))
     res.status(status).json(data)
   }
   const inStore = (action: Action,manage = true,status=200) => staff(async (db,actor,req)=>{
@@ -342,14 +386,14 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(workflow+'/settings',workflowStaff((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
   api.get(workflow+'/checks',workflowStaff((db,_actor,req)=>workflowChecks(db,cfg,idOf(req,'store'),workPurpose(req),google.configured)))
   api.get(workflow+'/delivery',workflowStaff((db,_actor,req)=>serviceHistory(db,workPurpose(req))))
-  api.get(workflow+'/inbox',workflowStaff((db,_actor,req)=>inboxOverview(db,idOf(req,'store'),workPurpose(req))))
+  api.get(workflow+'/inbox',workflowStaff((db,actor,req)=>inboxOverview(db,idOf(req,'store'),workPurpose(req),actor.platform?actor.id:undefined)))
   api.get(workflow+'/inbox/:thread',workflowStaff((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),workPurpose(req),idOf(req,'thread'))))
   api.patch(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
     changeThread(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),inboxEdit.parse(req.body))))
   api.post(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
     writeInbox(db,cfg,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),keyOf(req),inboxText.parse(req.body)),201))
   const intake='/stores/:store/intake'
-  api.get(intake,inStore((db,_actor,req)=>inboxOverview(db,idOf(req,'store'),'unclassified')))
+  api.get(intake,inStore((db,actor,req)=>inboxOverview(db,idOf(req,'store'),'unclassified',actor.platform?actor.id:undefined)))
   api.get(intake+'/:thread',inStore((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),'unclassified',idOf(req,'thread'))))
   api.patch(intake+'/:thread',inStore((db,actor,req)=>
     classifyThread(db,actor,idOf(req,'store'),idOf(req,'thread'),inboxClassify.parse(req.body))))
@@ -369,7 +413,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const store=idOf(req,'store'),use=workPurpose(req),data=menuInput.parse(req.body)
     await gate(pool,cfg,'menu-verify:'+address(req),30)
     const authorized=async(db:DB)=>{
-      const actor=await authenticate(db,credential(req))
+      const actor=await requestActor(db,req)
       await workflowAccess(db,actor,store,use)
       return actor
     }
@@ -402,7 +446,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.post(availability+'/google/complete',async(req,res)=>{
     const data=googleCalendarReturn.parse(req.body),store=idOf(req,'store')
     const authorized=async(db:DB)=>{
-      const actor=await authenticate(db,credential(req))
+      const actor=await requestActor(db,req)
       await interviewAccess(db,actor,store)
       return actor
     }
@@ -463,7 +507,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.get('/session',staff(async (db,actor)=>{
     const { rows:[tenant] } = await db.query(`SELECT id,slug,legal_name,stopped,revision FROM tenant WHERE id=$1`,[actor.tenant_id])
-    return { actor:{ id:actor.id,email:actor.email,role:actor.role }, tenant, stores:await storeList(db,actor) }
+    return { actor:{ id:actor.id,email:actor.email,role:actor.role,platform:actor.platform===true }, tenant, stores:await storeList(db,actor) }
   }))
   api.post('/stores',staff(async (db,actor,req)=>{
     requireAdmin(actor)
@@ -512,7 +556,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const { rows } = await db.query(`SELECT f.id,f.email,f.role,f.disabled_at,
       f.password_hash IS NOT NULL AS activated,
       coalesce((SELECT array_agg(g.store_id ORDER BY g.store_id) FROM store_grant g WHERE g.staff_id=f.id),'{}') AS stores
-      FROM staff f ORDER BY f.email`)
+      FROM staff f WHERE NOT f.platform_actor ORDER BY f.email`)
     return rows
   }))
   api.post('/staff/invites',staff(async(db,actor,req)=>{
@@ -621,11 +665,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   const moduleLink = '/stores/:store/line-module'
   api.get(moduleLink,inStore(async()=>({configured:moduleConfigured(cfg)})))
   api.post(moduleLink,inStore((db,actor,req)=>beginModuleLink(db,cfg,actor,idOf(req,'store'),
-    credential(req)!,moduleStart.parse(req.body).purpose)))
+    staffCredential(req)!,moduleStart.parse(req.body).purpose)))
   api.post(moduleLink+'/complete',async(req,res)=>{
-    const data=moduleReturn.parse(req.body),store=idOf(req,'store'),session=credential(req)
+    const data=moduleReturn.parse(req.body),store=idOf(req,'store'),session=staffCredential(req)
     const authorized=async(db:DB)=>{
-      const actor=await authenticate(db,session)
+      const actor=await requestActor(db,req)
       await storeAccess(db,actor,store,true)
       return actor
     }
@@ -678,7 +722,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     api.post(connection+'/check-'+item,async(req,res)=>{
       const required = z.strictObject({ revision }).parse(req.body)
       const read = async (db:DB) => {
-        const actor = await authenticate(db,credential(req))
+        const actor = await requestActor(db,req)
         await storeAccess(db,actor,idOf(req,'store'),true)
         const c = await channel(db,idOf(req,'connection'))
         if (c.module_channel_id && item==='webhook') throw new Fault(409,'LINE_MODULE_MANAGED','公式LINEへのテストメッセージで受信を確認してください。')
@@ -759,17 +803,20 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const data = stopSchema.parse(req.body)
     return setStop(db,actor,'channel',c.id,data.stopped,data.revision,data.reason,c.store_id)
   }))
-  api.get('/stores/:store/audit',inStore(async(db)=>{
-    const { rows } = await db.query(`SELECT a.id,a.operation,a.object_id,a.reason,a.details,a.occurred_at,
-      f.email AS actor FROM audit a LEFT JOIN staff f ON f.id=a.actor_id ORDER BY a.id DESC LIMIT 100`)
+  api.get('/stores/:store/audit',inStore(async(db,actor)=>{
+    const { rows } = await db.query(`SELECT a.id,a.operation,a.object_id,a.reason,
+      CASE WHEN $1 THEN a.details ELSE a.details-'platform_staff_id' END AS details,a.occurred_at,
+      CASE WHEN f.platform_actor THEN '全体管理者' ELSE f.email END AS actor FROM audit a LEFT JOIN staff f ON f.id=a.actor_id
+      ORDER BY a.id DESC LIMIT 100`,[actor.platform===true])
     return rows
   }))
   api.get('/tenant/audit',staff(async(db,actor)=>{
     requireAdmin(actor)
     await scope(db,actor.tenant_id,undefined,true)
-    const { rows } = await db.query(`SELECT a.id,a.operation,a.object_id,a.reason,a.details,a.occurred_at,
-      f.email AS actor FROM audit a LEFT JOIN staff f ON f.id=a.actor_id
-      WHERE a.store_id IS NULL ORDER BY a.id DESC LIMIT 100`)
+    const { rows } = await db.query(`SELECT a.id,a.operation,a.object_id,a.reason,
+      CASE WHEN $1 THEN a.details ELSE a.details-'platform_staff_id' END AS details,a.occurred_at,
+      CASE WHEN f.platform_actor THEN '全体管理者' ELSE f.email END AS actor FROM audit a LEFT JOIN staff f ON f.id=a.actor_id
+      WHERE a.store_id IS NULL ORDER BY a.id DESC LIMIT 100`,[actor.platform===true])
     return rows
   }))
 

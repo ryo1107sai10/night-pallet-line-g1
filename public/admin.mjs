@@ -1,12 +1,16 @@
+import {workspace,workspacePath,scopeWorkspaceLinks,rememberReturnWorkspace} from '/static/workspace-path.mjs'
 import {liffAppId,lineSetupLinks} from './line-setup.mjs'
 
 const $ = selector => document.querySelector(selector)
 const masterEntry = /^\/master\/?$/i.test(location.pathname)
-const loginPath = masterEntry ? '/auth/master/login' : '/auth/login'
+const platformEntry = /^\/platform\/?$/i.test(location.pathname)
+const loginPath = platformEntry ? '/auth/platform/login' : masterEntry ? '/auth/master/login' : '/auth/login'
+scopeWorkspaceLinks()
+if (platformEntry) $('#login h1').textContent = '全体管理画面にログイン'
 const content = $('#content')
 const notice = $('#notice')
 const types = { customer:'顧客',recruitment:'採用',shared:'顧客・採用兼用' }
-const roles = { admin:'法人管理者',manager:'店舗責任者',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
+const roles = { admin:'マスター',manager:'店舗管理マスター',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
 const staffRoles = Object.fromEntries(Object.entries(roles).filter(([role])=>role!=='admin'))
 const featureNames = {
   tags_enabled:'顧客タグ', visits_enabled:'来店予約',
@@ -53,7 +57,7 @@ async function api(path, method = 'GET', data, idem = false) {
   const headers = {}
   if (data !== undefined) headers['Content-Type'] = 'application/json'
   if (idem) headers['Idempotency-Key'] = idem === true ? crypto.randomUUID() : idem
-  const response = await fetch('/api/v1' + path,{ method,headers,body:data === undefined ? undefined : JSON.stringify(data) })
+  const response = await fetch(workspacePath('/api/v1'+path),{ method,headers,body:data === undefined ? undefined : JSON.stringify(data) })
   if (response.status===401 && session && path!==loginPath) signedOut()
   const result = await response.json()
   if (!response.ok) {
@@ -232,7 +236,8 @@ async function refresh() {
   $('#auth').hidden = true
   $('#workspace').hidden = false
   $('#manage-line').hidden = session.actor.role!=='admin'
-  $('#account').textContent = roles[session.actor.role] + ' · ' + session.actor.email
+  $('#back-to-platform').hidden = !session.actor.platform
+  $('#account').textContent = (session.actor.platform?'全体管理者':roles[session.actor.role]) + ' · ' + session.actor.email
   $('#tenant-name').textContent = session.tenant.legal_name
   if (!session.stores.some(store=>store.id===storeId)) storeId = session.stores[0]?.id
   await render()
@@ -396,6 +401,7 @@ function moduleConnect(base, configured) {
   box.append(el('p','LINEの画面で、対象の公式アカウントへの接続を許可してください。','muted'),
     formOf([purpose],'公式LINEを連携',async data=>{
       const result = await api(base+'/line-module','POST',data)
+      rememberReturnWorkspace('line',base.split('/').at(-1))
       location.assign(result.url)
     }))
   return box
@@ -572,7 +578,7 @@ function onboardingLink(label,store,anchor) {
   const link = el('a',label,'studio-link')
   const params = new URLSearchParams({store:store.id})
   if (anchor==='line-connection' && store.next_connection) params.set('line_channel',store.next_connection)
-  link.href = '/master/?'+params+'#'+anchor
+  link.href = workspacePath('/master/?'+params+'#'+anchor)
   return link
 }
 
@@ -614,9 +620,11 @@ async function render() {
   if (store) url.searchParams.set('store',store.id)
   else url.searchParams.delete('store')
   history.replaceState(null,'',url)
-  $('#manage-interviews').href = '/interview/staff.html'+(store ? '?store='+encodeURIComponent(store.id) : '')
-  $('#manage-operations').href = '/operations/'+(store ? '?store='+encodeURIComponent(store.id) : '')
-  $('#manage-workflows').href = '/workflows/'+(store ? '?store='+encodeURIComponent(store.id) : '')
+  const storeQuery = store ? '?store='+encodeURIComponent(store.id) : ''
+  $('#manage-interviews').href = workspacePath('/interview/staff.html'+storeQuery)
+  $('#manage-operations').href = workspacePath('/operations/'+storeQuery)
+  $('#manage-workflows').href = workspacePath('/workflows/'+storeQuery)
+  $('#manage-studio').href = workspacePath('/studio/'+storeQuery)
   const layout = el('div',null,'controls')
   const main = el('div')
   const side = el('div')
@@ -719,7 +727,7 @@ $('#show-login').onclick = () => {
   $('#login input').focus()
 }
 if ($('#logout')) $('#logout').onclick = async () => {
-  try { await api('/auth/logout','POST',{}); location.replace(location.pathname) }
+  try { await api(workspace?'/platform/logout':'/auth/logout','POST',{}); location.replace(workspace?'/platform/':location.pathname) }
   catch (error) { report(error) }
 }
 bind($('#login'),async (data)=>{
@@ -742,7 +750,7 @@ if ($('#workspace')) {
   refresh().catch(error=>{ if (error.status!==401) report(error) })
 } else {
   // A navigation from another site can omit the Strict cookie. The same-site request can use it.
-  api('/session').then(result=>{
+  api(platformEntry?'/platform/session':'/session').then(result=>{
     if (masterEntry && result.actor.role!=='admin') location.replace('/')
     else location.reload()
   }).catch(error=>{ if (error.status!==401) report(error) })

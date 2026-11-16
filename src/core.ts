@@ -12,7 +12,7 @@ export const looseId = z.string().regex(/^[0-9]{5,20}$/)
 export const userId = z.string().regex(/^U[0-9a-f]{32}$/i)
 export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 export type DB = PoolClient
-export type Actor = { id: string; tenant_id: string; role: string; email: string }
+export type Actor = { id: string; tenant_id: string; role: string; email: string; platform?: boolean }
 export type LineModuleConfig = { id: string; secret: string; botHeader: string }
 export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; lineModule?: LineModuleConfig; publicBookingConnection?: string }
 
@@ -121,7 +121,10 @@ export async function route(db: DB, channelId: string): Promise<Route> {
 export async function audit(db: DB, tenant: string, store: string | null, actor: string | null,
   operation: string, object: string, reason: string | null = null, details: object = {}) {
   await db.query(`INSERT INTO audit (tenant_id,store_id,actor_id,operation,object_id,reason,details)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)`, [tenant, store, actor, operation, object, reason, details])
+    VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb ||
+      CASE WHEN nullif(current_setting('night.platform_principal',true),'') IS NULL THEN '{}'::jsonb
+      ELSE jsonb_build_object('platform_staff_id',current_setting('night.platform_principal',true)) END)`,
+  [tenant,store,actor,operation,object,reason,details])
 }
 
 export async function once<T>(db: DB, cfg: Config, actor: Actor, operation: string,

@@ -1,4 +1,7 @@
-import {localInstant} from '/studio/engine.mjs'
+import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
+import {localInstant} from '../studio/engine.mjs'
+
+scopeWorkspaceLinks()
 
 const $=selector=>document.querySelector(selector)
 const el=(tag,content,cls)=>{
@@ -19,7 +22,7 @@ function notice(message='',error=false){
   node.classList.toggle('error',error)
 }
 async function api(path,method='GET',data,idempotencyKey=crypto.randomUUID()){
-  const response=await fetch('/api/v1'+path,{method,
+  const response=await fetch(workspacePath('/api/v1'+path),{method,
     headers:data?{'Content-Type':'application/json','Idempotency-Key':idempotencyKey}:{},
     body:data?JSON.stringify(data):undefined})
   const value=await response.json()
@@ -400,9 +403,9 @@ async function render(){
   const path=base+'/workflows/'+use
   const query=new URLSearchParams({store:store.id,use})
   history.replaceState(null,'','?'+query)
-  $('#back').href='/staff/?store='+store.id
-  $('#interviews').href='/interview/staff.html?store='+store.id
-  $('#customers').href='/operations/?store='+store.id
+  $('#back').href=workspacePath('/staff/?store='+store.id)
+  $('#interviews').href=workspacePath('/interview/staff.html?store='+store.id)
+  $('#customers').href=workspacePath('/operations/?store='+store.id)
   const content=$('#content')
   const tabs=$('#tabs')
   content.replaceChildren(el('p','読み込み中…'))

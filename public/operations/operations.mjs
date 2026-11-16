@@ -1,3 +1,6 @@
+import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
+scopeWorkspaceLinks()
+
 const $=selector=>document.querySelector(selector)
 const tabs={customers:'顧客台帳',tags:'顧客タグ',bookings:'来店予約',automation:'自動配信'}
 const triggers=[['','手動のみ'],['follow','友だち追加'],['booking_created','来店予約の確定'],['visit','来店の記録']]
@@ -7,7 +10,7 @@ let session,store,current='customers',epoch=0
 function el(tag,text,cls){const node=document.createElement(tag);if(text!=null)node.textContent=text;if(cls)node.className=cls;return node}
 function alert(text,error=false){const n=$('#message');n.textContent=text;n.hidden=!text;n.classList.toggle('error',error)}
 async function api(path,method='GET',body){
-  const response=await fetch('/api/v1'+path,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),
+  const response=await fetch(workspacePath('/api/v1'+path),{method,headers:{...(body?{'Content-Type':'application/json'}:{}),
     ...(method==='POST'?{'Idempotency-Key':crypto.randomUUID()}:{})},body:body?JSON.stringify(body):undefined})
   const result=await response.json()
   if(!response.ok)throw new Error(result.message??'操作できませんでした。')

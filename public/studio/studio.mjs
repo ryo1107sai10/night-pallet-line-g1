@@ -1,4 +1,7 @@
+import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
 import {starter,kinds,conditions,triggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
+
+scopeWorkspaceLinks()
 
 const demo=document.documentElement.dataset.mode==='demo'
 const controlled=document.documentElement.dataset.settings
@@ -59,7 +62,7 @@ function saveLocal() {
 }
 
 async function api(path,method='GET',body,key) {
-  const response=await fetch('/api/v1'+path,{method,headers:{...(body?{'content-type':'application/json'}:{}),
+  const response=await fetch(workspacePath('/api/v1'+path),{method,headers:{...(body?{'content-type':'application/json'}:{}),
     ...(key?{'Idempotency-Key':key}:{})},body:body?JSON.stringify(body):undefined})
   const payload=await response.json()
   if (!response.ok) throw Object.assign(new Error(payload.message??'処理できませんでした。'),{status:response.status})
@@ -689,7 +692,7 @@ function show() {
 }
 
 async function start() {
-  $('#settings-link').href=controlled
+  $('#settings-link').href=workspacePath(controlled)
   $('#foot').textContent=demo?'GitHub Pages · 架空データで動作':'シナリオ管理'
   $('#mode').hidden=!demo
   for (const btn of document.querySelectorAll('.mobile button')) btn.onclick=()=>choosePiece(btn.dataset.part)
@@ -705,7 +708,7 @@ async function start() {
   }
   addEventListener('beforeunload',event=>{if(dirty) event.preventDefault()})
   const session=demo?sessionDemo:await api('/session')
-  if(!demo&&!['admin','manager'].includes(session.actor.role)) throw new Error('シナリオ管理には法人管理者または店舗責任者の権限が必要です。')
+  if(!demo&&!['admin','manager'].includes(session.actor.role)) throw new Error('シナリオ管理にはマスターまたは店舗管理マスターの権限が必要です。')
   stores=session.stores
   const select=$('#store')
   for(const location of stores) select.add(new Option(location.name,location.id))
@@ -715,7 +718,10 @@ async function start() {
     if (dirty&&!await ask('保存せずに店舗を切り替えますか？')) {select.value=store.id;return}
     try { await refreshStore(next);choosePiece('workspace');announce('') } catch(error) {announce(error.message,true)}
   }
-  await refreshStore(stores[0])
+  const requestedStore=new URLSearchParams(location.search).get('store')
+  const initialStore=stores.find(item=>item.id===requestedStore) ?? stores[0]
+  select.value=initialStore.id
+  await refreshStore(initialStore)
   ready=true
   if (demo) $('#foot').textContent='LINE通信は模擬 · 下書きはこのブラウザに保存'
 }

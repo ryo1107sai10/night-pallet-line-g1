@@ -48,7 +48,7 @@ async function getThread(db:DB,id:string,use:Use){
   return row
 }
 
-export async function inboxOverview(db:DB,store:string,use:Use){
+export async function inboxOverview(db:DB,store:string,use:Use,platformActor?:string){
   await requireFeature(db,store,'inbox_enabled')
   const {rows:threads}=await db.query(`SELECT t.id,t.state,t.unread,t.assigned_to,t.last_received_at,t.revision,ch.label,
     CASE WHEN $1='customer' THEN c.display_name END AS name
@@ -56,9 +56,10 @@ export async function inboxOverview(db:DB,store:string,use:Use){
     LEFT JOIN customer c ON $1='customer' AND c.channel_id=t.channel_id AND c.user_key=t.user_key
     WHERE t.purpose=$1 AND t.last_received_at>=now()-interval '12 months'
     ORDER BY t.unread DESC,t.last_received_at DESC,t.id LIMIT 150`,[use])
-  const {rows:staff}=await db.query(`SELECT f.id,f.email FROM staff f WHERE f.disabled_at IS NULL AND f.password_hash IS NOT NULL
+  const {rows:staff}=await db.query(`SELECT f.id,CASE WHEN f.platform_actor THEN '全体管理者' ELSE f.email END AS email
+    FROM staff f WHERE f.disabled_at IS NULL AND (f.password_hash IS NOT NULL OR f.platform_actor AND f.id=$3)
     AND (f.role='admin' OR (f.role IN ('manager',CASE WHEN $1='recruitment' THEN 'recruiter' ELSE 'manager' END)
-      AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id))) ORDER BY f.email`,[use,store])
+      AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id))) ORDER BY f.email`,[use,store,platformActor ?? null])
   return {threads,staff}
 }
 
@@ -66,7 +67,7 @@ export async function inboxMessages(db:DB,cfg:Config,store:string,use:Use,id:str
   await requireFeature(db,store,'inbox_enabled')
   await getThread(db,id,use)
   const {rows}=await db.query<{id:string;body_box:string|null;withdrawn:boolean}>(`
-    SELECT m.id,m.kind,m.direction,m.body_box,m.happened_at,m.withdrawn,d.status,f.email AS staff
+    SELECT m.id,m.kind,m.direction,m.body_box,m.happened_at,m.withdrawn,d.status,CASE WHEN f.platform_actor THEN '全体管理者' ELSE f.email END AS staff
     FROM inbox_message m LEFT JOIN service_delivery d ON d.id=m.service_id LEFT JOIN staff f ON f.id=m.actor_id
     WHERE m.thread_id=$1 AND m.happened_at>=now()-interval '12 months' ORDER BY m.happened_at DESC,m.id LIMIT 100`,[id])
   return rows.reverse().map(({body_box,...message})=>({...message,
@@ -81,8 +82,9 @@ export async function changeThread(db:DB,actor:Actor,store:string,use:Use,id:str
   if(actor.role==='recruiter'&&((thread.assigned_to&&thread.assigned_to!==actor.id)||(data.assigned_to&&data.assigned_to!==actor.id)))throw missing()
   if(data.assigned_to){
     const valid=await db.query(`SELECT 1 FROM staff f WHERE f.id=$1 AND f.disabled_at IS NULL
+      AND (NOT f.platform_actor OR f.id=$4)
       AND (f.role='admin' OR (f.role IN ('manager',CASE WHEN $3='recruitment' THEN 'recruiter' ELSE 'manager' END)
-        AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id)))`,[data.assigned_to,store,use])
+        AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id)))`,[data.assigned_to,store,use,actor.platform?actor.id:null])
     if(!valid.rowCount)throw missing()
   }
   if(data.state!=='handling'||data.assigned_to!==thread.assigned_to){

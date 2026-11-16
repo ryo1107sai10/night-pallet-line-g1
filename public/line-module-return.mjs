@@ -1,3 +1,4 @@
+import {returnWorkspace,forgetReturnWorkspace} from './workspace-path.mjs'
 const params = new URLSearchParams(location.search)
 history.replaceState(null,'',location.pathname)
 const state = params.get('state') ?? ''
@@ -7,18 +8,20 @@ const retry = document.querySelector('#retry-module')
 const back = document.querySelector('#back-to-store')
 const store = /^[0-9a-f]{96}$/.test(state) ? state.slice(0,32).replace(
   /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,'$1-$2-$3-$4-$5') : null
-if (store) back.href = '/staff/?store='+encodeURIComponent(store)+'#line-setup'
+const workspace = returnWorkspace('line',store)
+if (store) back.href = workspace+'/staff/?store='+encodeURIComponent(store)+'#line-setup'
 
 async function complete() {
   retry.hidden = true
   status.textContent = 'LINEの許可を確認しています。'
   try {
-    const response = await fetch('/api/v1/stores/'+store+'/line-module/complete',{
+    const response = await fetch(workspace+'/api/v1/stores/'+store+'/line-module/complete',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,state}),
     })
     const data = await response.json()
     if (response.ok) {
-      location.replace('/staff/?'+new URLSearchParams({store,line_connected:data.id})+'#line-connection')
+      forgetReturnWorkspace('line')
+      location.replace(workspace+'/staff/?'+new URLSearchParams({store,line_connected:data.id})+'#line-connection')
       return
     }
     status.textContent = response.status===401
