@@ -83,7 +83,7 @@ docker --host "$docker_host" --config "$docker_config" push "$image"
 
 environment="PUBLIC_ORIGIN=$origin,AUTO_SEND_ENABLED=false"
 gcloud run deploy "$service" --image "$image" --project "$project" --region "$region" --port 3000 \
-  --service-account "$account" --set-cloudsql-instances "$database" --set-env-vars "$environment" --set-secrets "$bindings" \
+  --service-account "$account" --set-cloudsql-instances "$database" --update-env-vars "$environment" --set-secrets "$bindings" \
   --execution-environment gen2 --cpu 1 --memory 512Mi --concurrency 16 --timeout 45s --min-instances 0 --max-instances 1 \
   --startup-probe 'httpGet.path=/api/health,httpGet.port=3000,periodSeconds=2,failureThreshold=10,timeoutSeconds=2' \
   --no-invoker-iam-check --quiet

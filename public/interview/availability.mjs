@@ -22,12 +22,12 @@ function field(label,type,name,value='',max){
 export function drawAvailability(root,state,zone,controls){
   const busyList=el('section',null,'box stack')
   busyList.append(el('h2','Googleカレンダー連携'))
-  busyList.append(el('p',state.google_enabled===false?'この店舗ではGoogleカレンダーの照合を停止しています。':state.google.connected?(controls.demo?'サンプル予定を反映中 · 各日20:15〜21:00':'連携中 · '+state.google.calendar_id):
+  busyList.append(el('p',state.google_enabled===false?'この店舗ではGoogleカレンダーの照合を停止しています。':state.google.connected?(controls.demo?'サンプル予定を反映中 · 各日20:15〜21:00':state.google.shared?'共有カレンダーの空き時間を照合します。':'連携中 · '+state.google.calendar_id):
     '連携すると、予定ありの時間帯と重なる面談枠を受付対象から外します。'))
   if(controls.demo){
     busyList.append(button(state.google.connected?'サンプル予定の反映を停止':'サンプル予定を反映',
       event=>run(event.currentTarget,()=>controls.toggleDemo(!state.google.connected))))
-  }else if(state.google_enabled!==false&&state.google.configured){
+  }else if(state.google_enabled!==false&&state.google.configured&&(!state.google.shared||state.google_write_enabled)){
     const link=el('form',null,'stack')
     const calendar=field('GoogleカレンダーID','text','calendar_id',state.google.calendar_id??'primary',250)
     calendar.querySelector('input').required=true
@@ -39,13 +39,13 @@ export function drawAvailability(root,state,zone,controls){
       run(link.querySelector('button'),()=>controls.connect(id))
     }
     busyList.append(link)
-  }else if(state.google_enabled!==false)busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
+  }else if(state.google_enabled!==false&&!state.google.shared)busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
   if(state.google_enabled!==false&&state.google_write_enabled){
     busyList.append(el('p',state.google_write_granted?'面談が確定すると、予約名を含めずGoogleカレンダーに予定を登録します。':
       '予定の登録・変更を行うには「Googleで連携」から書き込み権限を許可してください。'))
     if(state.google_write_granted)busyList.append(button('予定の反映を再試行',event=>run(event.currentTarget,controls.retryWrites)))
   }
-  if(!controls.demo&&state.google.connected){
+  if(!controls.demo&&state.google.connected&&(!state.google.shared||state.google_write_granted)){
     const remove=el('details')
     remove.append(el('summary','連携を解除する'),el('p','解除後はGoogleの予定を照合せず、店内の確定予約と受付停止時間で空きを判定します。'),
       button('連携解除を確定',event=>run(event.currentTarget,controls.disconnect)))

@@ -71,6 +71,39 @@ const storeData = name => ({ name,address:'東京都',business_type:'接客飲�
   timezone:'Asia/Tokyo',cutoff:'06:00' })
 const read = (sql, values) => tx(pool,async db=>{await scope(db,signup.tenant,storeId);return db.query(sql,values)})
 
+test('共有カレンダーの空き時間照合は店舗を限定し、短期のサーバー権限を使う',async()=>{
+  const store=randomUUID(),calendar='shared@example.test',account='calendar-reader@project.iam.gserviceaccount.com'
+  const range={starts_at:new Date('2030-04-05T09:00:00Z'),ends_at:new Date('2030-04-05T10:00:00Z')}
+  const calls=[]
+  let aclError=false
+  const shared=new InterviewGoogle(cfg,undefined,async(url,options)=>{
+    const {hostname,pathname}=new URL(url)
+    calls.push(hostname)
+    if(hostname==='metadata.google.internal'){
+      assert.equal(options.headers['Metadata-Flavor'],'Google')
+      return Response.json({access_token:'runtime'})
+    }
+    if(hostname==='iamcredentials.googleapis.com'){
+      assert.equal(decodeURIComponent(pathname).split('/').at(-1),account+':generateAccessToken')
+      assert.equal(options.headers.Authorization,'Bearer runtime')
+      assert.deepEqual(JSON.parse(options.body),{scope:['https://www.googleapis.com/auth/calendar.events.freebusy'],lifetime:'900s'})
+      return Response.json({accessToken:'short-lived',expireTime:new Date(Date.now()+900000).toISOString()})
+    }
+    assert.equal(hostname,'www.googleapis.com')
+    assert.equal(options.headers.Authorization,'Bearer short-lived')
+    assert.deepEqual(JSON.parse(options.body).items,[{id:calendar}])
+    return Response.json({calendars:{[calendar]:aclError?{errors:[{reason:'notFound'}]}:{busy:[{
+      start:range.starts_at.toISOString(),end:range.ends_at.toISOString(),
+    }]}}})
+  },{store,calendar,account})
+  assert.equal(shared.sharedCalendar(store),calendar)
+  await assert.rejects(shared.sharedBusy(randomUUID(),range,calendar),{code:'GOOGLE_UNAVAILABLE'})
+  assert.deepEqual(await shared.sharedBusy(store,range,calendar),[range])
+  aclError=true
+  await assert.rejects(shared.sharedBusy(store,range,calendar),{code:'GOOGLE_UNAVAILABLE'})
+  assert.deepEqual(calls,['metadata.google.internal','iamcredentials.googleapis.com','www.googleapis.com','www.googleapis.com'])
+})
+
 before(async ()=>{
   const probe = createServer().listen(0,'127.0.0.1')
   await new Promise(resolve=>probe.once('listening',resolve))

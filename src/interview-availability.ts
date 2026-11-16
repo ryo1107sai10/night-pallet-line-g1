@@ -13,6 +13,9 @@ export const googleCalendarInput=z.strictObject({calendar_id:calendarID})
 export const googleCalendarReturn=z.strictObject({state:opaque,code:z.string().min(1).max(4096)})
 export const blockInput=z.strictObject({starts_at:timestamp,ends_at:timestamp,note:z.string().trim().max(120)})
 type GoogleSetup={clientId:string;secret:string}
+const sharedCalendarSettings=z.object({store:z.uuid(),calendar:calendarID.refine(id=>id!=='primary'),
+  account:z.string().regex(/^[a-z][a-z0-9-]*@[a-z0-9-]+\.iam\.gserviceaccount\.com$/)})
+type SharedCalendar=z.infer<typeof sharedCalendarSettings>
 export type CalendarCredential={calendar_id:string;refresh_box:string;tenant_id:string;store_id:string;write_granted:boolean}
 export type Interval={starts_at:Date;ends_at:Date}
 const boxContext=(tenant:string, store:string)=>'interview-google:'+tenant+':'+store
@@ -24,10 +27,36 @@ const day=86400000
 export class InterviewGoogle {
   private readonly redirect:string
   private readonly recent=new Map<string,{access:string;expires:number}>()
-  constructor(private readonly cfg:Config, private readonly settings?:GoogleSetup, private readonly request=fetch){
+  private sharedToken?:{access:string;expires:number}
+  constructor(private readonly cfg:Config, private readonly settings?:GoogleSetup, private readonly request=fetch,
+    private readonly shared?:SharedCalendar){
     this.redirect=cfg.origin+'/interview/google-return.html'
   }
   get configured(){return !!this.settings && new URL(this.cfg.origin).protocol==='https:'}
+
+  sharedCalendar(store:string){return this.shared?.store===store?this.shared.calendar:undefined}
+
+  async sharedBusy(store:string,range:Interval,calendar:string){
+    if(!this.shared || !this.sharedCalendar(store) || calendar==='primary')throw unavailable()
+    if(!this.sharedToken || this.sharedToken.expires<=Date.now()){
+      const metadata=await this.json('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',{
+        headers:{'Metadata-Flavor':'Google'},
+      })
+      const runtime=z.object({access_token:z.string().min(1)}).safeParse(metadata)
+      if(!runtime.success)throw unavailable()
+      const credentials='https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/'
+      const data=await this.json(credentials+encodeURIComponent(this.shared.account)+':generateAccessToken',{
+        method:'POST',headers:{Authorization:'Bearer '+runtime.data.access_token,'Content-Type':'application/json'},
+        body:JSON.stringify({scope:[scope],lifetime:'900s'}),
+      })
+      const token=z.object({accessToken:z.string().min(1),expireTime:timestamp}).safeParse(data)
+      if(!token.success)throw unavailable()
+      const expires=Date.parse(token.data.expireTime)-60000
+      if(expires<=Date.now())throw unavailable()
+      this.sharedToken={access:token.data.accessToken,expires}
+    }
+    return this.query(this.sharedToken.access,calendar,range)
+  }
 
   authorization(store:string,raw:string,verifier:string,write=false){
     if(!this.configured || !this.settings)throw unavailable()
@@ -138,13 +167,17 @@ export class InterviewGoogle {
 
 export function googleFromEnvironment(cfg:Config){
   const clientId=process.env.GOOGLE_CALENDAR_CLIENT_ID,secret=process.env.GOOGLE_CALENDAR_CLIENT_SECRET
-  return new InterviewGoogle(cfg,clientId&&secret?{clientId,secret}:undefined)
+  const store=process.env.GOOGLE_SHARED_CALENDAR_STORE,calendar=process.env.GOOGLE_SHARED_CALENDAR_ID
+  const account=process.env.GOOGLE_SHARED_CALENDAR_ACCOUNT
+  const shared=store||calendar||account?sharedCalendarSettings.parse({store,calendar,account}):undefined
+  return new InterviewGoogle(cfg,clientId&&secret?{clientId,secret}:undefined,fetch,shared)
 }
 export async function beginCalendarLink(db:DB,actor:Actor,store:string,calendar:string,google:InterviewGoogle){
   const state=token(),verifier=token()
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'google_calendar_enabled')
   const write=(await storeFeatures(db,store)).google_write_enabled
+  if(!write&&google.sharedCalendar(store))throw new Fault(409,'GOOGLE_SHARED_CALENDAR','この店舗は共有カレンダーの空き時間を照合しています。')
   const url=google.authorization(store,state,verifier,write)
   await db.query(`INSERT INTO interview_google_session
     (store_id,tenant_id,actor_id,state_hash,calendar_id,verifier,expires_at,write_requested)
@@ -197,6 +230,8 @@ export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range
     if(required)throw unavailable()
     return []
   }
+  const shared=google.sharedCalendar(store)
+  if(shared)return google.sharedBusy(store,range,alternate??shared)
   const record=await calendarRecord(db,store)
   if((alternate||required)&&!record)throw unavailable()
   return record?google.busy(record,range,alternate):[]
@@ -204,10 +239,13 @@ export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range
 
 export async function availabilityOverview(db:DB,store:string,google:InterviewGoogle){
   const record=await calendarRecord(db,store)
+  const shared=google.sharedCalendar(store)
   const features=await storeFeatures(db,store)
   const {rows:blocks}=await db.query(`SELECT id,starts_at,ends_at,note FROM interview_block
     WHERE store_id=$1 AND ends_at>now() ORDER BY starts_at LIMIT 200`,[store])
-  return {google:{configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null},
+  const connection=shared?{configured:true,connected:true,calendar_id:shared,shared:true}:
+    {configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null}
+  return {google:connection,
     google_enabled:features.google_calendar_enabled,google_write_enabled:features.google_write_enabled,
     google_write_granted:record?.write_granted??false,blocks}
 }
