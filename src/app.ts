@@ -21,7 +21,7 @@ import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBo
 import { endScope, locationOf, updateAutomation } from './automation.js'
 import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
   interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
-  startInterviewSession, updateInterview } from './interviews.js'
+  interviewHours, saveInterviewHours, startInterviewSession, updateInterview } from './interviews.js'
 
 
 
@@ -187,6 +187,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     return action(db,actor,req)
   },status)
   api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'))))
+  api.patch('/stores/:store/interviews/hours',interviewStaff((db,actor,req)=>
+    saveInterviewHours(db,actor,idOf(req,'store'),interviewHours.parse(req.body))))
   api.post('/stores/:store/interviews/slots',interviewStaff((db,actor,req)=>
     publishInterviewSlot(db,cfg,actor,idOf(req,'store'),keyOf(req),interviewSlotInput.parse(req.body)),201))
   api.patch('/stores/:store/interviews/slots/:slot',interviewStaff((db,actor,req)=>

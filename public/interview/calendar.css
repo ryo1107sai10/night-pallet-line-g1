@@ -68,3 +68,6 @@ body.has-interviews main.auth{max-width:min(1120px,calc(100vw - 30px))}
 @media(max-width:760px){.interview-app .columns{grid-template-columns:1fr;gap:10px}.interview-app .box{padding:13px;border-radius:16px}.interview-app .desktop-calendar{display:none}.interview-app .mobile-calendar{display:block}.interview-app .hero{padding:19px 0 12px}.interview-page #interview,.interview-page .interview-header{width:calc(100% - 24px)}}
 
 .interview-app input.inline-check{width:auto;min-height:0}
+.interview-app .time-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.interview-app .mobile-slots button:disabled{background:#f4f0f7;color:#655d72;opacity:1}
+.interview-app .mobile-slots button span{font-size:11px}

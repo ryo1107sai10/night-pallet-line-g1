@@ -1,13 +1,20 @@
+import { clockLabel, defaultHours, fitsHours, interval, lastMinute, localTime, timeOptions } from './hours.mjs'
+
 const days=['日','月','火','水','木','金','土']
 const methods={onsite:'対面',online:'オンライン'}
 const range=7
 const dayMs=86400000
 const shift=(date,amount)=>new Date(Date.parse(date+'T00:00:00Z')+amount*dayMs).toISOString().slice(0,10)
-export const dateKey=(date,zone)=>new Intl.DateTimeFormat('sv-SE',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(date))
+export const dateKey=(date,zone)=>localTime(date,zone).date
 const weekday=date=>new Date(date+'T00:00:00Z').getUTCDay()
 const label=date=>Number(date.slice(5,7))+'/'+Number(date.slice(8,10))
-const time=(instant,zone)=>new Intl.DateTimeFormat('ja-JP',{timeZone:zone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(instant))
-export const formatAppointment=(slot,zone)=>label(dateKey(slot.starts_at,zone))+'（'+days[weekday(dateKey(slot.starts_at,zone))]+'） '+time(slot.starts_at,zone)+'〜'+time(slot.ends_at,zone)
+export function formatAppointment(slot,zone){
+  const {date,minutes}=localTime(slot.starts_at,zone)
+  const finish=localTime(slot.ends_at,zone)
+  const end=lastMinute(slot.starts_at,slot.ends_at,zone)
+  const endLabel=end===null?label(finish.date)+' '+clockLabel(finish.minutes):clockLabel(end)
+  return label(date)+'（'+days[weekday(date)]+'） '+clockLabel(minutes)+'〜'+endLabel
+}
 const duration=slot=>Math.round((Date.parse(slot.ends_at)-Date.parse(slot.starts_at))/60000)+'分'
 
 function el(tag,text,cls){
@@ -82,9 +89,22 @@ export async function mountInterview(root,service) {
   function calendar(){
     const cal=box('空き枠を選ぶ')
     const dates=Array.from({length:range},(_,i)=>shift(start,i))
-    const valid=data.slots.filter(slot=>filter==='all'||slot.method===filter)
+    const hours=data.hours??defaultHours
+    const times=timeOptions(hours.start,hours.end)
     const current=dates.includes(day)?day:dates[0]
-    const counts=new Map(dates.map(date=>[date,valid.filter(slot=>slot.available&&dateKey(slot.starts_at,data.timezone)===date).length]))
+    const pending=new Map()
+    const counts=new Map(dates.map(date=>[date,0]))
+    for(const slot of data.slots){
+      if(filter!=='all'&&slot.method!==filter)continue
+      if(!fitsHours(slot.starts_at,slot.ends_at,data.timezone,hours))continue
+      const {date,minutes}=localTime(slot.starts_at,data.timezone)
+      if(!counts.has(date))continue
+      const key=date+'/'+minutes
+      const sameTime=pending.get(key)??[]
+      sameTime.push(slot)
+      pending.set(key,sameTime)
+      if(slot.available)counts.set(date,counts.get(date)+1)
+    }
     const bar=el('div',null,'weekbar')
     const prev=action('‹ 前週',event=>run(()=>week(-7),event.currentTarget))
     const forward=action('翌週 ›',event=>run(()=>week(7),event.currentTarget))
@@ -101,7 +121,7 @@ export async function mountInterview(root,service) {
       root.querySelector('select')?.focus()
     }
     formats.append(el('span','面談形式'),mode)
-    cal.append(formats,bar)
+    cal.append(el('p','受付時間 '+clockLabel(hours.start)+'〜'+clockLabel(hours.end)+' · '+interval+'分刻み'),formats,bar)
 
     const table=el('table',null,'grid desktop-calendar')
     table.append(el('caption','○ 空きあり　× 満席・受付終了　— 受付枠なし'))
@@ -114,13 +134,12 @@ export async function mountInterview(root,service) {
       th.append(text,el('small',days[weekday(date)]))
       head.append(th)
     }
-    const keys=[...new Set(valid.map(slot=>time(slot.starts_at,data.timezone)))].sort()
     const tbody=table.createTBody()
-    for(const key of keys){
-      const row=tbody.insertRow(), th=el('th',key);th.scope='row';row.append(th)
+    for(const key of times){
+      const row=tbody.insertRow(), th=el('th',clockLabel(key));th.scope='row';row.append(th)
       for(const date of dates){
         const cell=row.insertCell()
-        const slots=valid.filter(slot=>dateKey(slot.starts_at,data.timezone)===date&&time(slot.starts_at,data.timezone)===key)
+        const slots=pending.get(date+'/'+key)??[]
         if(!slots.length)cell.textContent='—'
         for(const slot of slots){
           if(slot.available)cell.append(slotButton(slot,true))
@@ -142,14 +161,18 @@ export async function mountInterview(root,service) {
       strip.append(b)
     }
     const list=el('div',null,'mobile-slots')
-    for(const slot of valid.filter(slot=>dateKey(slot.starts_at,data.timezone)===current)){
-      if(slot.available)list.append(slotButton(slot,false))
-      else {const b=action(time(slot.starts_at,data.timezone)+' ×',null);b.disabled=true;list.append(b)}
+    for(const key of times){
+      const options=pending.get(current+'/'+key)??[]
+      const free=options.filter(slot=>slot.available)
+      if(free.length){list.append(...free.map(slot=>slotButton(slot,false)));continue}
+      const closed=action('',null)
+      closed.disabled=true
+      closed.append(el('b',clockLabel(key)),el('span',options.length?'満席・終了':'枠なし'))
+      list.append(closed)
     }
     mobile.append(strip,list)
-    if(!list.childElementCount)mobile.append(el('p','この日の受付枠はありません。'))
     cal.append(table,mobile)
-    if(!keys.length)cal.append(el('p','この週に公開中の面談枠はありません。翌週もご確認ください。','small'))
+    if(!pending.size)cal.append(el('p','この週に公開中の面談枠はありません。翌週もご確認ください。','small'))
     return cal
   }
   function slotButton(slot,compact){
@@ -163,7 +186,7 @@ export async function mountInterview(root,service) {
     b.dataset.slot=slot.id
     b.setAttribute('aria-pressed',String(chosen))
     b.setAttribute('aria-label',formatAppointment(slot,data.timezone)+' '+methods[slot.method]+' 空きあり')
-    b.append(el('b',compact?'○':time(slot.starts_at,data.timezone)),el('span',methods[slot.method]))
+    b.append(el('b',compact?'○':clockLabel(localTime(slot.starts_at,data.timezone).minutes)),el('span',methods[slot.method]))
     return b
   }
 

@@ -6,7 +6,7 @@ import { createInvite } from './auth.js'
 
 export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
-  const versions = ['001_g1','002_scenarios','003_operations','004_interviews']
+  const versions = ['001_g1','002_scenarios','003_operations','004_interviews','005_interview_hours']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')

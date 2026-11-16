@@ -13,17 +13,30 @@
 <div id="notice" class="notice" role="status" hidden></div>
 <div class="columns">
 <section class="box stack"><h2>面談スケジュール</h2><label class="field">店舗<select id="stores"></select></label><div id="slots"></div></section>
+<div class="stack">
+<section class="box stack"><h2>受付時間の設定</h2>
+<form id="interview-hours" class="stack" hidden>
+<div class="time-fields">
+<label class="field">受付開始<select name="start" required></select></label>
+<label class="field">受付終了<select name="end" required></select></label>
+</div>
+<p>30分刻みで選べます。受付時間外の枠は予約カレンダーに表示されません。確定済みの面談は保持します。</p>
+<button type="submit" class="primary">受付時間を保存する</button>
+</form></section>
 <section class="box stack"><h2>面談枠を登録</h2>
 <form id="new-slot" class="stack" hidden>
 <label class="field">採用用公式アカウント<select name="channel" required></select></label>
-<label class="field">開始日時（店舗の現地時刻）<input type="datetime-local" name="start" required></label>
-<label class="field">所要時間<select name="minutes"><option value="30">30分</option><option value="45">45分</option><option value="60">60分</option><option value="90">90分</option></select></label>
+<label class="field">面談日<input type="date" name="date" required></label>
+<div class="time-fields">
+<label class="field">開始時刻<select name="time" required></select></label>
+<label class="field">所要時間<select name="minutes"><option value="30">30分</option><option value="60">60分</option><option value="90">90分</option></select></label>
+</div>
 <label class="field">面談形式<select name="method"><option value="onsite">対面</option><option value="online">オンライン</option></select></label>
 <label class="field">確定後に表示する会場・参加案内<input name="instructions" maxlength="800" required></label>
 <label><input type="checkbox" name="published" checked class="inline-check"> 予約カレンダーに公開する</label>
 <button type="submit" class="primary">面談枠を登録する</button>
 </form><p id="slot-help"></p>
-</section></div>
+</section></div></div>
 </main>
 </body>
 </html>
