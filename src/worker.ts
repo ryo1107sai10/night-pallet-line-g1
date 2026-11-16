@@ -6,14 +6,19 @@ import { googleFromEnvironment } from './interview-availability.js'
 
 const cfg = configFromEnvironment()
 const pool = poolFor(process.env.DATABASE_URL)
-await assertAppRole(pool)
 const api = new LineAPI()
 const google=googleFromEnvironment(cfg)
 let stopping = false
 for (const signal of ['SIGINT','SIGTERM'] as const) process.on(signal, () => { stopping = true })
-while (!stopping) {
-  try { await workOnce(pool,cfg,api,google) }
-  catch (error) { console.error('worker iteration failed', error instanceof Error ? error.name : 'unknown') }
-  await delay(1000)
+try {
+  await assertAppRole(pool)
+  if (process.argv.includes('--once')) {
+    await workOnce(pool,cfg,api,google)
+  } else while (!stopping) {
+    try { await workOnce(pool,cfg,api,google) }
+    catch (error) { console.error('worker iteration failed', error instanceof Error ? error.name : 'unknown') }
+    await delay(1000)
+  }
+} finally {
+  await pool.end()
 }
-await pool.end()

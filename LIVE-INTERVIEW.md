@@ -1,5 +1,7 @@
 # Night PRO LINE 採用面談の実機検収
 
+Google Cloudに公開する手順は [Google Cloudで1店舗を検証](LIVE-GOOGLE-CLOUD.md) を参照してください。
+
 ## 検証に使う環境・アカウント
 
 - Node.js 24のアプリとワーカー、永続PostgreSQLを実行できる公開HTTPS環境。
