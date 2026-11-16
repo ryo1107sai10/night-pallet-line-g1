@@ -116,7 +116,7 @@ form.onsubmit=async event=>{
     const start=localInstant(data.get('date')+'T'+data.get('time'),store.timezone)
     if(start===null)throw new Error('店舗のタイムゾーンで有効な日時を指定してください。')
     const settings={channel:data.get('channel'),starts_at:new Date(start).toISOString(),
-      ends_at:new Date(start+Number(data.get('minutes'))*60000).toISOString(),method:data.get('method'),
+      ends_at:new Date(start+Number(data.get('minutes'))*60000).toISOString(),method:data.has('online')?'online':'onsite',
       instructions:data.get('instructions'),published:data.get('published')==='on'}
     const fingerprint=JSON.stringify([store.id,settings])
     if(fingerprint!==pendingInput){pendingInput=fingerprint;pendingKey=crypto.randomUUID()}

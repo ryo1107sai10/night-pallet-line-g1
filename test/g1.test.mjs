@@ -508,7 +508,7 @@ test('面談カレンダー: 採用権限、枠の取り合い、本人の日程
   const first=new Date(tomorrow+21*3600000)
   const create=(start,published,method='onsite')=>post(root+'/slots',recruiter,{
     channel:c,starts_at:start.toISOString(),ends_at:new Date(+start+30*60000).toISOString(),
-    method,instructions:'確定者専用の参加方法',published,
+    ...(method==='online'?{method}:{}),instructions:'確定者専用の参加方法',published,
   },idempotency())
   expect(await create(new Date(tomorrow+17.5*3600000),true),422)
   expect(await create(new Date(tomorrow+18.25*3600000),true),422)
@@ -519,6 +519,7 @@ test('面談カレンダー: 採用権限、枠の取り合い、本人の日程
   const hidden=expect(await create(new Date(+first+2*3600000),false),201)
   const published=expect(await request('/interview/calendar',{cookie:a.cookie}),200)
   assert.deepEqual(published.slots.map(slot=>slot.id),[one.id,next.id,midnight.id])
+  assert.deepEqual(published.slots.map(slot=>slot.method),['onsite','online','onsite'])
   assert.doesNotMatch(JSON.stringify(published),/確定者専用/)
   expect(await request('/interview/calendar?start=2026-02-30',{cookie:a.cookie}),422)
   expect(await post('/interview/bookings',a.cookie,{slot:hidden.id,name:'応募者A'}),409)

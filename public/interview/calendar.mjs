@@ -40,7 +40,7 @@ export async function mountInterview(root,service) {
   root.classList.add('interview-app')
   let data,start,day,selected,existing,complete
   let stage='select',busy=false,message='',name=''
-  let filter='all'
+  let method='onsite'
 
   function show(focus=false){
     if(!data) return
@@ -95,7 +95,7 @@ export async function mountInterview(root,service) {
     const pending=new Map()
     const counts=new Map(dates.map(date=>[date,0]))
     for(const slot of data.slots){
-      if(filter!=='all'&&slot.method!==filter)continue
+      if(slot.method!==method)continue
       if(!fitsHours(slot.starts_at,slot.ends_at,data.timezone,hours))continue
       const {date,minutes}=localTime(slot.starts_at,data.timezone)
       if(!counts.has(date))continue
@@ -110,18 +110,22 @@ export async function mountInterview(root,service) {
     const forward=action('翌週 ›',event=>run(()=>week(7),event.currentTarget))
     prev.disabled=start<=data.today;forward.disabled=start>=shift(data.today,90)
     bar.append(prev,el('strong',label(dates[0])+' – '+label(dates.at(-1))),forward)
-    const formats=el('label',null,'field')
-    const mode=el('select')
-    mode.append(new Option('すべて','all'),...Object.entries(methods).map(([value,title])=>new Option(title,value)))
-    mode.value=filter
-    mode.onchange=()=>{
-      filter=mode.value
-      if(selected&&filter!=='all'&&selected.method!==filter)selected=null
+    const format=el('label',null,'interview-option')
+    const online=el('input')
+    online.id='interview-online'
+    online.type='checkbox'
+    online.checked=method==='online'
+    online.onchange=()=>{
+      method=online.checked?'online':'onsite'
+      selected=null;message=''
+      chooseFirstAvailableDay()
       show()
-      root.querySelector('select')?.focus()
+      root.querySelector('#interview-online')?.focus()
     }
-    formats.append(el('span','面談形式'),mode)
-    cal.append(el('p','受付時間 '+clockLabel(hours.start)+'〜'+clockLabel(hours.end)+' · '+interval+'分刻み'),formats,bar)
+    format.append(online,el('span','オンライン面談を希望する'))
+    const summary=el('p',methods[method]+'面談の空き枠','small')
+    summary.setAttribute('role','status')
+    cal.append(el('p','受付時間 '+clockLabel(hours.start)+'〜'+clockLabel(hours.end)+' · '+interval+'分刻み'),format,summary,bar)
 
     const table=el('table',null,'grid desktop-calendar')
     table.append(el('caption','○ 空きあり　× 受付不可　— 受付枠なし'))
@@ -173,7 +177,7 @@ export async function mountInterview(root,service) {
     mobile.append(strip,list)
     cal.append(table,mobile)
     if(data.availability_warning)cal.insertBefore(el('p','Googleカレンダーの空き状況を確認できないため、現在は予約を受け付けていません。','notice'),table)
-    if(!pending.size)cal.append(el('p','この週に公開中の面談枠はありません。翌週もご確認ください。','small'))
+    if(!pending.size)cal.append(el('p','この週に公開中の'+methods[method]+'面談の枠はありません。翌週もご確認ください。','small'))
     return cal
   }
   function slotButton(slot,compact){
@@ -194,7 +198,7 @@ export async function mountInterview(root,service) {
   async function week(offset){
     const candidate=shift(start,offset),limit=shift(data.today,90)
     const next=candidate<data.today?data.today:candidate>limit?limit:candidate
-    data=await service.calendar(next);start=next;day=next;selected=null;message='';show()
+    data=await service.calendar(next);start=next;selected=null;message='';chooseFirstAvailableDay();show()
     root.querySelector('.weekbar strong')?.scrollIntoView({block:'nearest'})
   }
 
@@ -208,7 +212,7 @@ export async function mountInterview(root,service) {
     },'primary')
     next.disabled=!selected
     panel.append(next)
-    if(existing)panel.append(action('日程変更をやめる',()=>{existing=null;selected=null;message='';show()}))
+    if(existing)panel.append(action('日程変更をやめる',()=>{existing=null;selected=null;message='';method='onsite';chooseFirstAvailableDay();show()}))
     const list=el('section')
     list.append(el('h3','自分の面談'))
     for(const booking of data.bookings){
@@ -217,7 +221,7 @@ export async function mountInterview(root,service) {
       row.append(el('strong',active?'確定済み':booking.status==='cancelled'?'取消済み':'過去の予約'),item(booking,data.timezone))
       if(booking.instructions)row.append(el('p',booking.instructions,'wrap'))
       if(active)row.append(group(action('日程変更',()=>{
-        existing=booking;selected=null;message='';show(true)
+        existing=booking;method=booking.method;selected=null;message='';chooseFirstAvailableDay();show(true)
       }),action('取り消す',()=>{
         complete=booking;stage='cancel';show(true)
       })))
@@ -276,9 +280,12 @@ export async function mountInterview(root,service) {
   async function refresh(){
     data=await service.calendar(start)
     start=start??data.today
-    day=day??[...data.slots].sort((a,b)=>Date.parse(a.starts_at)-Date.parse(b.starts_at))
-      .find(slot=>slot.available)?.starts_at
-    day=day?.includes('T')?dateKey(day,data.timezone):day??start
+    if(!day)chooseFirstAvailableDay()
+  }
+
+  function chooseFirstAvailableDay(){
+    const first=data.slots.find(slot=>slot.method===method&&slot.available)
+    day=first?dateKey(first.starts_at,data.timezone):start
   }
 
   function done(){
@@ -289,7 +296,7 @@ export async function mountInterview(root,service) {
       if(complete.instructions)success.append(el('p',complete.instructions,'wrap'))
     }
     success.append(action('自分の面談を見る',event=>run(async()=>{
-      await refresh();existing=null;complete=null;selected=null;stage='select';show(true)
+      await refresh();existing=null;complete=null;selected=null;stage='select';method='onsite';chooseFirstAvailableDay();show(true)
     },event.currentTarget),'secondary'))
     return success
   }

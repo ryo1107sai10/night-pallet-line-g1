@@ -12,7 +12,7 @@ import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } 
 const loginSchema=z.strictObject({connection:uuid,id_token:z.string().min(20).max(12000)})
 export const interviewSlotInput=z.strictObject({
   channel:uuid,starts_at:z.iso.datetime({offset:true}),ends_at:z.iso.datetime({offset:true}),
-  method:z.enum(['onsite','online']),instructions:text(800),published:z.boolean(),
+  method:z.enum(['onsite','online']).default('onsite'),instructions:text(800),published:z.boolean(),
 })
 const gridMinute=z.int().min(0).max(1440).refine(value=>value%interval===0)
 export const interviewHours=z.strictObject({start:gridMinute,end:gridMinute,revision})
