@@ -1,6 +1,6 @@
 # Night PRO LINE 実LINE検収手順
 
-対象は顧客向け来店予約と1対1のステップ配信です。GitHub Pagesは画面デモとして利用できます。実LINEは公開HTTPSのアプリ、PostgreSQL、常時動作するワーカーに接続します。
+対象は顧客向け来店予約と1対1のステップ配信です。採用面談は [採用面談の実機検収手順](LIVE-INTERVIEW.md) を参照してください。GitHub Pagesは画面デモとして利用できます。実LINEは公開HTTPSのアプリ、PostgreSQL、常時動作するワーカーに接続します。
 
 ## 用意するもの
 
@@ -29,6 +29,6 @@
 
 自動配信ワーカーが扱うイベントは、顧客専用OAの新規友だち追加、LINE内画面での同意、手動登録、来店予約の確定・変更・取消、来店記録です。配信する種類の同意が必要です。最初の友だち追加時点で未同意の場合は同意イベントから始まる別シナリオを使います。兼用OAは、LIFFで顧客向け画面を開いた本人のみ顧客台帳に登録します。
 
-今回の予約は店舗単位の時間帯と人数枠を扱います。応募・面接・体入、担当者・席区分ごとの複数資源、外部カレンダー、料金マスター、一斉配信、フォーム／計測リンクを発生源とする実配信は別途実装が必要です。`{{price}}` の本番値がない場合は送信を保留します。受信本文・添付の管理画面は今回の範囲外です。実機試験と本番公開の全受入試験は未実施です。
+顧客向けの来店予約は店舗単位の時間帯と人数枠を扱います。来店予約への外部カレンダー連携、担当者・席区分ごとの複数資源、料金マスター、一斉配信、フォーム／計測リンクを発生源とする実配信は別途実装が必要です。`{{price}}` の本番値がない場合は送信を保留します。受信本文・添付の管理画面は今回の範囲外です。実機試験と本番公開の全受入試験は未実施です。
 
 LINE公式資料。 [Webhook受信](https://developers.line.biz/ja/docs/messaging-api/receiving-messages/) · [LIFFの本人情報](https://developers.line.biz/ja/docs/liff/using-user-profile/) · [送信・通数のAPI仕様](https://developers.line.biz/en/reference/messaging-api/#get-quota-consumption) · [再試行](https://developers.line.biz/ja/docs/messaging-api/retrying-api-request/)

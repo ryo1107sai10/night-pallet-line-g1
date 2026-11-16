@@ -1,0 +1,40 @@
+# Night PRO LINE 採用面談の実機検収
+
+## 検証に使う環境・アカウント
+
+- Node.js 24のアプリとワーカー、永続PostgreSQLを実行できる公開HTTPS環境。
+- 最初に検証する店舗と、管理権限のある採用用または兼用のLINE公式アカウント。既存の応答に影響させずに試せるよう、接続検収は検証用の公式アカウントで行います。
+- テスト用の予定を書き込めるGoogleカレンダーと、設定を行えるGoogle Cloudプロジェクト。アプリは店舗ごとにカレンダーを1件連携します。
+- LINE内画面で予約を操作するスマートフォンと、LINE Developersの開発者権限を持たないテスト利用者。
+
+1つの管理会社に複数の店舗を登録し、店舗ごとに公式アカウントを割り当てます。法人管理者は自社の店舗を切り替えられ、店舗責任者・採用担当は付与された店舗の面談を管理できます。同じ公式アカウントを複数の店舗に登録する運用には対応していません。
+
+## アプリとGoogleを設定する
+
+1. [アプリとワーカーを起動する手順](LIVE-LINE.md#アプリとワーカーを起動) に従い、公開先とPostgreSQLを用意します。`PUBLIC_ORIGIN` を実際の公開HTTPSオリジンに設定し、`npm run setup` で `006_interview_availability.sql` まで適用します。接続検収は `AUTO_SEND_ENABLED=false` のまま進められます。
+2. Google CloudでGoogle Calendar APIを有効にします。OAuthのウェブアプリケーション用クライアントに、`PUBLIC_ORIGIN` の末尾に `/interview/google-return.html` を付けたURLを「承認済みのリダイレクトURI」として登録します。外部アプリをテストモードで使う場合は、連携に使うGoogleアカウントをテストユーザーに追加します。クライアントID・シークレットはサーバーの `GOOGLE_CALENDAR_CLIENT_ID`・`GOOGLE_CALENDAR_CLIENT_SECRET` に設定します。
+3. Night PRO LINEの「面談枠の管理」で検証する店舗を選び、「Googleカレンダー連携」から接続します。メインカレンダーなら `primary`、共有・検証専用カレンダーならそのカレンダーIDを指定します。Googleの画面で空き状況の参照を許可し、店舗の管理画面に「連携中」と表示されることを確認します。
+
+Google連携は空き状況を参照します。確定した面談はNight PRO LINEに保存されます。Google Calendarに予約を書き込む機能は含まれていません。
+
+## テスト用のLINE公式アカウントを接続する
+
+1. LINE Developersで公式アカウントのMessaging APIチャネルと、同じプロバイダー内の公開済みLINEログインチャネルを用意します。LINEログインに「面談予約」などの名前でLIFFを作り、スコープに `openid` を指定します。アプリ側の接続IDをまだ発行していない場合は、作成時のエンドポイントに公開HTTPSのトップページを仮登録します。
+2. Night PRO LINEの管理画面で店舗を選び、「LINE接続 → 公式アカウントを登録」で用途を「採用用」または「兼用」にして登録します。チャネルID、LIFF ID、ボットユーザーIDを照合し、チャネルシークレットとアクセストークンは同じ管理画面の専用欄に入力します。
+3. 「Webhook・LIFFの設定先」に表示されたエンドポイントをLINE DevelopersのLIFF設定に保存します。実LINEの送受信も確認する場合は、検証用公式アカウントで同じ欄に表示されたWebhook URLを登録して有効化し、[接続テスト](LIVE-LINE.md#実機で接続を検収) の手順2・3を用途「採用」で実施します。既存ツールが利用中のWebhookは、切り替え先と影響を確認したうえで変更します。
+4. 管理画面で公式アカウントの所有権、プロバイダー、LINEログインの公開状態を確認して保存します。スマートフォンで検証用公式アカウントのトークから `https://liff.line.me/<LIFF ID>` を開きます。兼用の場合は「面談予約」を選びます。実機検収後、公開する店舗の公式アカウントの「面談予約」リッチメニューに、その店舗のLIFF URLを設定します。
+
+## 空き枠と予約確定を確認する
+
+未来日の受付時間内に、下記の開始時刻で30分枠を公開します。すべて「オンライン面談」のチェックを外して登録します。例の時刻は店舗のタイムゾーンです。
+
+| 開始 | 条件 | 確認する結果 |
+| --- | --- | --- |
+| 18:00 | Googleに18:15〜18:45を「予定あり」で登録 | 18:00枠は予約できない |
+| 19:00 | Googleの予定なし | LINE内から対面予約が確定し、店舗の管理画面に反映される |
+| 20:00 | 管理画面で20:00〜20:30を受付停止に登録 | 20:00枠は予約できない |
+| 21:00 | LINE内で空き枠を選択した後、確定前にGoogleに21:00〜21:30を「予定あり」で登録 | 確定操作が拒否され、空き枠を選び直せる |
+
+21:00の確認には別のテスト利用者を使うか、19:00のテスト予約を先に取り消します。Googleの予定と枠が端で接する場合は、そのほかの制約がなければ予約できます。検証後はテスト予約を取り消し、試験用のGoogle予定と受付停止時間を削除し、公開したテスト枠を非公開にします。検証日、店舗、公式アカウント、予約IDと各ケースの結果を記録します。
+
+[LIFFアプリの設定](https://developers.line.biz/ja/docs/liff/registering-liff-apps/) · [リッチメニュー](https://developers.line.biz/ja/docs/messaging-api/using-rich-menus/) · [Google OAuth設定](https://developers.google.com/identity/protocols/oauth2/web-server) · [Google Calendar FreeBusy API](https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query)
