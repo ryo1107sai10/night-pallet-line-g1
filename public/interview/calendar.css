@@ -27,7 +27,7 @@
 .interview-app .weekbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px}
 .interview-app .weekbar button{flex:0 0 auto}
 .interview-app .weekbar strong{font-size:clamp(13px,2vw,17px);text-align:center}
-.interview-app .grid{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;font-size:12px}
+.interview-app .grid{display:table;border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;font-size:12px}
 .interview-app .grid caption{text-align:left;color:var(--muted);margin-bottom:8px}
 .interview-app .grid th,.interview-app .grid td{border:solid var(--line);border-width:0 1px 1px 0;text-align:center;padding:4px}
 .interview-app .grid th:first-child{border-left-width:1px;width:53px}
