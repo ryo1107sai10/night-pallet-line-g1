@@ -22,6 +22,9 @@ import { endScope, locationOf, updateAutomation } from './automation.js'
 import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
   interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
   interviewHours, saveInterviewHours, startInterviewSession, updateInterview } from './interviews.js'
+import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
+  googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
+
 
 
 
@@ -47,7 +50,7 @@ const keyOf = (req: Request) => z.string().regex(/^[a-zA-Z0-9_-]{16,100}$/).pars
 const address = (req: Request) => req.socket.remoteAddress ?? 'unknown'
 const here = (path: string) => fileURLToPath(new URL(path,import.meta.url))
 
-export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
+export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), google = googleFromEnvironment(cfg)) {
   const app = express()
   const api = express.Router()
   app.disable('x-powered-by')
@@ -159,15 +162,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
   })
   api.get('/interview/calendar',async(req,res)=>{
     const {start}=interviewDates.parse(req.query)
-    res.json(await tx(pool,async db=>interviewCalendar(db,await interviewApplicant(db,interviewCredential(req)),start)))
+    res.json(await tx(pool,async db=>interviewCalendar(db,await interviewApplicant(db,interviewCredential(req)),google,start)))
   })
   api.post('/interview/bookings',async(req,res)=>{
     const input=interviewCreate.parse(req.body)
-    res.status(201).json(await tx(pool,async db=>confirmInterview(db,await interviewApplicant(db,interviewCredential(req),true),input)))
+    res.status(201).json(await tx(pool,async db=>confirmInterview(db,await interviewApplicant(db,interviewCredential(req),true),input,google)))
   })
   api.patch('/interview/bookings/:booking',async(req,res)=>{
     const input=interviewChange.parse(req.body)
-    res.json(await tx(pool,async db=>updateInterview(db,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input)))
+    res.json(await tx(pool,async db=>updateInterview(db,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input,google)))
   })
 
   type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
@@ -189,6 +192,28 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
   api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'))))
   api.patch('/stores/:store/interviews/hours',interviewStaff((db,actor,req)=>
     saveInterviewHours(db,actor,idOf(req,'store'),interviewHours.parse(req.body))))
+  const availability='/stores/:store/interviews/availability'
+  api.get(availability,interviewStaff((db,_actor,req)=>availabilityOverview(db,idOf(req,'store'),google)))
+  api.post(availability+'/blocks',interviewStaff((db,actor,req)=>
+    addBlock(db,cfg,actor,idOf(req,'store'),keyOf(req),blockInput.parse(req.body)),201))
+  api.delete(availability+'/blocks/:block',interviewStaff((db,actor,req)=>
+    removeBlock(db,actor,idOf(req,'store'),idOf(req,'block'))))
+  api.post(availability+'/google',interviewStaff((db,actor,req)=>
+    beginCalendarLink(db,actor,idOf(req,'store'),googleCalendarInput.parse(req.body).calendar_id,google)))
+  api.post(availability+'/google/complete',async(req,res)=>{
+    const data=googleCalendarReturn.parse(req.body),store=idOf(req,'store')
+    const authorized=async(db:DB)=>{
+      const actor=await authenticate(db,credential(req))
+      await interviewAccess(db,actor,store)
+      return actor
+    }
+    const pending=await tx(pool,async db=>claimCalendarLink(db,await authorized(db),store,data.state))
+    const refresh=await google.exchange(data.code,pending.verifier,pending.calendar_id)
+    await tx(pool,async db=>finishCalendarLink(db,cfg,await authorized(db),store,data.state,refresh))
+    res.json({connected:true})
+  })
+  api.delete(availability+'/google',interviewStaff((db,actor,req)=>
+    unlinkInterviewCalendar(db,actor,idOf(req,'store'))))
   api.post('/stores/:store/interviews/slots',interviewStaff((db,actor,req)=>
     publishInterviewSlot(db,cfg,actor,idOf(req,'store'),keyOf(req),interviewSlotInput.parse(req.body)),201))
   api.patch('/stores/:store/interviews/slots/:slot',interviewStaff((db,actor,req)=>

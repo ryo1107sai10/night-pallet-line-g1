@@ -2,6 +2,7 @@ import {formatAppointment} from './calendar.mjs'
 import {localInstant} from '../studio/engine.mjs'
 import {clockLabel, timeOptions, interval} from './hours.mjs'
 import {configureHours} from './hours-form.mjs'
+import {drawAvailability} from './availability.mjs'
 const $=value=>document.querySelector(value)
 let stores,selected,requestNumber=0
 const form=$('#new-slot')
@@ -23,9 +24,35 @@ async function show(){
   if(!selected)throw new Error('採用を管理できる店舗がありません。')
   form.hidden=true
   hoursForm.hidden=true
+  $('#availability').replaceChildren()
   const store=selected
-  const {channels,slots,hours,today}=await api(path(store))
+  const availabilityPath=path(store)+'/availability'
+  const [{channels,slots,hours,today},availability]=await Promise.all([api(path(store)),api(availabilityPath)])
   if(current!==requestNumber)return
+  const refresh=async message=>{
+    if(selected.id===store.id) await show()
+    notice(message)
+  }
+  drawAvailability($('#availability'),availability,store.timezone,{
+    localInstant,report:notice,
+    connect:async calendar_id=>{
+      const result=await api(availabilityPath+'/google','POST',{calendar_id})
+      location.assign(result.url)
+    },
+    disconnect:async()=>{
+      await api(availabilityPath+'/google','DELETE',{})
+      await refresh('Googleカレンダーとの連携を解除しました。')
+    },
+    add:async input=>{
+      const result=await api(availabilityPath+'/blocks','POST',input,crypto.randomUUID())
+      const info=result.confirmed?' 確定済みの面談 '+result.confirmed+'件と重なっています。必要に応じて応募者と調整してください。':''
+      await refresh('受付停止時間を追加しました。'+info)
+    },
+    remove:async id=>{
+      await api(availabilityPath+'/blocks/'+id,'DELETE',{})
+      await refresh('受付停止時間を解除しました。')
+    },
+  })
   configureHours(hoursForm,hours)
   hoursForm.hidden=false
   hoursForm.onsubmit=async event=>{
@@ -59,9 +86,11 @@ async function show(){
   $('#slot-help').textContent=channels.length?'':'先に採用用または兼用の公式アカウントを登録してください。'
   $('#slots').replaceChildren(...slots.map(slot=>{
     const section=el('article','');section.className='record stack'
+    const stopped=availability.blocks.some(block=>Date.parse(slot.starts_at)<Date.parse(block.ends_at)&&
+      Date.parse(slot.ends_at)>Date.parse(block.starts_at))
     section.append(el('strong',formatAppointment(slot,store.timezone)),
       el('p',(slot.method==='online'?'オンライン':'対面')+' · '+slot.channel_label+' · '+
-      (slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+(slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')))
+      (stopped?'受付停止中':slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+(slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')))
     if(Date.parse(slot.starts_at)>Date.now()&&(slot.published||slot.in_hours)){
       const toggle=el('button',slot.published?'公開を停止':'公開する')
       toggle.type='button';toggle.onclick=async()=>{
@@ -102,6 +131,9 @@ try{
   if(!['admin','manager','recruiter'].includes(session.actor.role))throw new Error('採用担当の権限が必要です。')
   stores=session.stores
   $('#stores').append(...stores.map(store=>new Option(store.name,store.id)))
+  const query=new URLSearchParams(location.search)
+  if(stores.some(store=>store.id===query.get('store')))$('#stores').value=query.get('store')
   $('#stores').onchange=()=>show().catch(error=>notice(error.message))
   await show()
+  if(query.get('google')==='connected')notice('Googleカレンダーの空き状況を確認できました。')
 }catch(error){notice(error.message)}

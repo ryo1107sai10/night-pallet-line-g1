@@ -11,6 +11,7 @@ import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
 import { bootstrap, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
+import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
 import { starter } from '../public/studio/engine.mjs'
 
@@ -27,7 +28,7 @@ const endpoint = id => '/api/v1/webhooks/line/'+id
 const signup = {}
 let pg, owner, pool, server, dir, base, c, path, storeId, otherStore, admin, manager, other, line
 let remainingQuota=200, intendedId, pushedBody, attemptedKeys=[], remoteCalls = [], releaseRemote, remoteEntered, nextPush = 'accepted'
-let managerId
+let managerId, fakeBusy=[], fakeGoogleError=false, googleCalls=[]
 const code = (key, steps = 0) => new TOTP({ secret:Secret.fromBase32(key) })
   .generate({timestamp:Date.now()+30000*steps})
 const signed = raw => createHmac('sha256',channelSecret).update(raw).digest('base64')
@@ -118,7 +119,25 @@ before(async ()=>{
     }
   }
   line = new LineAPI(fetchLine)
-  server = createApp(pool,cfg,line).listen(0,'127.0.0.1')
+  const google=new InterviewGoogle(cfg,{clientId:'calendar-client',secret:'calendar-server-secret'},async(url,options)=>{
+    if(url==='https://oauth2.googleapis.com/token'){
+      const grant=options.body.get('grant_type')
+      assert.equal(options.body.get('client_secret'),'calendar-server-secret')
+      if(grant==='authorization_code') {
+        assert.match(options.body.get('code_verifier'),/^[A-Za-z0-9_-]{43}$/)
+        assert.equal(options.body.get('redirect_uri'),origin+'/interview/google-return.html')
+      } else assert.equal(options.body.get('refresh_token'),'calendar-refresh-secret')
+      return Response.json({access_token:'calendar-access-secret',refresh_token:'calendar-refresh-secret',expires_in:3600})
+    }
+    assert.equal(url,'https://www.googleapis.com/calendar/v3/freeBusy')
+    assert.equal(options.headers.Authorization,'Bearer calendar-access-secret')
+    const query=JSON.parse(options.body)
+    assert.deepEqual(query.items,[{id:'primary'}])
+    googleCalls.push(query)
+    return Response.json({calendars:{'example@example.test':fakeGoogleError?
+      {errors:[{reason:'internalError'}]}:{busy:fakeBusy}}})
+  })
+  server = createApp(pool,cfg,line,google).listen(0,'127.0.0.1')
   await new Promise(resolve=>server.once('listening',resolve))
   base = 'http://127.0.0.1:'+server.address().port
 })
@@ -542,4 +561,75 @@ test('面談カレンダー: 採用権限、枠の取り合い、本人の日程
   const earlier=expect(await create(new Date(tomorrow+16*3600000),true),201)
   const view=expect(await request('/interview/calendar',{cookie:winner}),200)
   assert.deepEqual(view.slots.map(slot=>slot.id),[earlier.id])
+  expect(await patch('/interview/bookings/'+final.id,loser,{action:'cancel',revision:final.revision}),200)
+})
+
+test('面談の受付停止時間とGoogle予定: 境界、再確認、障害時停止、既存予約の維持',async()=>{
+  const root='/stores/'+storeId+'/interviews'
+  const settings=root+'/availability'
+  const applicant=await post('/interview/login',null,{connection:c,id_token:'signed-token-first-user'})
+  const alternate=await post('/interview/login',null,{connection:c,id_token:'signed-token-second-user'})
+  expect(applicant,200);expect(alternate,200)
+  const calendar=async()=>expect(await request('/interview/calendar',{cookie:applicant.cookie}),200)
+  const day=Date.parse((await calendar()).today+'T00:00:00+09:00')+2*86400000
+  const at=hour=>new Date(day+hour*3600000).toISOString()
+  const create=async hour=>expect(await post(root+'/slots',admin,{channel:c,starts_at:at(hour),ends_at:at(hour+0.5),
+    method:'onsite',instructions:'会場の案内',published:true},idempotency()),201).id
+  const booked=await create(17)
+  const blocked=await create(17.5)
+  const googleSlot=await create(18)
+  const edge=await create(18.5)
+  const book=slot=>post('/interview/bookings',applicant.cookie,{slot,name:'テスト利用者'})
+  const first=expect(await book(booked),201)
+  const change=(revision,slot)=>patch('/interview/bookings/'+first.id,applicant.cookie,{action:'reschedule',revision,slot})
+  const blockedRange={starts_at:at(17.25),ends_at:at(17.75),note:'非公開の管理メモ'}
+  const key=idempotency()
+  const block=expect(await post(settings+'/blocks',admin,blockedRange,key),201)
+  assert.equal(block.confirmed,1)
+  assert.equal(expect(await post(settings+'/blocks',admin,blockedRange,key),201).id,block.id)
+  expect(await post(settings+'/blocks',other,blockedRange,idempotency()),404)
+  const atFirst=await calendar()
+  assert.doesNotMatch(JSON.stringify(atFirst),/非公開の管理メモ/)
+  assert.equal(atFirst.slots.find(slot=>slot.id===blocked).available,false)
+  assert.equal(expect(await change(1,blocked),409).code,'INTERVIEW_SLOT_BLOCKED')
+
+  const auth=expect(await post(settings+'/google',admin,{calendar_id:'primary'}),200)
+  const href=new URL(auth.url)
+  assert.equal(href.origin,'https://accounts.google.com')
+  assert.match(href.searchParams.get('scope'),/calendar\.events\.freebusy$/)
+  assert.equal(href.searchParams.get('code_challenge_method'),'S256')
+  const [,state]=href.searchParams.get('state').split('.')
+  const complete={state,code:'test-oauth-code'}
+  expect(await post(settings+'/google/complete',admin,{...complete,state:'x'.repeat(43)}),409)
+  expect(await post(settings+'/google/complete',other,complete),404)
+  expect(await post(settings+'/google/complete',admin,complete),200)
+  expect(await post(settings+'/google/complete',admin,complete),409)
+  const overview=expect(await request(settings,{cookie:admin}),200)
+  assert.deepEqual(overview.google,{configured:true,connected:true,calendar_id:'primary'})
+  assert.doesNotMatch(JSON.stringify(overview),/calendar-refresh-secret|calendar-access-secret/)
+
+  fakeBusy=[{start:at(18.25),end:at(18.5)}]
+  const checked=await calendar()
+  assert.equal(checked.slots.find(slot=>slot.id===googleSlot).available,false)
+  assert.equal(checked.slots.find(slot=>slot.id===edge).available,true)
+  const another=await post('/interview/bookings',alternate.cookie,{slot:googleSlot,name:'別の応募者'})
+  assert.equal(expect(another,409).code,'INTERVIEW_SLOT_BLOCKED')
+  // Force Calendar to change after the availability list was loaded.
+  fakeBusy=[{start:at(18.5),end:at(19)}]
+  assert.equal(expect(await change(1,edge),409).code,'INTERVIEW_SLOT_BLOCKED')
+  assert.equal(googleCalls.at(-1).timeMin,at(18.5))
+  assert.equal((await calendar()).bookings.find(item=>item.id===first.id).slot_id,booked)
+  fakeGoogleError=true
+  const degraded=await calendar()
+  assert.equal(degraded.availability_warning,true)
+  assert.ok(degraded.slots.every(slot=>!slot.available))
+  assert.equal(expect(await change(1,edge),503).code,'GOOGLE_UNAVAILABLE')
+  assert.equal(degraded.bookings.find(item=>item.id===first.id).status,'confirmed')
+  fakeGoogleError=false
+  fakeBusy=[]
+  expect(await request(settings+'/blocks/'+block.id,{method:'DELETE',cookie:other,data:{}}),404)
+  expect(await request(settings+'/blocks/'+block.id,{method:'DELETE',cookie:admin,data:{}}),200)
+  assert.equal((await calendar()).slots.find(slot=>slot.id===blocked).available,true)
+  expect(await request(settings+'/google',{method:'DELETE',cookie:admin,data:{}}),200)
+  assert.equal(expect(await request(settings,{cookie:admin}),200).google.connected,false)
 })

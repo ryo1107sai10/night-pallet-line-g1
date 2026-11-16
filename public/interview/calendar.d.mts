@@ -3,7 +3,7 @@ type Booking = {
   method:'onsite'|'online';starts_at:string;ends_at:string;instructions:string|null
 }
 type Calendar = {
-  today:string;store:string;timezone:string;hours:{start:number;end:number};bookings:Booking[]
+  today:string;store:string;timezone:string;hours:{start:number;end:number};availability_warning?:boolean;bookings:Booking[]
   slots:Array<{id:string;starts_at:string;ends_at:string;method:'onsite'|'online';available:boolean}>
 }
 export function mountInterview(root:HTMLElement,service:{

@@ -96,3 +96,17 @@ LINEイベントは署名とbotの宛先を確認し、重複を排除して永�
 [面談予約の公開デモ](https://ryo1107sai10.github.io/night-pallet-line-demo/interview/) では架空の枠で予約・変更・取消を試せます。実際のLINE公式アカウントでの検収は未実施です。
 
 面談カレンダーは店舗の現地時刻で、既定は **18:00〜24:00、30分刻み**です。最終開始は30分面談の場合の23:30です。「面談枠の管理 → 受付時間の設定」で開始・終了を変更できます。受付時間は表示・予約可能な範囲で、予約を受け付けるには管理者が範囲内の枠を公開します。時間外になった枠は新規受付から外れ、確定済みの面談は「自分の面談」から確認・変更・取消できます。更新時は `npm run setup` で `005_interview_hours.sql` を適用してください。
+
+### Googleカレンダー連携と面談の受付停止
+
+管理画面の「面談枠の管理」で、店舗ごとにGoogleカレンダーを1件連携できます。公開済みの面談枠のうち、Googleで予定ありとされる時間、確定済みの面談、管理画面で設定した受付停止時間に重なる枠を受付不可にします。新規確定と日程変更の直前には最新の状態を再確認します。Googleから空きを確認できない場合は対象店舗で新規確定・日程変更を保留します。確定済みの面談の確認と取消は利用できます。
+
+休日や休憩などは「面談を受け付けない時間」の開始・終了を入力します。停止時間に確定済みの面談が重なる場合は管理者に件数を表示し、予約自体は維持します。
+
+1. Google CloudでGoogle Calendar APIを有効にし、OAuth同意画面とウェブアプリケーション用のOAuthクライアントを設定します。テスト中の外部アプリでは利用するGoogleアカウントをテストユーザーに追加します。
+2. 許可するリダイレクトURIは、公開HTTPSのオリジンに `/interview/google-return.html` を付けたURLです。サーバーに `GOOGLE_CALENDAR_CLIENT_ID` と `GOOGLE_CALENDAR_CLIENT_SECRET` を設定し、`npm run setup` で `006_interview_availability.sql` を適用します。
+3. 「面談枠の管理 → Googleカレンダー連携」で `primary` または共有カレンダーのIDを入力し、Googleの権限確認を完了します。共有カレンダーは連携するGoogleアカウントに空き状況の参照権限が必要です。
+
+Googleとの連携は空き状況の参照専用です。確定直前の照合より後でGoogleに追加・変更された予定は、管理画面で調整します。アプリから連携を解除するとアプリ内の接続情報を消去し、Googleの許可はGoogleアカウント側でも取り消せます。リバースプロキシのアクセスログにはOAuthコールバックのクエリ文字列を記録しないでください。実際のGoogleアカウントでの接続確認は公開HTTPS環境で実施します。
+
+[Google Calendar FreeBusy API](https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query) · [Google OAuth設定](https://developers.google.com/identity/protocols/oauth2/web-server)

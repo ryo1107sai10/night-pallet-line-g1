@@ -124,7 +124,7 @@ export async function mountInterview(root,service) {
     cal.append(el('p','受付時間 '+clockLabel(hours.start)+'〜'+clockLabel(hours.end)+' · '+interval+'分刻み'),formats,bar)
 
     const table=el('table',null,'grid desktop-calendar')
-    table.append(el('caption','○ 空きあり　× 満席・受付終了　— 受付枠なし'))
+    table.append(el('caption','○ 空きあり　× 受付不可　— 受付枠なし'))
     const head=table.createTHead().insertRow()
     const timeHeading=el('th','時刻');timeHeading.scope='col';head.append(timeHeading)
     for(const date of dates){
@@ -143,7 +143,7 @@ export async function mountInterview(root,service) {
         if(!slots.length)cell.textContent='—'
         for(const slot of slots){
           if(slot.available)cell.append(slotButton(slot,true))
-          else {const marker=el('span','×');marker.setAttribute('aria-label','満席・受付終了');cell.append(marker)}
+          else {const marker=el('span','×');marker.setAttribute('aria-label','受付不可');cell.append(marker)}
         }
       }
     }
@@ -167,11 +167,12 @@ export async function mountInterview(root,service) {
       if(free.length){list.append(...free.map(slot=>slotButton(slot,false)));continue}
       const closed=action('',null)
       closed.disabled=true
-      closed.append(el('b',clockLabel(key)),el('span',options.length?'満席・終了':'枠なし'))
+      closed.append(el('b',clockLabel(key)),el('span',options.length?'受付不可':'枠なし'))
       list.append(closed)
     }
     mobile.append(strip,list)
     cal.append(table,mobile)
+    if(data.availability_warning)cal.insertBefore(el('p','Googleカレンダーの空き状況を確認できないため、現在は予約を受け付けていません。','notice'),table)
     if(!pending.size)cal.append(el('p','この週に公開中の面談枠はありません。翌週もご確認ください。','small'))
     return cal
   }
