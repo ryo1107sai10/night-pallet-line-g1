@@ -1,0 +1,70 @@
+.interview-app{--ink:#241c35;--muted:#635c73;--accent:#6036a4;--line:#e3dcec;--white:#ffffffed;max-width:1120px;margin:0 auto 64px;color:var(--ink);font-family:"Inter","Hiragino Sans","Yu Gothic",system-ui,sans-serif;line-height:1.55;text-align:left}
+.interview-app *{box-sizing:border-box}
+.interview-app [hidden]{display:none!important}
+.interview-app h1,.interview-app h2,.interview-app h3,.interview-app p{margin:0}
+.interview-app button,.interview-app input,.interview-app select{font:inherit;color:var(--ink)}
+.interview-app button{cursor:pointer;min-height:44px;border-radius:12px;border:1px solid var(--line);background:#fff;padding:8px 13px;font-weight:650;box-shadow:none}
+.interview-app button:disabled{cursor:default;opacity:.55}
+.interview-app button:hover:not(:disabled){border-color:var(--accent);background:#f6efff}
+.interview-app button.primary{background:linear-gradient(135deg,#7048ac,#52308c);border:1px solid #573292;color:white;font-weight:750}
+.interview-app button.secondary{color:var(--accent)}
+.interview-app :focus-visible{outline:3px solid #9c5acc;outline-offset:3px}
+.interview-app .hero{display:block;padding:29px 0 18px}
+.interview-app .hero h1{font-size:clamp(30px,5vw,46px);letter-spacing:-.045em;font-weight:790}
+.interview-app .hero p{font-size:14px;margin-top:5px;color:var(--muted)}
+.interview-app .flow{display:flex;gap:10px;align-items:center;padding:0;margin:0 0 19px;list-style:none;font-size:12px;color:var(--muted)}
+.interview-app .flow li{display:flex;gap:5px;align-items:center;font-weight:650;white-space:nowrap}
+.interview-app .flow li:not(:last-child)::after{content:"›";margin-left:4px;color:#9f8fb0}
+.interview-app .flow b{height:22px;width:22px;border-radius:50%;display:grid;place-items:center;background:#eee8f7;color:#5a426f}
+.interview-app .flow [aria-current]{color:var(--accent)}
+.interview-app .flow [aria-current] b{background:var(--accent);color:#fff}
+.interview-app .columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,320px);gap:16px;align-items:start}
+.interview-app .box{border:1px solid #e3daec;border-radius:22px;padding:20px;background:var(--white);box-shadow:0 10px 28px #4334600d,inset 0 1px #fff;min-width:0}
+.interview-app .box h2{font-size:19px;letter-spacing:-.02em}
+.interview-app .box h3{font-size:15px}
+.interview-app .box p{color:var(--muted);font-size:13px}
+.interview-app .stack{display:grid;gap:13px}
+.interview-app .weekbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px}
+.interview-app .weekbar button{flex:0 0 auto}
+.interview-app .weekbar strong{font-size:clamp(13px,2vw,17px);text-align:center}
+.interview-app .grid{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;font-size:12px}
+.interview-app .grid caption{text-align:left;color:var(--muted);margin-bottom:8px}
+.interview-app .grid th,.interview-app .grid td{border:solid var(--line);border-width:0 1px 1px 0;text-align:center;padding:4px}
+.interview-app .grid th:first-child{border-left-width:1px;width:53px}
+.interview-app .grid thead th{border-top-width:1px;background:#f5f0fa;padding:7px 2px;color:#504564}
+.interview-app .grid thead th:first-child{border-top-left-radius:11px}
+.interview-app .grid thead th:last-child{border-top-right-radius:11px}
+.interview-app .grid thead .weekend{background:#f4eafa;color:#713481}
+.interview-app .grid time{display:block;font-size:15px;color:var(--ink)}
+.interview-app .grid td{height:54px;color:#797285;background:#fcfafc}
+.interview-app .grid td button{width:100%;border:1px solid #d6c6ef;background:#f3edff;color:#5a358f;padding:3px;font-size:11px;display:grid;place-content:center;line-height:1.2}
+.interview-app .grid td button b{font-size:15px;line-height:1.1}
+.interview-app .grid td button[aria-pressed=true],.interview-app .mobile-slots button[aria-pressed=true]{background:#63399c;color:#fff;border-color:#63399c}
+.interview-app .mobile-calendar{display:none}
+.interview-app .date-strip{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;margin-bottom:12px}
+.interview-app .date-strip button{min-width:0;line-height:1.15;padding:7px 1px;font-size:11px}
+.interview-app .date-strip b{display:block;font-size:14px}
+.interview-app .date-strip small{display:block;white-space:nowrap;font-size:9px;margin-top:4px}
+.interview-app .date-strip [aria-pressed=true]{background:#643994;color:white;border-color:#643994}
+.interview-app .mobile-slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.interview-app .mobile-slots button{display:flex;gap:6px;align-items:center;justify-content:space-between;padding-inline:8px;font-weight:650}
+.interview-app .slot-summary{border-inline-start:3px solid #a680c8;background:#f7f1fb;padding:10px 12px;border-radius:0 10px 10px 0;overflow-wrap:anywhere}
+.interview-app .controls{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.interview-app label.field{display:grid;gap:5px;color:#544963;font-size:13px;font-weight:650}
+.interview-app input,.interview-app select{width:100%;border:1px solid #d7cce4;border-radius:10px;padding:9px 11px;min-height:44px;background:#fff}
+.interview-app .notice{padding:10px 12px;border:1px solid #e1cbaa;background:#fff4df;border-radius:10px;color:#653d13;margin-bottom:13px;font-size:14px}
+.interview-app .success{display:inline-flex;color:#215c47;background:#e5f5ed;padding:4px 10px;border-radius:999px;font-weight:750;font-size:13px;align-self:start}
+.interview-app .small{color:var(--muted);font-size:12px}
+.interview-app .record{padding:12px 0;border-top:1px solid var(--line)}
+.interview-app .record:first-of-type{border-top:0}
+.interview-app .wrap{white-space:pre-line;overflow-wrap:anywhere}
+.interview-app .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.interview-app footer{color:var(--muted);font-size:12px;padding:16px 0 0}
+body.interview-page{margin:0;background:radial-gradient(ellipse at 14% 0,#e9dbf6 0,transparent 45%),radial-gradient(ellipse at 100% 10%,#deecff 0,transparent 40%),#f6f2fa;color:#241c35}
+.interview-page #interview{width:min(1120px,calc(100% - 40px));margin:auto}
+.interview-page .interview-header{width:min(1120px,calc(100% - 40px));margin:15px auto 0;padding:10px 15px;border:1px solid #e4d9f1;border-radius:16px;background:#ffffffc9;backdrop-filter:blur(14px);display:flex;justify-content:space-between;gap:10px;align-items:center;font-family:system-ui,sans-serif}
+.interview-header a{color:#53367b;font-weight:750;text-decoration:none;min-height:44px;display:flex;align-items:center}
+body.has-interviews main.auth{max-width:min(1120px,calc(100vw - 30px))}
+@media(max-width:760px){.interview-app .columns{grid-template-columns:1fr;gap:10px}.interview-app .box{padding:13px;border-radius:16px}.interview-app .desktop-calendar{display:none}.interview-app .mobile-calendar{display:block}.interview-app .hero{padding:19px 0 12px}.interview-page #interview,.interview-page .interview-header{width:calc(100% - 24px)}}
+
+.interview-app input.inline-check{width:auto;min-height:0}

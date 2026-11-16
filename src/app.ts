@@ -19,6 +19,10 @@ import { customerFields, consentVersion, updateProfile, profileInput, openCustom
 import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBookingChange, ownBookingInput,
   requestBooking, slotInput, bookingChange, staffBooking } from './booking.js'
 import { endScope, locationOf, updateAutomation } from './automation.js'
+import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
+  interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
+  startInterviewSession, updateInterview } from './interviews.js'
+
 
 
 const storeFields = {
@@ -58,6 +62,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
   })
   app.get('/studio',(_req,res)=>res.redirect(302,'/studio/'))
   app.use('/studio',express.static(here('../public/studio')))
+  app.use('/interview',express.static(here('../public/interview')))
   app.use('/operations',express.static(here('../public/operations')))
   app.get('/healthz',async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
@@ -97,7 +102,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
       if (!cfg.external || !c.checks.login_published || !c.checks.provider_verified) {
         throw new Fault(409,'LIFF_NOT_READY','LINE内画面の公開準備中です。')
       }
-      return { liff_id:c.liff_id,customer:c.purpose!=='recruitment',purposes:c.purpose==='shared' ? ['customer','recruitment'] : [c.purpose] }
+      return { liff_id:c.liff_id,customer:c.purpose!=='recruitment',recruitment:c.purpose!=='customer',purposes:c.purpose==='shared' ? ['customer','recruitment'] : [c.purpose] }
     })
     res.json(data)
   })
@@ -146,6 +151,25 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
     }))
   })
 
+  const interviewCredential=(req:Request)=>req.headers.cookie?.split(';').map(value=>value.trim())
+    .find(value=>value.startsWith('night_interview='))?.slice('night_interview='.length)
+  api.post('/interview/login',async(req,res)=>{
+    await gate(pool,cfg,'interview-login:'+address(req),60)
+    res.set('Set-Cookie',await startInterviewSession(pool,cfg,line,req.body)).json({signed_in:true})
+  })
+  api.get('/interview/calendar',async(req,res)=>{
+    const {start}=interviewDates.parse(req.query)
+    res.json(await tx(pool,async db=>interviewCalendar(db,await interviewApplicant(db,interviewCredential(req)),start)))
+  })
+  api.post('/interview/bookings',async(req,res)=>{
+    const input=interviewCreate.parse(req.body)
+    res.status(201).json(await tx(pool,async db=>confirmInterview(db,await interviewApplicant(db,interviewCredential(req),true),input)))
+  })
+  api.patch('/interview/bookings/:booking',async(req,res)=>{
+    const input=interviewChange.parse(req.body)
+    res.json(await tx(pool,async db=>updateInterview(db,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input)))
+  })
+
   type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
   const staff = (action: Action, status=200) => async (req: Request,res: Response) => {
     const data = await tx(pool,async db=>action(db,await authenticate(db,credential(req)),req))
@@ -157,6 +181,16 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI()) {
   },status)
   const withChannel = (action: (db:DB,actor:Actor,req:Request,c:Awaited<ReturnType<typeof channel>>)=>Promise<unknown>,
     status=200)=>inStore(async (db,actor,req)=>action(db,actor,req,await channel(db,idOf(req,'connection'))),true,status)
+
+  const interviewStaff=(action:Action,status=200)=>staff(async(db,actor,req)=>{
+    await interviewAccess(db,actor,idOf(req,'store'))
+    return action(db,actor,req)
+  },status)
+  api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'))))
+  api.post('/stores/:store/interviews/slots',interviewStaff((db,actor,req)=>
+    publishInterviewSlot(db,cfg,actor,idOf(req,'store'),keyOf(req),interviewSlotInput.parse(req.body)),201))
+  api.patch('/stores/:store/interviews/slots/:slot',interviewStaff((db,actor,req)=>
+    changeInterviewVisibility(db,actor,idOf(req,'store'),idOf(req,'slot'),interviewVisibility.parse(req.body))))
 
   api.post('/auth/logout',async (req,res)=>{
     if (credential(req)) {

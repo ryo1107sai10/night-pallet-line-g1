@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>面談枠の管理 | Night PRO LINE</title>
+<link rel="stylesheet" href="./calendar.css">
+<script type="module" src="./staff.mjs"></script>
+</head>
+<body class="interview-page">
+<header class="interview-header"><a href="/">Night PRO LINE</a><a href="/operations/">店舗運用</a></header>
+<main id="interview" class="interview-app">
+<header class="hero"><h1>面談枠の管理</h1><p>公開した枠は応募者がLINEから選べます。</p></header>
+<div id="notice" class="notice" role="status" hidden></div>
+<div class="columns">
+<section class="box stack"><h2>面談スケジュール</h2><label class="field">店舗<select id="stores"></select></label><div id="slots"></div></section>
+<section class="box stack"><h2>面談枠を登録</h2>
+<form id="new-slot" class="stack" hidden>
+<label class="field">採用用公式アカウント<select name="channel" required></select></label>
+<label class="field">開始日時（店舗の現地時刻）<input type="datetime-local" name="start" required></label>
+<label class="field">所要時間<select name="minutes"><option value="30">30分</option><option value="45">45分</option><option value="60">60分</option><option value="90">90分</option></select></label>
+<label class="field">面談形式<select name="method"><option value="onsite">対面</option><option value="online">オンライン</option></select></label>
+<label class="field">確定後に表示する会場・参加案内<input name="instructions" maxlength="800" required></label>
+<label><input type="checkbox" name="published" checked class="inline-check"> 予約カレンダーに公開する</label>
+<button type="submit" class="primary">面談枠を登録する</button>
+</form><p id="slot-help"></p>
+</section></div>
+</main>
+</body>
+</html>

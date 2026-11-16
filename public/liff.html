@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LINE本人確認 | Night PRO LINE</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/interview/calendar.css">
   <script type="module" src="/assets/liff.js"></script>
 </head>
 <body>
@@ -13,6 +14,8 @@
     <h1 id="heading">LINE本人確認</h1>
     <p id="status" role="status" aria-live="polite">LINEのログイン状態を確認しています。</p>
     <button id="signin" hidden>LINEでログイン</button>
+    <div id="liff-purpose" class="actions" hidden><button type="button" data-use="customer">来店予約・配信設定</button><button type="button" data-use="recruitment">面談予約</button></div>
+    <section id="interview" hidden></section>
     <section id="customer" hidden>
       <h2 id="store-name"></h2>
       <form id="preferences">

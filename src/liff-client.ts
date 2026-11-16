@@ -1,4 +1,5 @@
 import liff from '@line/liff'
+import { mountInterview } from '../public/interview/calendar.mjs'
 
 const status = document.querySelector<HTMLParagraphElement>('#status')!
 const form = document.querySelector<HTMLFormElement>('#verify')!
@@ -22,10 +23,13 @@ async function prepare() {
   for (const key of configuration.purposes as Array<keyof typeof labels>) select.add(new Option(labels[key],key))
   document.querySelector<HTMLElement>('#test-panel')!.hidden=false
   status.textContent = 'LINEでログインしました。'
-  if (configuration.customer) {
-    try { await openCustomer() } catch(error) {
-      status.textContent=error instanceof Error?error.message:'顧客情報を開けませんでした。'
-    }
+  if (configuration.customer && configuration.recruitment) {
+    const picker=document.querySelector<HTMLElement>('#liff-purpose')!
+    picker.hidden=false
+    picker.querySelector<HTMLButtonElement>('[data-use=customer]')!.onclick=()=>choosePurpose(openCustomer)
+    picker.querySelector<HTMLButtonElement>('[data-use=recruitment]')!.onclick=()=>choosePurpose(openInterviews)
+  } else {
+    await choosePurpose(configuration.recruitment?openInterviews:openCustomer)
   }
   form.hidden = false
   form.onsubmit = async event => {
@@ -49,6 +53,41 @@ async function prepare() {
       status.textContent = error instanceof Error ? error.message : '接続を確認し、もう一度お試しください。'
     } finally { button.disabled = false }
   }
+}
+
+async function choosePurpose(open:()=>Promise<void>) {
+  const picker=document.querySelector<HTMLElement>('#liff-purpose')!
+  for(const button of picker.querySelectorAll('button')) button.disabled=true
+  try {
+    await open()
+    picker.hidden=true
+    document.querySelector<HTMLHeadingElement>('#heading')!.hidden=true
+    status.hidden=false
+  } catch (error) {
+    status.textContent=error instanceof Error?error.message:'画面を開けませんでした。'
+  } finally {
+    for(const button of picker.querySelectorAll('button')) button.disabled=false
+  }
+}
+
+async function openInterviews() {
+  async function request(path:string,method='GET',body?:unknown) {
+    const response=await fetch('/api/v1/interview'+path,{method,headers:body?{'Content-Type':'application/json'}:{},
+      body:body?JSON.stringify(body):undefined})
+    const data=await response.json()
+    if(!response.ok) throw Object.assign(new Error(data.message??'操作できませんでした。'),{status:response.status})
+    return data
+  }
+  await request('/login','POST',{connection,id_token:liff.getIDToken()})
+  const root=document.querySelector<HTMLElement>('#interview')!
+  await mountInterview(root,{
+    calendar:start=>request('/calendar'+(start?'?start='+encodeURIComponent(start):'')),
+    book:input=>request('/bookings','POST',input),
+    change:(id,input)=>request('/bookings/'+encodeURIComponent(id),'PATCH',input),
+  })
+  document.body.classList.add('has-interviews')
+  root.hidden=false
+  document.title='面談予約 | Night PRO LINE'
 }
 
 type Slot = {id:string;label:string;starts_at:string;remaining:number}

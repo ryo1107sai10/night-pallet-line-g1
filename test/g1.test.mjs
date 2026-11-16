@@ -471,3 +471,55 @@ test('AT25/29/48 自動配信の同一開始防止、即時撤回、LINE枠不�
   assert.equal((await read('SELECT status FROM automatic_send WHERE id=$1',[ambiguous.id])).rows[0].status,'accepted')
   assert.ok(flow.id)
 })
+
+test('面談カレンダー: 採用権限、枠の取り合い、本人の日程変更と取消', async ()=>{
+  const root='/stores/'+storeId+'/interviews'
+  const login=(token,cookie)=>post('/interview/login',cookie,{connection:c,id_token:token})
+  expect(await request('/interview/calendar'),401)
+  expect(await request(root,{cookie:other}),404)
+  const invitation=expect(await post('/staff/invites',admin,{email:'recruiter@example.test',role:'recruiter',stores:[storeId]},idempotency()),201)
+  const recruiter=await activate(invitation,'recruiter@example.test','alpha')
+  expect(await request('/stores/'+otherStore+'/interviews',{cookie:recruiter}),404)
+  const a=await login('signed-token-first-user')
+  const b=await login('signed-token-second-user')
+  expect(a,200);expect(b,200)
+  const empty=expect(await request('/interview/calendar',{cookie:a.cookie}),200)
+  const first=new Date(Date.parse(empty.today+'T00:00:00+09:00')+86400000+14*3600000)
+  const create=(start,published,method='onsite')=>post(root+'/slots',recruiter,{
+    channel:c,starts_at:start.toISOString(),ends_at:new Date(+start+30*60000).toISOString(),
+    method,instructions:'確定者専用の参加方法',published,
+  },idempotency())
+  const one=expect(await create(first,true),201)
+  expect(await create(new Date(+first+10*60000),true),409)
+  const next=expect(await create(new Date(+first+3600000),true,'online'),201)
+  const hidden=expect(await create(new Date(+first+2*3600000),false),201)
+  const published=expect(await request('/interview/calendar',{cookie:a.cookie}),200)
+  assert.deepEqual(published.slots.map(slot=>slot.id),[one.id,next.id])
+  assert.doesNotMatch(JSON.stringify(published),/確定者専用/)
+  expect(await request('/interview/calendar?start=2026-02-30',{cookie:a.cookie}),422)
+  expect(await post('/interview/bookings',a.cookie,{slot:hidden.id,name:'応募者A'}),409)
+  const races=await Promise.all([
+    post('/interview/bookings',a.cookie,{slot:one.id,name:'応募者A'}),
+    post('/interview/bookings',b.cookie,{slot:one.id,name:'応募者B'}),
+  ])
+  assert.deepEqual(races.map(result=>result.status).sort(),[201,409])
+  const winner=races[0].status===201?a.cookie:b.cookie
+  const loser=races[0].status===201?b.cookie:a.cookie
+  const booking=races.find(result=>result.status===201).data
+  assert.equal(booking.instructions,'確定者専用の参加方法')
+  assert.equal(expect(await request('/interview/calendar',{cookie:loser}),200).slots[0].available,false)
+  expect(await patch('/interview/bookings/'+booking.id,loser,{action:'cancel',revision:1}),404)
+  assert.equal(expect(await post('/interview/bookings',winner,{slot:one.id,name:booking.applicant_name}),201).id,booking.id)
+  const changed=expect(await patch('/interview/bookings/'+booking.id,winner,{action:'reschedule',revision:1,slot:next.id}),200)
+  assert.equal(changed.method,'online')
+  const calendar=expect(await request('/interview/calendar',{cookie:loser}),200)
+  assert.deepEqual(calendar.slots.map(slot=>slot.available),[true,false])
+  assert.deepEqual(calendar.bookings,[])
+  expect(await patch('/interview/bookings/'+booking.id,winner,{action:'cancel',revision:1}),409)
+  const done=expect(await patch('/interview/bookings/'+booking.id,winner,{action:'cancel',revision:2}),200)
+  assert.equal(done.status,'cancelled')
+  assert.equal(done.instructions,null)
+  assert.ok(expect(await request('/interview/calendar',{cookie:loser}),200).slots.every(slot=>slot.available))
+  expect(await patch(root+'/slots/'+next.id,recruiter,{revision:1,published:false}),200)
+  assert.deepEqual(expect(await request('/interview/calendar',{cookie:loser}),200).slots.map(slot=>slot.id),[one.id])
+})

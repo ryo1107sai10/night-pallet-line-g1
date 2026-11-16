@@ -1,0 +1,275 @@
+const days=['日','月','火','水','木','金','土']
+const methods={onsite:'対面',online:'オンライン'}
+const range=7
+const dayMs=86400000
+const shift=(date,amount)=>new Date(Date.parse(date+'T00:00:00Z')+amount*dayMs).toISOString().slice(0,10)
+export const dateKey=(date,zone)=>new Intl.DateTimeFormat('sv-SE',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(date))
+const weekday=date=>new Date(date+'T00:00:00Z').getUTCDay()
+const label=date=>Number(date.slice(5,7))+'/'+Number(date.slice(8,10))
+const time=(instant,zone)=>new Intl.DateTimeFormat('ja-JP',{timeZone:zone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(instant))
+export const formatAppointment=(slot,zone)=>label(dateKey(slot.starts_at,zone))+'（'+days[weekday(dateKey(slot.starts_at,zone))]+'） '+time(slot.starts_at,zone)+'〜'+time(slot.ends_at,zone)
+const duration=slot=>Math.round((Date.parse(slot.ends_at)-Date.parse(slot.starts_at))/60000)+'分'
+
+function el(tag,text,cls){
+  const node=document.createElement(tag)
+  if(text!=null)node.textContent=text
+  if(cls)node.className=cls
+  return node
+}
+function action(label,fn,cls){
+  const b=el('button',label,cls)
+  b.type='button';b.onclick=fn
+  return b
+}
+function group(...items){const node=el('div',null,'controls');node.append(...items);return node}
+function box(title){const node=el('section',null,'box stack');node.append(el('h2',title));return node}
+function item(slot,zone){
+  const card=el('div',null,'slot-summary')
+  card.append(el('strong',formatAppointment(slot,zone)),el('p',methods[slot.method]+' · 所要 '+duration(slot)))
+  return card
+}
+
+export async function mountInterview(root,service) {
+  root.classList.add('interview-app')
+  let data,start,day,selected,existing,complete
+  let stage='select',busy=false,message='',name=''
+  let filter='all'
+
+  function show(focus=false){
+    if(!data) return
+    const heading=el('header',null,'hero')
+    heading.append(el('h1','面談予約'),el('p',data.store+(service.demo?' · 操作デモ':' · 採用窓口')))
+    const flow=el('ol',null,'flow')
+    for(const [index,[step,title]] of [['select','日時選択'],['confirm','内容確認'],['done','完了']].entries()){
+      const badge=el('li')
+      if(stage===step)badge.setAttribute('aria-current','step')
+      badge.append(el('b',String(index+1)),el('span',title))
+      flow.append(badge)
+    }
+    const notice=el('div',message,'notice')
+    notice.setAttribute('role','status');notice.hidden=!message
+    const body=el('div',null,'columns')
+    if(stage==='select')body.append(calendar(),selection())
+    if(stage==='confirm')body.append(confirmation(),help())
+    if(stage==='done')body.append(done(),help())
+    if(stage==='cancel')body.append(cancelPane(),help())
+    root.replaceChildren(heading,flow,notice,body)
+    if(service.demo)root.append(el('footer','デモ用の空き枠です。操作内容はこのブラウザにのみ保存されます。'))
+    if(focus){
+      const title=body.querySelector('h2')
+      title.tabIndex=-1
+      title.focus({preventScroll:true})
+      title.scrollIntoView({block:'nearest'})
+    }
+  }
+
+  const run=async(fn,control)=>{
+    if(busy)return
+    busy=true
+    if(control)control.disabled=true
+    try{await fn()}
+    catch (error){message=error.message||'処理できませんでした。';show()}
+    finally{busy=false;if(control)control.disabled=false}
+  }
+
+  function help(){
+    const guide=box('面談のご案内')
+    guide.append(el('p','面談形式と所要時間は空き枠ごとに表示します。会場・参加方法は確定後にご確認いただけます。'))
+    if(stage!=='done')guide.append(el('p','確定後は「自分の面談」から日程変更・取消ができます。'))
+    return guide
+  }
+
+  function calendar(){
+    const cal=box('空き枠を選ぶ')
+    const dates=Array.from({length:range},(_,i)=>shift(start,i))
+    const valid=data.slots.filter(slot=>filter==='all'||slot.method===filter)
+    const current=dates.includes(day)?day:dates[0]
+    const counts=new Map(dates.map(date=>[date,valid.filter(slot=>slot.available&&dateKey(slot.starts_at,data.timezone)===date).length]))
+    const bar=el('div',null,'weekbar')
+    const prev=action('‹ 前週',event=>run(()=>week(-7),event.currentTarget))
+    const forward=action('翌週 ›',event=>run(()=>week(7),event.currentTarget))
+    prev.disabled=start<=data.today;forward.disabled=start>=shift(data.today,90)
+    bar.append(prev,el('strong',label(dates[0])+' – '+label(dates.at(-1))),forward)
+    const formats=el('label',null,'field')
+    const mode=el('select')
+    mode.append(new Option('すべて','all'),...Object.entries(methods).map(([value,title])=>new Option(title,value)))
+    mode.value=filter
+    mode.onchange=()=>{
+      filter=mode.value
+      if(selected&&filter!=='all'&&selected.method!==filter)selected=null
+      show()
+      root.querySelector('select')?.focus()
+    }
+    formats.append(el('span','面談形式'),mode)
+    cal.append(formats,bar)
+
+    const table=el('table',null,'grid desktop-calendar')
+    table.append(el('caption','○ 空きあり　× 満席・受付終了　— 受付枠なし'))
+    const head=table.createTHead().insertRow()
+    const timeHeading=el('th','時刻');timeHeading.scope='col';head.append(timeHeading)
+    for(const date of dates){
+      const th=el('th',null,weekday(date)%6===0?'weekend':'')
+      th.scope='col'
+      const text=el('time',label(date));text.dateTime=date
+      th.append(text,el('small',days[weekday(date)]))
+      head.append(th)
+    }
+    const keys=[...new Set(valid.map(slot=>time(slot.starts_at,data.timezone)))].sort()
+    const tbody=table.createTBody()
+    for(const key of keys){
+      const row=tbody.insertRow(), th=el('th',key);th.scope='row';row.append(th)
+      for(const date of dates){
+        const cell=row.insertCell()
+        const slots=valid.filter(slot=>dateKey(slot.starts_at,data.timezone)===date&&time(slot.starts_at,data.timezone)===key)
+        if(!slots.length)cell.textContent='—'
+        for(const slot of slots){
+          if(slot.available)cell.append(slotButton(slot,true))
+          else {const marker=el('span','×');marker.setAttribute('aria-label','満席・受付終了');cell.append(marker)}
+        }
+      }
+    }
+    const mobile=el('div',null,'mobile-calendar')
+    const strip=el('div',null,'date-strip')
+    strip.setAttribute('aria-label','日付を選択')
+    for(const date of dates){
+      const b=action('',()=>{
+        day=date;show()
+        root.querySelector('.date-strip [aria-pressed=true]')?.focus()
+      })
+      b.setAttribute('aria-pressed',String(current===date))
+      b.setAttribute('aria-label',label(date)+' '+days[weekday(date)]+'曜日 空き'+counts.get(date)+'件')
+      b.append(el('span',days[weekday(date)]),el('b',label(date)),el('small',counts.get(date)+'件'))
+      strip.append(b)
+    }
+    const list=el('div',null,'mobile-slots')
+    for(const slot of valid.filter(slot=>dateKey(slot.starts_at,data.timezone)===current)){
+      if(slot.available)list.append(slotButton(slot,false))
+      else {const b=action(time(slot.starts_at,data.timezone)+' ×',null);b.disabled=true;list.append(b)}
+    }
+    mobile.append(strip,list)
+    if(!list.childElementCount)mobile.append(el('p','この日の受付枠はありません。'))
+    cal.append(table,mobile)
+    if(!keys.length)cal.append(el('p','この週に公開中の面談枠はありません。翌週もご確認ください。','small'))
+    return cal
+  }
+  function slotButton(slot,compact){
+    const chosen=selected?.id===slot.id
+    const b=action('',()=>{
+      selected=slot;day=dateKey(slot.starts_at,data.timezone);message='';show()
+      for(const control of root.querySelectorAll('button[data-slot]')){
+        if(control.dataset.slot===slot.id&&control.getClientRects().length){control.focus();break}
+      }
+    })
+    b.dataset.slot=slot.id
+    b.setAttribute('aria-pressed',String(chosen))
+    b.setAttribute('aria-label',formatAppointment(slot,data.timezone)+' '+methods[slot.method]+' 空きあり')
+    b.append(el('b',compact?'○':time(slot.starts_at,data.timezone)),el('span',methods[slot.method]))
+    return b
+  }
+
+  async function week(offset){
+    const candidate=shift(start,offset),limit=shift(data.today,90)
+    const next=candidate<data.today?data.today:candidate>limit?limit:candidate
+    data=await service.calendar(next);start=next;day=next;selected=null;message='';show()
+    root.querySelector('.weekbar strong')?.scrollIntoView({block:'nearest'})
+  }
+
+  function selection(){
+    const panel=box(existing?'変更する日時':'選択した日時')
+    if(selected)panel.append(item(selected,data.timezone))
+    else panel.append(el('p','カレンダーの「○」から希望の日時を選んでください。'))
+    if(existing)panel.append(el('p','現在の面談 '+formatAppointment(existing,data.timezone)))
+    const next=action('予約内容を確認する',()=>{
+      message='';stage='confirm';show(true)
+    },'primary')
+    next.disabled=!selected
+    panel.append(next)
+    if(existing)panel.append(action('日程変更をやめる',()=>{existing=null;selected=null;message='';show()}))
+    const list=el('section')
+    list.append(el('h3','自分の面談'))
+    for(const booking of data.bookings){
+      const active=booking.status==='confirmed'&&Date.parse(booking.starts_at)>Date.now()
+      const row=el('div',null,'record stack')
+      row.append(el('strong',active?'確定済み':booking.status==='cancelled'?'取消済み':'過去の予約'),item(booking,data.timezone))
+      if(booking.instructions)row.append(el('p',booking.instructions,'wrap'))
+      if(active)row.append(group(action('日程変更',()=>{
+        existing=booking;selected=null;message='';show(true)
+      }),action('取り消す',()=>{
+        complete=booking;stage='cancel';show(true)
+      })))
+      list.append(row)
+    }
+    if(!data.bookings.length)list.append(el('p','予約はまだありません。'))
+    panel.append(list)
+    return panel
+  }
+
+  function confirmation(){
+    const result=box(existing?'日程変更の確認':'予約内容の確認')
+    const form=el('form',null,'stack')
+    if(existing)form.append(el('p','変更前 '+formatAppointment(existing,data.timezone)))
+    form.append(item(selected,data.timezone))
+    if(!existing){
+      const label=el('label',null,'field'), input=el('input')
+      input.required=true;input.maxLength=80;input.autocomplete='name';input.value=name
+      input.oninput=()=>{name=input.value}
+      label.append(el('span','お名前（必須）'),input)
+      form.append(label)
+    }
+    const submit=el('button',existing?'この日時に変更する':'この日時で面談を確定する','primary')
+    submit.type='submit'
+    form.append(el('p','他の方の予約状況により、確定時に空き枠を再確認します。'),
+      group(action('日時選択に戻る',()=>{stage='select';message='';show(true)}),submit))
+    form.onsubmit=event=>{
+      event.preventDefault()
+      run(async()=>{
+        if(!existing&&!name.trim())throw new Error('お名前を入力してください。')
+        try{complete=existing?await service.change(existing.id,{action:'reschedule',slot:selected.id,revision:existing.revision}):
+          await service.book({slot:selected.id,name:name.trim()})}
+        catch(error){
+          if(error.status!==409)throw error
+          await refresh()
+          existing=existing&&data.bookings.find(booking=>booking.id===existing.id&&booking.status==='confirmed')
+          selected=null;stage='select';message=error.message;show(true);return
+        }
+        message='';stage='done';show(true)
+      },submit)
+    }
+    result.append(form)
+    return result
+  }
+
+  function cancelPane(){
+    const pane=box('面談を取り消しますか？')
+    pane.append(item(complete,data.timezone),group(action('戻る',()=>{stage='select';show(true)}),
+      action('取り消しを確定する',event=>run(async()=>{
+        complete=await service.change(complete.id,{action:'cancel',revision:complete.revision})
+        stage='done';message='';show(true)
+      },event.currentTarget),'primary')))
+    return pane
+  }
+
+  async function refresh(){
+    data=await service.calendar(start)
+    start=start??data.today
+    day=day??[...data.slots].sort((a,b)=>Date.parse(a.starts_at)-Date.parse(b.starts_at))
+      .find(slot=>slot.available)?.starts_at
+    day=day?.includes('T')?dateKey(day,data.timezone):day??start
+  }
+
+  function done(){
+    const success=box(complete.status==='cancelled'?'面談を取り消しました':existing?'面談の日程を変更しました':'面談予約が確定しました')
+    success.append(el('span',complete.status==='cancelled'?'取消済み':'確定','success'),item(complete,data.timezone))
+    if(complete.status==='confirmed'){
+      success.append(el('p','お名前 '+complete.applicant_name))
+      if(complete.instructions)success.append(el('p',complete.instructions,'wrap'))
+    }
+    success.append(action('自分の面談を見る',event=>run(async()=>{
+      await refresh();existing=null;complete=null;selected=null;stage='select';show(true)
+    },event.currentTarget),'secondary'))
+    return success
+  }
+
+  await refresh()
+  show()
+}
