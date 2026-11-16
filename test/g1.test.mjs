@@ -1561,3 +1561,49 @@ test('店長引き継ぎは会話単位でステップ配信と管理会社の�
   expect(await patch(url+'/handoff',admin,{revision:(await getThread()).revision,minutes:null}),200)
   assert.equal((await getThread()).handoff_until,null)
 })
+
+test('採用専用LINEでは店長対応中の面談通知を見送り、終了後の新しい通知を送る', async()=>{
+  const {root,connection,inbound}=await workflowStore('採用の店長引き継ぎ','recruitment','0',{inbox_enabled:true,reminders_enabled:true})
+  const person=await post('/interview/login',null,{connection,id_token:'signed-token-first-user'})
+  expect(person,200)
+  const at=Date.now()
+  assert.equal((await inbound([
+    event('recruitment-handoff-follow','follow',at),
+    {...event('recruitment-handoff-chat','message',at),message:{id:'41701',type:'text',text:'採用引き継ぎ確認'}},
+  ])).status,200)
+  await worker()
+  expect(await put('/interview/notices',person.cookie,{enabled:true}),200)
+  const day=Date.parse(expect(await request('/interview/calendar',{cookie:person.cookie}),200).today+'T00:00:00+09:00')+3*86400000
+  const offer=async(hour,label)=>expect(await post(root+'/interviews/slots',admin,{channel:connection,
+    starts_at:new Date(day+hour*3600000).toISOString(),ends_at:new Date(day+(hour+.5)*3600000).toISOString(),
+    instructions:label,published:true},idempotency()),201).id
+  const before=await offer(18,'引き継ぎ前の試験')
+  const during=await offer(19,'引き継ぎ中の試験')
+  const after=await offer(20,'引き継ぎ終了後の試験')
+  const delivered=phrase=>pushesLog.filter(p=>p.to===user&&p.messages.some(m=>m.text.includes(phrase))).length
+  const book=async slot=>expect(await confirmation(person.cookie,slot,'引き継ぎ 検証'),201)
+  const cancel=async item=>expect(await patch('/interview/bookings/'+item.id,person.cookie,{action:'cancel',revision:item.revision}),200)
+  const inbox=root+'/workflows/recruitment/inbox'
+  const current=async()=>(expect(await request(inbox,{cookie:admin}),200).threads)[0]
+
+  const baseline=await book(before)
+  await worker()
+  assert.equal(delivered('引き継ぎ前の試験'),1)
+  await cancel(baseline)
+
+  const thread=await current()
+  const endpoint=inbox+'/'+thread.id+'/handoff'
+  expect(await patch(endpoint,admin,{revision:thread.revision,minutes:15}),200)
+  const held=await book(during)
+  await worker()
+  assert.equal(delivered('引き継ぎ中の試験'),0)
+  const logs=expect(await request(root+'/workflows/recruitment/delivery',{cookie:admin}),200)
+  assert.ok(logs.some(r=>r.kind==='interview_confirm'&&r.status==='cancelled'&&r.reason==='店長対応中'))
+
+  await cancel(held)
+  expect(await patch(endpoint,admin,{revision:(await current()).revision,minutes:null}),200)
+  await book(after)
+  await worker()
+  assert.equal(delivered('引き継ぎ終了後の試験'),1)
+  assert.equal(delivered('引き継ぎ中の試験'),0)
+})
