@@ -14,6 +14,7 @@ import { LineAPI } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
 import { starter } from '../public/studio/engine.mjs'
+import { liffAppId, lineSetupLinks } from '../public/line-setup.mjs'
 
 const origin = 'https://example.test'
 const cfg = { origin, master:randomBytes(32), external:true, automation:true }
@@ -70,6 +71,22 @@ const event = (id,type,timestamp) => ({webhookEventId:id,type,timestamp,source:{
 const storeData = name => ({ name,address:'東京都',business_type:'接客飲食',responsible:'担当者',
   timezone:'Asia/Tokyo',cutoff:'06:00' })
 const read = (sql, values) => tx(pool,async db=>{await scope(db,signup.tenant,storeId);return db.query(sql,values)})
+
+test('公式LINEの設定ボタンは対象チャネルの画面を開き、未入力時は公式一覧を開く',()=>{
+  const root='https://developers.line.biz/console/'
+  const defaults=lineSetupLinks()
+  assert.equal(defaults.manager,'https://manager.line.biz/')
+  assert.equal(defaults.messagingSettings,root)
+  const links=lineSetupLinks({provider_id:'2000000010',messaging_id:ids.messaging,login_id:ids.login,liff_id:ids.login+'-test'})
+  assert.equal(links.provider,root+'provider/2000000010/settings')
+  assert.equal(links.messagingBasics,root+'channel/'+ids.messaging)
+  assert.equal(links.messagingSettings,root+'channel/'+ids.messaging+'/messaging-api')
+  assert.equal(links.liff,root+'channel/'+ids.login+'/liff')
+  assert.equal(links.liffEdit,links.liff+'/'+ids.login+'-test')
+  assert.equal(liffAppId('https://liff.line.me/'+ids.login+'-test?from=copy'),ids.login+'-test')
+  assert.equal(liffAppId('https://liff.line.me.example/'+ids.login+'-test'),'')
+  assert.equal(lineSetupLinks({messaging_id:'../token?secret=sample'}).messagingSettings,root)
+})
 
 test('共有カレンダーの空き時間照合は店舗を限定し、短期のサーバー権限を使う',async()=>{
   const store=randomUUID(),calendar='shared@example.test',account='calendar-reader@project.iam.gserviceaccount.com'
@@ -271,14 +288,17 @@ test('AT02 同一法人の許可店舗・別法人・DB行レベル分離、店�
 
 test('AT01/04 接続台帳とWebhookの署名・destination・再送',async ()=>{
   const data = {label:'接続検証',purpose:'shared',owner_name:'甲法人',provider_id:'provider',
-    messaging_id:ids.messaging,login_id:ids.login,liff_id:ids.login+'-test',bot_user_id:bot,
+    messaging_id:ids.messaging,login_id:ids.login,liff_id:ids.login+'-test',
     account_type:'unverified',management_authority:'管理者確認',channel_secret:channelSecret,
     access_token:accessToken,token_type:'console'}
   const prefix = '/stores/'+storeId+'/connections'
+  const wrong = expect(await post(prefix,manager,{...data,messaging_id:'1234567899'},idempotency()),422)
+  assert.equal(wrong.code,'LINE_CHANNEL_TOKEN')
   c = expect(await post(prefix,manager,data,idempotency()),201).id
   path = prefix+'/'+c
   expect(await post('/stores/'+otherStore+'/connections',admin,data,idempotency()),409)
   const result = expect(await request(prefix,{cookie:manager}),200)[0]
+  assert.equal(result.bot_user_id,bot)
   assert.equal(result.status,'pending')
   assert.doesNotMatch(JSON.stringify(result),new RegExp(channelSecret+'|'+accessToken+'|credentials'))
   assert.notEqual((await read('SELECT credentials FROM channel')).rows[0].credentials,channelSecret)

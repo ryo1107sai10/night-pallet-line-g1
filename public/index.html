@@ -52,14 +52,17 @@
     <label>用途<select name="purpose"><option value="customer">顧客</option><option value="recruitment">採用</option><option value="shared">顧客・採用兼用</option></select></label>
     <label>所有法人<input name="owner_name" required></label>
     <label>管理権限の確認記録<input name="management_authority" required></label>
-    <label>プロバイダーID<input name="provider_id" required></label>
-    <label>Messaging API チャネルID<input name="messaging_id" inputmode="numeric" required></label>
-    <label>LINEログイン チャネルID<input name="login_id" inputmode="numeric" required></label>
-    <label>LIFF ID<input name="liff_id" required></label>
-    <label>ボットユーザーID<input name="bot_user_id" required></label>
     <label>認証種別<select name="account_type"><option value="unverified">未認証</option><option value="verified">認証済み</option><option value="premium">プレミアム</option></select></label>
     <label>既存Webhook URL<input name="existing_webhook" type="url" placeholder="任意"></label>
     <label>利用中のツール<input name="existing_tools" placeholder="任意"></label>
+  </template>
+  <template id="messaging-fields">
+    <label>プロバイダーID<input name="provider_id" required></label>
+    <label>Messaging API チャネルID<input name="messaging_id" inputmode="numeric" required></label>
+  </template>
+  <template id="liff-fields">
+    <label>LINEログイン チャネルID<input name="login_id" inputmode="numeric" placeholder="LIFF IDからも入力できます" required></label>
+    <label>LIFF ID または LIFF URL<input name="liff_id" required></label>
   </template>
   <template id="credentials-fields">
     <label>トークン種別<select name="token_type"><option value="console">長期・短期</option><option value="v2.1">v2.1</option></select></label>

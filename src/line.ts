@@ -22,7 +22,7 @@ const credentialsSchema = z.strictObject(credentialFields)
 export const connectionSchema = z.strictObject({
   label: text(100), purpose: z.enum(['customer','recruitment','shared']), owner_name: text(160),
   provider_id: text(80), messaging_id: looseId, login_id: looseId, liff_id: z.string().regex(/^\d{5,20}-[A-Za-z0-9]+$/),
-  bot_user_id: userId, account_type: z.enum(['unverified','verified','premium']),
+  bot_user_id: userId.optional(), account_type: z.enum(['unverified','verified','premium']),
   existing_tools: z.string().trim().max(300).optional(),
   existing_webhook: httpsUrl.optional(), management_authority: text(160), ...credentialFields,
 }).refine(data => data.liff_id.startsWith(data.login_id + '-') && data.login_id !== data.messaging_id,
@@ -60,7 +60,7 @@ export function channelCredentials(cfg: Config, c: Channel) {
 }
 
 export async function createChannel(db: DB, cfg: Config, actor: Actor, store: string,
-  data: z.infer<typeof connectionSchema>) {
+  data: z.infer<typeof connectionSchema> & {bot_user_id:string}) {
   const c = { id: newId(), tenant_id: actor.tenant_id, store_id: store, messaging_id: data.messaging_id }
   await db.query('INSERT INTO channel_route VALUES($1,$2,$3,$4)',
     [c.id,c.tenant_id,c.store_id,c.messaging_id])
@@ -122,16 +122,22 @@ export class LineAPI {
     }
   }
 
-  async checkToken(c: Channel, cred: Credentials) {
+  async botIdForChannel(messagingId: string, cred: Credentials) {
     const endpoint = '/oauth2/v2.1/verify?' + new URLSearchParams({ access_token: cred.access_token })
     const verified = await (cred.token_type === 'v2.1'
       ? this.call(endpoint)
       : this.call('/v2/oauth/verify',{method:'POST',body:new URLSearchParams({access_token:cred.access_token})}))
     if (verified.status === 429 || verified.status >= 500) throw lineUnavailable()
-    if (!verified.ok || String((await verified.json()).client_id) !== c.messaging_id) return false
+    if (!verified.ok || String((await verified.json()).client_id) !== messagingId) return null
     const bot = await this.call('/v2/bot/info', { headers: { Authorization: 'Bearer ' + cred.access_token } })
     if (bot.status === 429 || bot.status >= 500) throw lineUnavailable()
-    return bot.ok && (await bot.json()).userId === c.bot_user_id
+    if (!bot.ok) return null
+    const identity = userId.safeParse((await bot.json()).userId)
+    return identity.success ? identity.data : null
+  }
+
+  async checkToken(c: Channel, cred: Credentials) {
+    return await this.botIdForChannel(c.messaging_id,cred) === c.bot_user_id
   }
 
   async checkWebhook(cred: Credentials, expected: string) {

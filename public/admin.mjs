@@ -1,3 +1,5 @@
+import {liffAppId,lineSetupLinks} from './line-setup.mjs'
+
 const $ = selector => document.querySelector(selector)
 const content = $('#content')
 const notice = $('#notice')
@@ -139,6 +141,74 @@ function template(id, values = {}) {
   return fragment
 }
 
+function lineLink(label, href) {
+  const link = el('a',label,'studio-link')
+  link.href = href
+  link.target = '_blank'
+  link.rel = 'noopener noreferrer'
+  return link
+}
+
+function lineStep(title, instruction, links, ...fields) {
+  const step = el('fieldset',null,'line-step')
+  const actions = el('div',null,'actions')
+  actions.append(...links)
+  const grid = el('div',null,'grid')
+  grid.append(...fields)
+  step.append(el('legend',title),el('p',instruction,'muted'),actions,grid)
+  return step
+}
+
+function lineRegistration(base) {
+  const destinations = lineSetupLinks()
+  const provider = lineLink('プロバイダー設定を開く',destinations.provider)
+  const basics = lineLink('チャネル基本設定を開く',destinations.messagingBasics)
+  const messaging = lineLink('Messaging API設定を開く',destinations.messagingSettings)
+  const login = lineLink('LINEログインの基本設定を開く',destinations.loginBasics)
+  const liff = lineLink('LIFF設定を開く',destinations.liff)
+  const form = formOf([
+    lineStep('公式アカウントとMessaging API',
+      '未設定なら公式アカウント管理画面でMessaging APIを有効にします。チャネル基本設定からIDとシークレット、Messaging API設定からトークンを取得します。',
+      [lineLink('LINE公式アカウント管理を開く',destinations.manager),provider,basics,messaging],
+      template('messaging-fields'),template('credentials-fields')),
+    lineStep('LINEログインとLIFF',
+      '同じプロバイダーでLINEログインを選び、LIFFを追加または確認します。LIFF IDかLIFF URLを貼り付けると、ログインのチャネルIDも入力されます。',
+      [login,liff],template('liff-fields')),
+    lineStep('店舗での利用情報',
+      'この店舗での用途と、公式アカウントの管理権限を記録します。',[],template('channel-fields')),
+  ],'接続情報を登録',async (data,key)=>{
+    data.liff_id = liffAppId(data.liff_id)
+    if (!data.liff_id) throw new Error('LINE Developersで発行されたLIFF IDまたはLIFF URLを入力してください。')
+    for (const optional of ['existing_webhook','existing_tools']) if (!data[optional]) delete data[optional]
+    const created = await api(base+'/connections','POST',data,key)
+    channelId = created.id
+    if (location.hash==='#line-setup') history.replaceState(null,'','#line-connection')
+    await refresh()
+    feedback('接続情報を登録しました。WebhookとLIFFの設定に進んでください。')
+  })
+  const fields = form.elements
+  function updateLinks() {
+    const links = lineSetupLinks({provider_id:fields.provider_id.value,messaging_id:fields.messaging_id.value,
+      login_id:fields.login_id.value})
+    provider.href = links.provider
+    basics.href = links.messagingBasics
+    messaging.href = links.messagingSettings
+    login.href = links.loginBasics
+    liff.href = links.liff
+    messaging.hidden = links.messagingSettings===links.messagingBasics
+    basics.textContent = messaging.hidden ? 'LINE Developersでチャネルを選ぶ' : 'チャネル基本設定を開く'
+    liff.hidden = links.liff===links.loginBasics
+    login.textContent = liff.hidden ? 'LINEログインチャネルを選ぶ' : 'LINEログインの基本設定を開く'
+  }
+  fields.liff_id.addEventListener('input',()=>{
+    const id = liffAppId(fields.liff_id.value)
+    if (id) fields.login_id.value = id.split('-')[0]
+  })
+  form.addEventListener('input',updateLinks)
+  updateLinks()
+  return form
+}
+
 function date(value) {
   return new Intl.DateTimeFormat('ja-JP',{dateStyle:'short',timeStyle:'short',timeZone:'Asia/Tokyo'}).format(new Date(value))
 }
@@ -238,13 +308,19 @@ function teamPanel(staff) {
 function connectedPanel(base, c, testers) {
   const prefix = base + '/connections/' + c.id
   const box = el('div')
+  box.id = 'line-connection'
   box.append(status(c.status==='connected' ? '接続済' : '設定中',c.status==='connected'),
     status(c.stopped ? '配信停止中' : 'OA停止なし',false,c.stopped),
     el('p',types[c.purpose]+' · '+c.owner_name+' · '+c.account_type,'muted'))
+  const links = lineSetupLinks(c)
   const urls = details('Webhook・LIFFの設定先',
-    el('p','LINE DevelopersのWebhook URL欄に登録'),el('pre',c.webhook_url),
-    el('p','LIFFアプリのエンドポイントURLに登録'),el('pre',c.liff_url))
-  box.append(urls,el('p','設定記録を保存し、トークンとWebhookを確認してからテスト利用者を登録します。','muted'))
+    connectionSetting('Webhook URL',c.webhook_url,'Webhook設定を開く',links.messagingSettings),
+    connectionSetting('LIFF エンドポイントURL',c.liff_url,'LIFFアプリ設定を開く',links.liffEdit))
+  urls.open = c.status!=='connected'
+  const shortcuts = el('div',null,'actions')
+  shortcuts.append(lineLink('Messaging API設定を開く',links.messagingSettings),
+    lineLink('LIFFアプリ設定を開く',links.liffEdit))
+  box.append(shortcuts,urls,el('p','設定記録を保存し、トークンとWebhookを確認してからテスト利用者を登録します。','muted'))
   const consoleInputs = Object.entries(checks).map(([key,label])=>field(label,key,{type:'checkbox',value:c.checks[key]}))
   box.append(details('公式管理画面で確認した項目',formOf([...consoleInputs,field('確認者・根拠','reason')],
     '確認内容を保存',async data=>{
@@ -298,6 +374,17 @@ function connectedPanel(base, c, testers) {
   ],'交換して再検証へ',data=>change(prefix+'/credentials','PATCH',{...data,revision:c.revision},
     '認証情報を更新しました。再度、接続テストを実施してください。'))),stopForm(prefix+'/stop',c,'公式アカウントの配信'))
   return box
+}
+
+function connectionSetting(label,value,linkLabel,href) {
+  const row = el('section',null,'line-setting')
+  const actions = el('div',null,'actions')
+  actions.append(button(label+'をコピー',async ()=>{
+    await navigator.clipboard.writeText(value)
+    feedback(label+'をコピーしました。')
+  }),lineLink(linkLabel,href))
+  row.append(el('h3',label),el('pre',value),actions)
+  return row
 }
 
 async function render() {
@@ -392,15 +479,10 @@ async function render() {
       }
       line.append(picker,connectedPanel(base,current,testers))
     } else line.append(el('p','この店舗に公式アカウントが登録されていません。'))
-    const grid = el('div',null,'grid')
-    grid.append(template('channel-fields'),template('credentials-fields'))
-    line.append(details('公式アカウントを登録',formOf([grid],'接続情報を登録',async (data,key)=>{
-      for (const key of ['existing_webhook','existing_tools']) if (!data[key]) delete data[key]
-      const created = await api(base+'/connections','POST',data,key)
-      channelId = created.id
-      await refresh()
-      feedback('接続情報を登録しました。')
-    })))
+    const registration = details('公式LINEを連携する',lineRegistration(base))
+    registration.id = 'line-setup'
+    registration.open = !current || location.hash==='#line-setup'
+    line.append(registration)
     main.append(line)
   }
   if (admin) side.append(teamPanel(staff),panel('法人の配信管理',
@@ -408,6 +490,7 @@ async function render() {
     stopForm('/tenant/stop',session.tenant,'法人の配信'),auditPanel('/tenant/audit')))
   layout.append(main,side)
   content.replaceChildren(layout)
+  if (['#line-setup','#line-connection'].includes(location.hash)) $(location.hash)?.scrollIntoView()
 }
 
 $('#show-activate').onclick = () => {

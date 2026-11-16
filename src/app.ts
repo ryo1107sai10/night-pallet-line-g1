@@ -540,7 +540,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.post(channels,inStore(async(db,actor,req)=>{
     const data = connectionSchema.parse(req.body)
     const store = idOf(req,'store')
-    return once(db,cfg,actor,'line.register',keyOf(req),{store,data},()=>createChannel(db,cfg,actor,store,data))
+    return once(db,cfg,actor,'line.register',keyOf(req),{store,data},async()=>{
+      const botUserId = data.bot_user_id ?? await line.botIdForChannel(data.messaging_id,data)
+      if (!botUserId) throw new Fault(422,'LINE_CHANNEL_TOKEN','Messaging APIのチャネルIDと、同じチャネルで発行したアクセストークンを確認してください。')
+      return createChannel(db,cfg,actor,store,{...data,bot_user_id:botUserId})
+    })
   },true,201))
   api.patch(connection+'/credentials',withChannel(async(db,actor,req,c)=>{
     await lockDispatch(db,actor.tenant_id)
