@@ -145,6 +145,7 @@ async function show(){
     section.append(el('strong',formatAppointment(slot,store.timezone)),
       el('p',(slot.method==='online'?'オンライン':'対面')+' · '+slot.channel_label+' · '+
       (stopped?'受付停止中':slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+(slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')))
+    if(slot.guest_email)section.append(el('p','連絡先 '+slot.guest_email))
     if(slot.host_name)section.append(el('p','担当 '+slot.host_name))
     if(slot.calendar_status)section.append(el('p','Googleカレンダー '+({queued:'反映待ち',synced:'反映済み',failed:'反映できませんでした'}[slot.calendar_status])+
       (slot.calendar_error?' · '+slot.calendar_error:'')))

@@ -5,6 +5,7 @@ const types = { customer:'顧客',recruitment:'採用',shared:'顧客・採用�
 const roles = { admin:'法人管理者',manager:'店舗責任者',sales:'営業担当',recruiter:'採用担当',reporter:'閲覧担当' }
 const featureNames = {
   tags_enabled:'顧客タグ', visits_enabled:'来店予約',
+  guest_interviews_enabled:'ログイン不要の対面面談予約',
   interviews_enabled:'面談予約', google_calendar_enabled:'面談時にGoogleカレンダーを照合',
   forms_enabled:'回答フォーム', recruitment_enabled:'応募・選考管理', sources_enabled:'流入分析',
   campaigns_enabled:'絞り込み配信',

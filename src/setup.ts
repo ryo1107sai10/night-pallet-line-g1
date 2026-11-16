@@ -8,7 +8,7 @@ export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
   const versions = ['001_g1','002_scenarios','003_operations','004_interviews','005_interview_hours',
     '006_interview_availability','007_store_features','008_forms_sources','009_campaigns','010_contact_menus','011_inbox',
-    '012_interviewer_calendar']
+    '012_interviewer_calendar','013_guest_interviews']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')

@@ -10,6 +10,7 @@ export const featureInput = z.strictObject({
   rich_menus_enabled:z.boolean().optional(),reminders_enabled:z.boolean().optional(),waitlist_enabled:z.boolean().optional(),
   inbox_enabled:z.boolean().optional(),
   interviewers_enabled:z.boolean().optional(),google_write_enabled:z.boolean().optional(),
+  guest_interviews_enabled:z.boolean().optional(),
 })
 type FeatureInput = z.infer<typeof featureInput>
 type StoreFeatures = Required<FeatureInput>
@@ -22,6 +23,7 @@ const labels:Record<Feature,string> = {
   rich_menus_enabled:'リッチメニュー切り替え',reminders_enabled:'面談リマインド',waitlist_enabled:'面談のキャンセル待ち',
   inbox_enabled:'LINE受信箱',
   interviewers_enabled:'担当者別の面談枠',google_write_enabled:'Googleカレンダーへの面談登録',
+  guest_interviews_enabled:'ログイン不要の対面面談予約',
 }
 const columns = 'revision,'+Object.keys(labels).join(',')
 const firstFeatures:Feature[]=['tags_enabled','visits_enabled','interviews_enabled','google_calendar_enabled']

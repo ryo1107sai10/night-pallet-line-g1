@@ -191,10 +191,14 @@ export async function calendarRecord(db:DB,store:string){
   return (await db.query<CalendarCredential>('SELECT * FROM interview_google_calendar WHERE store_id=$1',[store])).rows[0]
 }
 
-export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range:Interval,alternate?:string){
-  if (!(await storeFeatures(db,store)).google_calendar_enabled) return []
+export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range:Interval,alternate?:string,required=false){
+  const enabled=(await storeFeatures(db,store)).google_calendar_enabled
+  if(!enabled){
+    if(required)throw unavailable()
+    return []
+  }
   const record=await calendarRecord(db,store)
-  if(alternate&&!record)throw unavailable()
+  if((alternate||required)&&!record)throw unavailable()
   return record?google.busy(record,range,alternate):[]
 }
 
@@ -238,10 +242,10 @@ export async function removeBlock(db:DB,actor:Actor,store:string,id:string){
   return {removed:true}
 }
 
-export async function requireFree(db:DB,google:InterviewGoogle,store:string,slot:Interval,calendar?:string){
+export async function requireFree(db:DB,google:InterviewGoogle,store:string,slot:Interval,calendar?:string,required=false){
   const local=await localBlocks(db,store,slot)
-  if(local.length||(await googleBusy(db,google,store,slot)).some(busy=>overlaps(busy,slot)))throw new Fault(409,'INTERVIEW_SLOT_BLOCKED','ほかの予定と重なっています。別の空き枠を選んでください。')
-  if(calendar&&(await googleBusy(db,google,store,slot,calendar)).some(busy=>overlaps(busy,slot))){
+  if(local.length||(await googleBusy(db,google,store,slot,undefined,required)).some(busy=>overlaps(busy,slot)))throw new Fault(409,'INTERVIEW_SLOT_BLOCKED','ほかの予定と重なっています。別の空き枠を選んでください。')
+  if(calendar&&(await googleBusy(db,google,store,slot,calendar,required)).some(busy=>overlaps(busy,slot))){
     throw new Fault(409,'INTERVIEW_SLOT_BLOCKED','面談担当者のほかの予定と重なっています。別の空き枠を選んでください。')
   }
 }

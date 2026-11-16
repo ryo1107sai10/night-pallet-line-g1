@@ -1007,3 +1007,51 @@ test('一斉配信は承認・送信直前の同意確認を守り、兼用LINE�
   assert.ok(messages.some(item=>item.withdrawn&&item.body===null))
   assert.ok(messages.some(item=>item.status==='accepted'))
 })
+
+test('ログイン不要の面談は対面のみ、予約時もGoogleの重複を拒否して連絡先を店舗に限定する',async()=>{
+  const {root,connection}=await workflowStore('公開面談検証','recruitment','8',{guest_interviews_enabled:true})
+  const api='/guest-interview/'+connection
+  const session=await post(api+'/session',null,{})
+  expect(session,201)
+  assert.match(session.cookie,/^night_guest_interview=/)
+  const calendar=async()=>expect(await request(api+'/calendar',{cookie:session.cookie}),200)
+  expect(await request('/interview/calendar',{cookie:session.cookie}),401)
+  const {today}=await calendar()
+  const start=Date.parse(today+'T00:00:00+09:00')+2*86400000
+  const at=time=>new Date(start+time*3600000).toISOString()
+  const slot=async (hour,method='onsite')=>expect(await post(root+'/interviews/slots',admin,{
+    channel:connection,method,starts_at:at(hour),ends_at:at(hour+0.5),published:true,instructions:'店舗受付',
+  },idempotency()),201).id
+  const busy=await slot(18)
+  const free=await slot(19)
+  const online=await slot(20,'online')
+  const book=id=>post(api+'/bookings',session.cookie,{slot:id,name:'公開予約テスト',email:'booking@example.test'})
+  assert.equal((await calendar()).availability_warning,true)
+  assert.equal(expect(await book(free),503).code,'GOOGLE_UNAVAILABLE')
+  const googlePath=root+'/interviews/availability/google'
+  const auth=expect(await post(googlePath,admin,{calendar_id:'primary'}),200)
+  const [,state]=new URL(auth.url).searchParams.get('state').split('.')
+  expect(await post(googlePath+'/complete',admin,{state,code:'test-oauth-code'}),200)
+  fakeBusy=[{start:at(18.25),end:at(18.75)}]
+  try{
+    const before=await calendar()
+    assert.equal(before.slots.find(slot=>slot.id===busy).available,false)
+    assert.equal(before.slots.find(slot=>slot.id===free).available,true)
+    assert.ok(before.slots.every(slot=>slot.id!==online))
+    assert.equal(expect(await book(busy),409).code,'INTERVIEW_SLOT_BLOCKED')
+    expect(await book(online),409)
+    fakeBusy.push({start:at(19),end:at(19.5)})
+    assert.equal(expect(await book(free),409).code,'INTERVIEW_SLOT_BLOCKED')
+    fakeBusy.pop()
+    const booking=expect(await book(free),201)
+    assert.equal(booking.status,'confirmed')
+    assert.equal(booking.method,'onsite')
+    assert.doesNotMatch(JSON.stringify(await calendar()),/booking@example\.test/)
+    const staff=expect(await request(root+'/interviews',{cookie:admin}),200)
+    assert.equal(staff.slots.find(slot=>slot.id===free).guest_email,'booking@example.test')
+    const stranger=await post(api+'/session',null,{})
+    assert.deepEqual(expect(await request(api+'/calendar',{cookie:stranger.cookie}),200).bookings,[])
+    expect(await patch(api+'/bookings/'+booking.id,stranger.cookie,{action:'cancel',revision:1}),404)
+    expect(await patch(api+'/bookings/'+booking.id,session.cookie,{action:'cancel',revision:1}),200)
+  }finally{fakeBusy=[]}
+})

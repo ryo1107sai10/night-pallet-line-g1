@@ -39,7 +39,7 @@ function item(slot,zone){
 export async function mountInterview(root,service) {
   root.classList.add('interview-app')
   let data,start,day,selected,existing,complete
-  let stage='select',busy=false,message='',name=''
+  let stage='select',busy=false,message='',name='',contactEmail=''
   let method='onsite'
 
   function show(focus=false){
@@ -82,7 +82,9 @@ export async function mountInterview(root,service) {
   function help(){
     const guide=box('面談のご案内')
     guide.append(el('p','面談形式と所要時間は空き枠ごとに表示します。会場・参加方法は確定後にご確認いただけます。'))
-    if(stage!=='done')guide.append(el('p','確定後は「自分の面談」から日程変更・取消ができます。'))
+    if(stage!=='done')guide.append(el('p',service.guest?
+      '確定後は、このブラウザの「自分の面談」から日程変更・取消ができます。':
+      '確定後は「自分の面談」から日程変更・取消ができます。'))
     return guide
   }
 
@@ -129,7 +131,9 @@ export async function mountInterview(root,service) {
     format.append(online,el('span','オンライン面談を希望する'))
     const summary=el('p',methods[method]+'面談の空き枠','small')
     summary.setAttribute('role','status')
-    cal.append(el('p','受付時間 '+clockLabel(hours.start)+'〜'+clockLabel(hours.end)+' · '+interval+'分刻み'),format,summary,bar)
+    cal.append(el('p','受付時間 '+clockLabel(hours.start)+'〜'+clockLabel(hours.end)+' · '+interval+'分刻み'))
+    if(!service.guest)cal.append(format)
+    cal.append(summary,bar)
 
     const table=el('table',null,'grid desktop-calendar')
     table.append(el('caption','○ 空きあり　× 受付不可　— 受付枠なし'))
@@ -248,6 +252,14 @@ export async function mountInterview(root,service) {
       input.oninput=()=>{name=input.value}
       label.append(el('span','お名前（必須）'),input)
       form.append(label)
+      if(service.guest){
+        const contact=el('label',null,'field'),address=el('input')
+        address.type='email';address.required=true;address.maxLength=254
+        address.autocomplete='email';address.value=contactEmail
+        address.oninput=()=>{contactEmail=address.value}
+        contact.append(el('span','連絡先メールアドレス（必須）'),address)
+        form.append(contact,el('p','メールアドレスは店舗が面談の連絡に使用します。','small'))
+      }
     }
     const submit=el('button',existing?'この日時に変更する':'この日時で面談を確定する','primary')
     submit.type='submit'
@@ -258,7 +270,7 @@ export async function mountInterview(root,service) {
       run(async()=>{
         if(!existing&&!name.trim())throw new Error('お名前を入力してください。')
         try{complete=existing?await service.change(existing.id,{action:'reschedule',slot:selected.id,revision:existing.revision}):
-          await service.book({slot:selected.id,name:name.trim()})}
+          await service.book({slot:selected.id,name:name.trim(),...(service.guest?{email:contactEmail.trim()}:{})})}
         catch(error){
           if(error.status!==409)throw error
           await refresh()

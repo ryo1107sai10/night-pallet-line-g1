@@ -21,7 +21,8 @@ import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBo
 import { endScope, locationOf, updateAutomation } from './automation.js'
 import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
   interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
-  interviewHours, saveInterviewHours, startInterviewSession, updateInterview, recruitmentSubject } from './interviews.js'
+  guestInterviewCreate, interviewHours, saveInterviewHours, startGuestInterviewSession, startInterviewSession,
+  updateInterview, recruitmentSubject } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
   googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
 import { featureInput, requireFeature, saveStoreFeatures, storeFeatures } from './store-features.js'
@@ -84,6 +85,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.get(['/api/health','/healthz'],async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>res.sendFile(here('../public/index.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
+  app.get('/book/:connection',(req,res)=>{
+    idOf(req,'connection')
+    res.sendFile(here('../public/interview/guest.html'))
+  })
   app.use('/static',express.static(here('../public'),{index:false}))
   app.use('/assets',express.static(here('./assets'),{index:false}))
   app.use('/api/v1',api)
@@ -192,6 +197,34 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const input=interviewChange.parse(req.body)
     res.json(await tx(pool,async db=>updateInterview(db,cfg,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input,google)))
   })
+  const guestPath='/guest-interview/:connection'
+  const guestApplicant=(db:DB,req:Request,write=false)=>{
+    const name='night_guest_interview='
+    const cookie=req.headers.cookie?.split(';').map(value=>value.trim())
+      .find(value=>value.startsWith(name))?.slice(name.length)
+    return interviewApplicant(db,cookie,write,idOf(req,'connection'))
+  }
+  api.post(guestPath+'/session',async(req,res)=>{
+    const connection=idOf(req,'connection')
+    await gate(pool,cfg,'guest-interview-session:'+connection+':'+address(req),120)
+    const cookie=await tx(pool,db=>startGuestInterviewSession(db,cfg,connection))
+    res.set('Set-Cookie',cookie).status(201).json({ready:true})
+  })
+  api.get(guestPath+'/calendar',async(req,res)=>{
+    const {start}=interviewDates.parse(req.query)
+    await gate(pool,cfg,'guest-interview-calendar:'+idOf(req,'connection')+':'+address(req),180)
+    res.json(await tx(pool,async db=>interviewCalendar(db,await guestApplicant(db,req),google,start)))
+  })
+  api.post(guestPath+'/bookings',async(req,res)=>{
+    const {email,...input}=guestInterviewCreate.parse(req.body)
+    await gate(pool,cfg,'guest-interview-book:'+idOf(req,'connection')+':'+address(req),60)
+    res.status(201).json(await tx(pool,async db=>confirmInterview(db,cfg,await guestApplicant(db,req,true),input,google,email)))
+  })
+  api.patch(guestPath+'/bookings/:booking',async(req,res)=>{
+    const input=interviewChange.parse(req.body)
+    await gate(pool,cfg,'guest-interview-change:'+idOf(req,'connection')+':'+address(req),60)
+    res.json(await tx(pool,async db=>updateInterview(db,cfg,await guestApplicant(db,req,true),idOf(req,'booking'),input,google)))
+  })
   const applicantSubject=async(db:DB,req:Request)=>recruitmentSubject(await interviewApplicant(db,interviewCredential(req)))
   api.get('/interview/notices',async(req,res)=>{
     res.json(await tx(pool,async db=>interviewNotices(db,await applicantSubject(db,req))))
@@ -291,7 +324,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.post(campaigns+'/:campaign/approve',inStore((db,actor,req)=>
     approveCampaign(db,cfg,actor,idOf(req,'store'),idOf(req,'campaign'),approvalInput.parse(req.body))))
   api.post(campaigns+'/:campaign/stop',inStore((db,actor,req)=>stopCampaign(db,actor,idOf(req,'store'),idOf(req,'campaign'))))
-  api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'))))
+  api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'),cfg)))
   api.patch('/stores/:store/interviews/hours',interviewStaff((db,actor,req)=>
     saveInterviewHours(db,actor,idOf(req,'store'),interviewHours.parse(req.body))))
   const availability='/stores/:store/interviews/availability'
