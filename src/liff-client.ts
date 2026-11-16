@@ -6,45 +6,88 @@ const form = document.querySelector<HTMLFormElement>('#verify')!
 const signin = document.querySelector<HTMLButtonElement>('#signin')!
 const connection = location.pathname.split('/')[2]
 const labels = { customer:'顧客', recruitment:'採用' }
+type Purpose = keyof typeof labels
 const uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 let source:string|undefined
 let formId:string|undefined
+
+function redirectFor(query:URLSearchParams) {
+  const target=new URL(location.origin+location.pathname)
+  for (const key of ['source','form']) {
+    const value=query.get(key)
+    if(value&&uuid.test(value))target.searchParams.set(key,value)
+  }
+  const use=query.get('use')
+  if(use==='customer'||use==='recruitment')target.searchParams.set('use',use)
+  return target
+}
+
+function showLineSignIn(liffId:string, redirect:URL, renew=false, reopen=false) {
+  const openInLine=reopen||liff.isInClient()
+  document.querySelector<HTMLElement>('#test-panel')!.hidden=true
+  document.querySelector<HTMLElement>('#liff-purpose')!.hidden=true
+  status.textContent=openInLine?'LINEで応募・予約ページを開き直してください。':renew
+    ?'LINEの本人確認ができませんでした。LINEでログインし直すと応募・予約を続けられます。'
+    :'LINEでログインして本人確認を続けてください。'
+  signin.textContent=openInLine?'LINEで開き直す':renew?'LINEでログインし直す':'LINEでログイン'
+  signin.hidden=false
+  signin.onclick=()=>{
+    signin.disabled=true
+    try {
+      if(openInLine){
+        const entry=new URL('https://liff.line.me/'+encodeURIComponent(liffId))
+        entry.search=redirect.search
+        location.assign(entry.href)
+      }else{
+        if(renew&&liff.isLoggedIn())liff.logout()
+        liff.login({redirectUri:redirect.href})
+      }
+    } catch {
+      signin.disabled=false
+      status.textContent='LINEログインを開始できませんでした。もう一度お試しください。'
+    }
+  }
+}
 
 async function prepare() {
   const response = await fetch('/api/v1/liff/' + encodeURIComponent(connection))
   const configuration = await response.json()
   if (!response.ok) throw new Error(configuration.message)
   try { await liff.init({ liffId:configuration.liff_id }) }
-  catch { throw new Error('LINE公式アカウントから接続テスト画面を開き直してください。') }
-  const query=new URLSearchParams(location.search)
-  const code=query.get('source')
-  source=code&&uuid.test(code)?code:undefined
-  const formCode=query.get('form')
-  formId=formCode&&uuid.test(formCode)?formCode:undefined
-  if (!liff.isLoggedIn()) {
-    status.textContent = 'LINEでログインして本人確認を続けてください。'
-    signin.hidden = false
-    const redirect=new URL(location.origin+location.pathname)
-    if(source)redirect.searchParams.set('source',source)
-    if(formId)redirect.searchParams.set('form',formId)
-    const use=query.get('use')
-    if(use==='customer'||use==='recruitment')redirect.searchParams.set('use',use)
-    signin.onclick = () => liff.login({redirectUri:redirect.href})
+  catch {
+    showLineSignIn(configuration.liff_id,redirectFor(new URLSearchParams(location.search)),true,true)
     return
   }
+  const query=new URLSearchParams(location.search)
+  const redirect=redirectFor(query)
+  source=redirect.searchParams.get('source')??undefined
+  formId=redirect.searchParams.get('form')??undefined
+  if (!liff.isLoggedIn()) {
+    showLineSignIn(configuration.liff_id,redirect)
+    return
+  }
+  if (!liff.getIDToken()) {
+    showLineSignIn(configuration.liff_id,redirect,true)
+    return
+  }
+  const openPurpose=(use:Purpose)=>choosePurpose(use==='recruitment'?openInterviews:openCustomer,()=>{
+    const retry=new URL(redirect)
+    if(configuration.customer&&configuration.recruitment)retry.searchParams.set('use',use)
+    showLineSignIn(configuration.liff_id,retry,true)
+  })
   const select = form.elements.namedItem('purpose') as HTMLSelectElement
-  for (const key of configuration.purposes as Array<keyof typeof labels>) select.add(new Option(labels[key],key))
+  for (const key of configuration.purposes as Purpose[]) select.add(new Option(labels[key],key))
   document.querySelector<HTMLElement>('#test-panel')!.hidden=false
   status.textContent = 'LINEでログインしました。'
   if (configuration.customer && configuration.recruitment) {
     const picker=document.querySelector<HTMLElement>('#liff-purpose')!
     picker.hidden=false
-    picker.querySelector<HTMLButtonElement>('[data-use=customer]')!.onclick=()=>choosePurpose(openCustomer)
-    picker.querySelector<HTMLButtonElement>('[data-use=recruitment]')!.onclick=()=>choosePurpose(openInterviews)
-    if(query.get('use')==='recruitment')await choosePurpose(openInterviews)
-    if(query.get('use')==='customer')await choosePurpose(openCustomer)
+    picker.querySelector<HTMLButtonElement>('[data-use=customer]')!.onclick=()=>openPurpose('customer')
+    picker.querySelector<HTMLButtonElement>('[data-use=recruitment]')!.onclick=()=>openPurpose('recruitment')
+    const use=redirect.searchParams.get('use')
+    if(use==='recruitment'||use==='customer')await openPurpose(use)
   } else {
-    await choosePurpose(configuration.recruitment?openInterviews:openCustomer)
+    await openPurpose(configuration.recruitment?'recruitment':'customer')
   }
   form.hidden = false
   form.onsubmit = async event => {
@@ -70,7 +113,7 @@ async function prepare() {
   }
 }
 
-async function choosePurpose(open:()=>Promise<void>) {
+async function choosePurpose(open:()=>Promise<void>,loginAgain:()=>void) {
   const picker=document.querySelector<HTMLElement>('#liff-purpose')!
   for(const button of picker.querySelectorAll('button')) button.disabled=true
   try {
@@ -79,7 +122,8 @@ async function choosePurpose(open:()=>Promise<void>) {
     document.querySelector<HTMLHeadingElement>('#heading')!.hidden=true
     status.hidden=false
   } catch (error) {
-    status.textContent=error instanceof Error?error.message:'画面を開けませんでした。'
+    if(error instanceof Error&&'status' in error&&error.status===401)loginAgain()
+    else status.textContent=error instanceof Error?error.message:'画面を開けませんでした。'
   } finally {
     for(const button of picker.querySelectorAll('button')) button.disabled=false
   }
@@ -153,7 +197,7 @@ async function accountRequest(path:string,method='GET',body?:unknown) {
   const response=await fetch('/api/v1/customer'+path,{method,headers:body?{'Content-Type':'application/json'}:{},
     body:body?JSON.stringify(body):undefined})
   const envelope=await response.json()
-  if(!response.ok) throw new Error(envelope.message)
+  if(!response.ok) throw Object.assign(new Error(envelope.message),{status:response.status})
   return envelope
 }
 function item<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string) {
