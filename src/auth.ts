@@ -7,7 +7,7 @@ import {
   missing, newId, opaque, scope, seal, slug, token, tx, unauthenticated, unseal, uuid,
 } from './core.js'
 
-const sessionHours = 8
+const sessionHours = {staff:8,platform:48} as const
 const factor = z.string().regex(/^\d{6}$/)
 export const password = z.string().min(12).max(128)
 const loginPassword = z.string().min(1).max(128)
@@ -66,7 +66,7 @@ export async function gate(pool: pg.Pool, cfg: Config, key: string, limit: numbe
 type LoginMode = 'staff'|'master'|'platform'
 
 export function sessionCookie(cfg: Config, value = '', kind: 'staff'|'platform' = 'staff') {
-  const duration = value ? sessionHours * 3600 : 0
+  const duration = value ? sessionHours[kind] * 3600 : 0
   return `night_${kind==='platform'?'platform':'session'}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${duration}` +
     (cfg.origin.startsWith('https:') ? '; Secure' : '')
 }
@@ -94,8 +94,8 @@ export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: stri
     const raw = token()
     await db.query('UPDATE staff SET last_totp_step=$2 WHERE id=$1', [staff.id, step])
     await db.query(`INSERT INTO staff_session(token_hash,tenant_id,staff_id,expires_at,session_kind)
-      VALUES ($1,$2,$3,now()+interval '8 hours',$4)`,
-      [digest(raw),staff.tenant_id,staff.id,kind])
+      VALUES ($1,$2,$3,now()+make_interval(hours => $5),$4)`,
+      [digest(raw),staff.tenant_id,staff.id,kind,sessionHours[kind]])
     await db.query('SELECT set_config(\'night.all_stores\', \'yes\', true)')
     await audit(db,staff.tenant_id,null,staff.id,kind==='platform'?'platform.login':'staff.login',staff.id)
     return staff.tenant_id + '.' + raw

@@ -51,7 +51,8 @@ async function request(path, { method='GET', data, cookie, headers={} } = {}) {
       ...(cookie?{Cookie:cookie}:{}),...headers },
     body:data===undefined?undefined:JSON.stringify(data),
   })
-  return {status:response.status,data:await response.json(),cookie:response.headers.get('set-cookie')?.split(';')[0]}
+  const setCookie=response.headers.get('set-cookie')
+  return {status:response.status,data:await response.json(),cookie:setCookie?.split(';')[0],setCookie}
 }
 
 function expect(result, status) {
@@ -1597,6 +1598,15 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const platform=await post('/auth/platform/login',null,loginData)
   expect(platform,200)
   assert.match(platform.cookie,/^night_platform=/)
+  assert.match(platform.setCookie,/Max-Age=172800(?:;|$)/)
+  const [platformTenant,sessionToken]=platform.cookie.slice('night_platform='.length).split('.')
+  await tx(owner,async db=>{
+    await scope(db,platformTenant)
+    const {rows:[row]}=await db.query(`SELECT extract(epoch FROM expires_at-now())::int AS seconds
+      FROM staff_session WHERE token_hash=$1`,[digest(sessionToken)])
+    assert.ok(row.seconds>172790&&row.seconds<=172800)
+  })
+  expect(await post('/auth/platform/login',null,loginData),401)
   const {actor:supervisor}=expect(await request('/platform/session',{cookie:platform.cookie}),200)
   assert.equal(supervisor.display_name,'北村さん')
   assert.equal(supervisor.organization,'リルコーポレーション')
@@ -1724,8 +1734,11 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await request('/session',{cookie:admin}),401)
   const finalLogin=await post('/auth/master/login',null,candidateLogin)
   expect(finalLogin,200)
+  assert.match(finalLogin.setCookie,/Max-Age=28800(?:;|$)/)
   expect(await request('/stores/'+storeId+'/scenarios',{cookie:finalLogin.cookie}),200)
-  expect(await post('/platform/logout',platform.cookie,{}),200)
+  const signOut=await post('/platform/logout',platform.cookie,{})
+  expect(signOut,200)
+  assert.match(signOut.setCookie,/Max-Age=0(?:;|$)/)
   expect(await scoped(alpha.tenant.id,'/session'),401)
   expect(await scoped(gamma.tenant.id,'/session'),401)
   await tx(owner,async db=>{
