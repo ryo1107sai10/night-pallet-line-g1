@@ -3,13 +3,14 @@ import type pg from 'pg'
 import { z } from 'zod'
 import { audit, configFromEnvironment, email, newId, poolFor, scope, slug, text, tx, type DB } from './core.js'
 import { createInvite } from './auth.js'
+import { prepareSupervisorHandoff } from './supervisor-handoff.js'
 
 export async function migrate(pool: pg.Pool, role: string) {
   if (!/^[a-z][a-z0-9_]{0,61}$/.test(role)) throw new Error('Invalid application role.')
   const versions = ['001_g1','002_scenarios','003_operations','004_interviews','005_interview_hours',
     '006_interview_availability','007_store_features','008_forms_sources','009_campaigns','010_contact_menus','011_inbox',
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
-    '020_tour_revisions']
+    '020_tour_revisions','021_supervisor_handoff']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -26,6 +27,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     await db.query(`GRANT SELECT ON night.tenant_route,night.tenant_master,night.platform_master TO ${role}`)
     await db.query(`GRANT UPDATE (staff_id,pending_staff_id) ON night.tenant_master TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.tour_revision TO ${role}`)
+    await db.query(`GRANT SELECT,DELETE ON night.supervisor_handoff TO ${role}`)
     await db.query(`GRANT SELECT,UPDATE ON night.tenant TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.scenario TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.scenario_version TO ${role}`)
@@ -139,6 +141,10 @@ if (import.meta.main) {
         .parse({agency,slug:supervisor,name:organization,displayName,email:recipient})
       const invite=await inviteSupervisor(migrationPool,configFromEnvironment(),data)
       console.log(JSON.stringify(invite,null,2))
+    } else if (tenant==='--supervisor-handoff') {
+      const data=z.strictObject({tenant:slug,address:email,nextSlug:slug.optional()}).parse({tenant:name,address,nextSlug:billing})
+      const result=await prepareSupervisorHandoff(migrationPool,configFromEnvironment(),data)
+      console.log(JSON.stringify(result,null,2))
     } else if (tenant==='--master') {
       await designateMaster(migrationPool,slug.parse(name),email.parse(address))
       console.log('マスターアカウントを指定しました。')

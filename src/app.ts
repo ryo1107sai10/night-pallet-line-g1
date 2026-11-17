@@ -1,5 +1,6 @@
 import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
+import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
 import { checkAgencyAccess } from './agency-access.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
@@ -152,6 +153,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       }
     })
   }
+  app.get(supervisorHandoffPath,(_req,res)=>{
+    res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/supervisor-handoff.html'))
+  })
   app.get('/platform/',async(req,res)=>{
     res.set('X-Robots-Tag','noindex, nofollow')
     const signedIn=await tx(pool,db=>authenticate(db,platformCredential(req),'platform')).then(()=>true,error=>{
@@ -176,7 +180,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.sendFile(here('../public/interview/guest.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','supervisor-handoff.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -248,6 +252,14 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       await logout(db,session)
     })
     res.set('Set-Cookie',sessionCookie(cfg,'','platform')).json({signed_out:true})
+  })
+  api.post('/platform/handoff/setup',async(req,res)=>{
+    const {handoff}=handoffSetup.parse(req.body)
+    res.json(await readSupervisorHandoff(pool,cfg,handoff,address(req)))
+  })
+  api.post('/platform/handoff/complete',async(req,res)=>{
+    const result=await completeSupervisorHandoff(pool,cfg,handoffCompletion.parse(req.body),address(req))
+    res.set('Set-Cookie',sessionCookie(cfg,'','platform')).json(result)
   })
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
   api.get('/liff/:connection',async (req,res)=>{

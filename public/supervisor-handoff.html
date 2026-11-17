@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>監督アカウントの引き継ぎ | Night PRO LINE</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/supervisor-handoff.mjs"></script>
+</head>
+<body>
+  <header><div class="header-inner"><span class="brand">Night <strong>PRO LINE</strong></span></div></header>
+  <main>
+    <section class="auth panel">
+      <h1>監督アカウントの引き継ぎ</h1>
+      <p id="notice" role="status" aria-live="polite">引き継ぎリンクを確認しています…</p>
+      <div id="setup" hidden>
+        <p id="account-info"></p>
+        <h2>1. スマホに新しい認証を登録</h2>
+        <p>北村さんのスマホの認証アプリで「＋」を押し、QRコードを読み取ってください。</p>
+        <img id="setup-qr" alt="Night PRO LINEの認証アプリ登録用QRコード" width="224" height="224">
+        <details>
+          <summary>設定キーを手入力する</summary>
+          <p>同じスマホでこの画面を見ている場合は、下のキーをコピーして認証アプリに登録してください。方式は「時間ベース」です。</p>
+          <label>認証アプリの設定キー<input id="setup-key" readonly></label>
+        </details>
+        <form id="credentials">
+          <h2>2. 新しいパスワードを設定</h2>
+          <label>新しいパスワード<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+          <label>新しいパスワード（確認）<input name="confirmation" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+          <label>新しい認証アプリの6桁のコード<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required></label>
+          <p>設定が完了すると、以前のパスワード・認証キー・ログインは無効になります。</p>
+          <button type="submit">引き継ぎを完了する</button>
+        </form>
+      </div>
+      <a class="studio-link" href="/platform/" id="login-link" hidden>監督画面のログインへ</a>
+    </section>
+  </main>
+</body>
+</html>

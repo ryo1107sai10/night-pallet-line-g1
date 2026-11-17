@@ -10,6 +10,7 @@ import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
 import { bootstrap, designateMaster, inviteSupervisor, migrate } from '../dist/setup.js'
+import { prepareSupervisorHandoff } from '../dist/supervisor-handoff.js'
 import { LineAPI } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
@@ -1736,7 +1737,41 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(finalLogin,200)
   assert.match(finalLogin.setCookie,/Max-Age=28800(?:;|$)/)
   expect(await request('/stores/'+storeId+'/scenarios',{cookie:finalLogin.cookie}),200)
-  const signOut=await post('/platform/logout',platform.cookie,{})
+  const secondSession=await post('/auth/platform/login',null,{...loginData,code:code(invite.setup_key,1)})
+  expect(secondSession,200)
+  await assert.rejects(prepareSupervisorHandoff(pool,cfg,{tenant:creator,address:email}),{code:'42501'})
+  await assert.rejects(prepareSupervisorHandoff(owner,cfg,{tenant:creator,address:email,nextSlug:'alpha'}),{code:'23505'})
+  const issued=await prepareSupervisorHandoff(owner,cfg,{tenant:creator,address:email,nextSlug:'rel'})
+  assert.equal(issued.login_id,'rel')
+  const setupPath='/platform/handoff/setup',completionPath='/platform/handoff/complete'
+  const handoff=new URL(issued.url).hash.slice(1)
+  assert.equal((await send('/platform/handoff/')).status,200)
+  const enrollment=expect(await post(setupPath,null,{handoff}),200)
+  assert.equal(enrollment.login_id,'rel')
+  assert.equal(enrollment.email,email)
+  assert.notEqual(enrollment.setup_key,invite.setup_key)
+  assert.match(enrollment.qr,/^data:image\/png;base64,/)
+  expect(await request('/platform/session',{cookie:platform.cookie}),200)
+  expect(await request('/platform/session',{cookie:secondSession.cookie}),200)
+  expect(await post('/auth/platform/login',null,{...loginData,code:code(invite.setup_key,1)}),401)
+  const newPassword='New password chosen in this test'
+  const enrollCode=code(enrollment.setup_key,-1)
+  expect(await post(completionPath,null,{handoff,password:pass,code:enrollCode}),400)
+  expect(await request('/platform/session',{cookie:platform.cookie}),200)
+  const completion=await post(completionPath,platform.cookie,{handoff,password:newPassword,code:enrollCode})
+  expect(completion,200)
+  assert.match(completion.setCookie,/Max-Age=0(?:;|$)/)
+  expect(await post(setupPath,null,{handoff}),400)
+  expect(await post(completionPath,null,{handoff,password:newPassword,code:enrollCode}),400)
+  expect(await request('/platform/session',{cookie:platform.cookie}),401)
+  expect(await request('/platform/session',{cookie:secondSession.cookie}),401)
+  expect(await request('/session',{cookie:finalLogin.cookie}),200)
+  expect(await post('/auth/platform/login',null,{...loginData,tenant:'rel',code:code(enrollment.setup_key)}),401)
+  const newLogin={tenant:'rel',email,password:newPassword,code:code(enrollment.setup_key)}
+  const successorSession=await post('/auth/platform/login',null,newLogin)
+  expect(successorSession,200)
+  expect(await request('/platform/session',{cookie:successorSession.cookie}),200)
+  const signOut=await post('/platform/logout',successorSession.cookie,{})
   expect(signOut,200)
   assert.match(signOut.setCookie,/Max-Age=0(?:;|$)/)
   expect(await scoped(alpha.tenant.id,'/session'),401)

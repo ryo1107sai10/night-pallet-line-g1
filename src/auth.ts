@@ -25,27 +25,31 @@ function derive(pass: string, salt: string) {
   })
 }
 
-async function hashPassword(pass: string) {
+export async function hashPassword(pass: string) {
   const salt = token()
   return salt + ':' + (await derive(pass, salt)).toString('hex')
 }
 
-async function verifyPassword(pass: string, hash?: string | null) {
+export async function verifyPassword(pass: string, hash?: string | null) {
   const [salt, hex] = hash?.split(':') ?? ['unregistered-account', '00'.repeat(64)]
   const actual = await derive(pass, salt)
   return timingSafeEqual(actual, Buffer.from(hex, 'hex')) && !!hash
 }
 
-function otp(secret: string, label = '') {
+export function otp(secret: string, label = '') {
   return new TOTP({ issuer: 'Night PRO LINE', label, secret: Secret.fromBase32(secret) })
+}
+
+export function factorStep(secret:string,value:string) {
+  const now = Date.now()
+  const delta = otp(secret).validate({ token: value, timestamp: now, window: 1 })
+  return delta===null ? null : Math.floor(now / 30000) + delta
 }
 
 function consumeFactor(cfg: Config, staff: StaffRow, value: string) {
   const secret = unseal(cfg, 'totp:' + staff.id, staff.totp_secret)
-  const now = Date.now()
-  const delta = otp(secret).validate({ token: value, timestamp: now, window: 1 })
-  const step = Math.floor(now / 30000) + (delta ?? 0)
-  return delta !== null && step > Number(staff.last_totp_step) ? step : null
+  const step=factorStep(secret,value)
+  return step!==null&&step>Number(staff.last_totp_step)?step:null
 }
 
 async function rate(db: DB, key: string, limit: number) {
