@@ -1161,8 +1161,9 @@ test('ログイン不要の面談は対面のみ、予約時もGoogleの重複�
   }finally{fakeBusy=[]}
 })
 
-test('LINEモジュールの許可を開始した店舗に戻し、署名付き受信から端末へのテスト送信まで行える',async()=>{
-  const store=expect(await post('/stores',admin,storeData('かんたん連携店舗'),idempotency()),201).id
+async function verifySupervisorModuleLink(tenantRequest,store,supervisorCookie){
+  const readStore=(path)=>tenantRequest(path)
+  const writeStore=(path,data,method='POST')=>tenantRequest(path,method,data)
   const basePath='/stores/'+store
   const start=basePath+'/line-module'
   const remoteWebhook='/api/v1/webhooks/line-module'
@@ -1175,13 +1176,13 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     webhookEventId:randomUUID(),type:'message',mode,timestamp:Date.now(),
     source:{type:'user',userId:moduleUser},message:{id:randomUUID(),type:'text',text:content},
   })
-  assert.equal(expect(await request(start,{cookie:admin}),200).configured,false)
-  expect(await post(start,admin,{purpose:'recruitment'}),409)
+  assert.equal(expect(await readStore(start),200).configured,false)
+  expect(await writeStore(start,{purpose:'recruitment'}),409)
   cfg.lineModule=moduleConfig
   try {
-    assert.equal(expect(await request(start,{cookie:admin}),200).configured,true)
-    expect(await post(start,null,{purpose:'recruitment'}),401)
-    const result=expect(await post(start,admin,{purpose:'recruitment'}),200)
+    assert.equal(expect(await readStore(start),200).configured,true)
+    expect(await tenantRequest(start,'POST',{purpose:'recruitment'},null),401)
+    const result=expect(await writeStore(start,{purpose:'recruitment'}),200)
     const authURL=new URL(result.url)
     assert.equal(authURL.origin+authURL.pathname,'https://manager.line.biz/module/auth/v1/authorize')
     const params=authURL.searchParams
@@ -1192,24 +1193,24 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     assert.ok(!result.url.includes(moduleConfig.secret))
     const data={state:params.get('state'),code:'module-test-code'}
     moduleChallenges.set(data.code,params.get('code_challenge'))
-    expect(await post(start+'/complete',null,data),401)
-    expect(await post('/stores/'+storeId+'/line-module/complete',admin,data),409)
-    expect(await post(start+'/complete',admin,{...data,state:data.state.slice(0,32)+'e'.repeat(64)}),409)
+    expect(await tenantRequest(start+'/complete','POST',data,null),401)
+    expect(await writeStore('/stores/'+storeId+'/line-module/complete',data),409)
+    expect(await writeStore(start+'/complete',{...data,state:data.state.slice(0,32)+'e'.repeat(64)}),409)
     assert.equal(exchangedCode,undefined)
-    const landing=await send('/line-module/return')
+    const landing=await send('/line-module/return',{headers:{Cookie:supervisorCookie}})
     assert.equal(landing.status,200)
     assert.match(await landing.text(),/公式LINEの連携/)
 
     botInfoUnavailable=true
-    expect(await post(start+'/complete',admin,data),502)
+    expect(await writeStore(start+'/complete',data),502)
     assert.equal(exchangedCode,data.code)
-    assert.deepEqual(expect(await request(basePath+'/connections',{cookie:admin}),200),[])
+    assert.deepEqual(expect(await readStore(basePath+'/connections'),200),[])
     botInfoUnavailable=false
-    const done=expect(await post(start+'/complete',admin,{...data,code:'exchange-must-not-repeat'}),200)
+    const done=expect(await writeStore(start+'/complete',{...data,code:'exchange-must-not-repeat'}),200)
     assert.equal(exchangedCode,data.code)
-    assert.deepEqual(expect(await post(start+'/complete',admin,data),200),done)
+    assert.deepEqual(expect(await writeStore(start+'/complete',data),200),done)
     const path=basePath+'/connections/'+done.id
-    const summary=async()=>expect(await request(basePath+'/connections',{cookie:admin}),200)[0]
+    const summary=async()=>expect(await readStore(basePath+'/connections'),200)[0]
     const linked=await summary()
     assert.equal(linked.module_status,'attached')
     assert.equal(linked.label,'かんたん連携テスト')
@@ -1218,7 +1219,7 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     assert.equal(linked.status,'pending')
     assert.ok(!JSON.stringify(linked).includes(moduleConfig.secret))
     assert.ok(!JSON.stringify(linked).includes(moduleToken))
-    assert.ok(!expect(await request('/stores/'+storeId+'/connections',{cookie:admin}),200).find(c=>c.id===done.id))
+    assert.ok(!expect(await readStore('/stores/'+storeId+'/connections'),200).find(c=>c.id===done.id))
     expect(await request('/liff/'+done.id),409)
     assert.equal((await moduleWeb(moduleBot,[])).status,200)
     assert.equal((await moduleWeb(moduleBot,[message('偽の受信')],channelSecret)).status,401)
@@ -1227,7 +1228,7 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     assert.equal((await moduleWeb(moduleBot,[message('待機中','standby')])).status,200)
     assert.equal((await summary()).module_status,'standby')
 
-    const tester=expect(await post(path+'/tests',admin,{purpose:'recruitment'},idempotency()),201)
+    const tester=expect(await writeStore(path+'/tests',{purpose:'recruitment'}),201)
     const verify=message('接続テスト '+tester.code)
     assert.equal((await moduleWeb(moduleBot,[verify])).status,200)
     assert.equal((await moduleWeb(moduleBot,[verify])).status,200)
@@ -1235,21 +1236,21 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     const ready=await summary()
     assert.equal(ready.module_status,'active')
     assert.equal(ready.checks.receive_verified,true)
-    expect(await post(path+'/module-delivery',admin,{revision:ready.revision}),409)
-    expect(await post(path+'/tests/'+tester.id+'/send',admin,{},idempotency()),202)
+    expect(await writeStore(path+'/module-delivery',{revision:ready.revision}),409)
+    expect(await writeStore(path+'/tests/'+tester.id+'/send',{}),202)
     await workOnce(pool,cfg,line,google)
     const sent=await summary()
     assert.equal(sent.checks.send_accepted,true)
     assert.equal(modulePushes.length,1)
-    const confirmed=expect(await post(path+'/module-delivery',admin,{revision:sent.revision}),200)
+    const confirmed=expect(await writeStore(path+'/module-delivery',{revision:sent.revision}),200)
     assert.equal(confirmed.status,'connected')
-    const overview=async()=>expect(await request('/line-onboarding',{cookie:admin}),200).find(item=>item.id===store)
+    const overview=async()=>expect(await readStore('/line-onboarding'),200).find(item=>item.id===store)
     assert.equal((await overview()).stage,'verified')
     const setup=basePath+'/line-onboarding'
-    const ask=expect(await patch(setup,admin,{action:'set-mode',mode:'invite',revision:0}),200)
-    const guide=expect(await patch(setup,admin,{action:'issue-guide',revision:ask.revision}),200)
+    const ask=expect(await writeStore(setup,{action:'set-mode',mode:'invite',revision:0},'PATCH'),200)
+    const guide=expect(await writeStore(setup,{action:'issue-guide',revision:ask.revision},'PATCH'),200)
     const guideToken=new URL(guide.guide.url).hash.slice(1)
-    expect(await patch(setup,admin,{action:'confirm-access',connection:done.id,revision:guide.revision}),200)
+    expect(await writeStore(setup,{action:'confirm-access',connection:done.id,revision:guide.revision},'PATCH'),200)
     const guideStatus=async()=>expect(await post('/line-onboarding/guide',null,{token:guideToken}),200).status
     assert.equal(await guideStatus(),'verified')
     assert.equal((await moduleWeb(moduleBot,[{
@@ -1264,7 +1265,7 @@ test('LINEモジュールの許可を開始した店舗に戻し、署名付き�
     delete cfg.lineModule
     botInfoUnavailable=false
   }
-})
+}
 
 test('法人マスターだけが店舗別のLINE初期設定を管理し、店舗は案内リンクでLINEの招待を渡せる',async()=>{
   const name='LINE初期設定テスト店'
@@ -1581,7 +1582,7 @@ test('接続確認中の採用通知は検収済みのテスト利用者への�
   assert.ok(!pushesLog.some(m=>m.messages[0].text.includes('検収期限切れの通知')))
 })
 
-test('北村さんはエールだけを管理し、エールの担当者のみ担当店舗で操作できる',async()=>{
+test('北村さんはエールだけを管理し、エールの担当者のみ担当店舗で操作できる',async t=>{
   const creator='lilu'
   const email='kitamura@example.test'
   const input={slug:creator,name:'リルコーポレーション',displayName:'北村さん',email,agency:'alpha'}
@@ -1678,16 +1679,17 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await post('/stores/'+storeId+'/connections',admin,{},idempotency()),403)
   expect(await request('/agency-master',{cookie:admin}),403)
 
+  const foreignStore=gamma.stores[0].id
   cfg.lineModule=moduleConfig
   try{
-    const config=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/line-module'),200)
-    assert.equal(config.configured,true)
-    const start=expect(await scoped(alpha.tenant.id,'/stores/'+created+'/line-module','POST',{purpose:'recruitment'}),200)
-    const consent=new URL(start.url)
-    assert.equal(consent.origin+consent.pathname,'https://manager.line.biz/module/auth/v1/authorize')
-    assert.match(consent.searchParams.get('state'),/^[a-f0-9]{96}$/)
-    assert.equal(consent.searchParams.get('code_challenge_method'),'S256')
+    expect(await request('/stores/'+foreignStore+'/line-module',{cookie:other}),403)
+    expect(await post('/stores/'+foreignStore+'/line-module',other,{purpose:'recruitment'}),403)
+    expect(await post('/stores/'+foreignStore+'/line-module/complete',other,{state:'a'.repeat(96),code:'unused'}),403)
+    expect(await scoped(gamma.tenant.id,'/stores/'+foreignStore+'/line-module'),404)
   }finally{delete cfg.lineModule}
+  await t.test('北村さんが開始した公式LINE接続を同じ店舗に戻し、送受信と解除まで確認できる',async()=>{
+    await verifySupervisorModuleLink((...args)=>scoped(alpha.tenant.id,...args),created,platform.cookie)
+  })
 
   const managerEmail='step-manager@example.test'
   const next=expect(await scoped(alpha.tenant.id,'/staff/invites','POST',{email:managerEmail,role:'manager',stores:[storeId]}),201)

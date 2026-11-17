@@ -66,7 +66,7 @@ export async function enterPlatformTenant(db:DB,credential:string|undefined,tena
   return {url:platformWorkspace+'/'+tenant+'/master/'}
 }
 
-function requireSupervisor(actor:Actor) {
+export function requireSupervisor(actor:Actor) {
   if(!actor.platform)throw forbidden()
 }
 

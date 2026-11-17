@@ -631,7 +631,7 @@ function onboardingLink(label,store,anchor) {
 
 function revealLineAnchor() {
   if (!['#line-setup','#line-register','#line-connection'].includes(location.hash)) return
-  const target = $(location.hash)
+  const target = $(location.hash) ?? (location.hash==='#line-setup' ? $('#line-register') : null)
   if (target instanceof HTMLDetailsElement) target.open = true
   target?.scrollIntoView()
 }
@@ -648,7 +648,7 @@ async function render() {
   const onboardingList = admin ? api('/line-onboarding') : Promise.resolve([])
   const onboardingItem = admin && store ? api(base+'/line-onboarding') : Promise.resolve(null)
   const connectionPromise = manage && store ? api(base+'/connections') : Promise.resolve([])
-  const modulePromise = manage && store ? api(base+'/line-module') : Promise.resolve(null)
+  const modulePromise = session.actor.platform && store ? api(base+'/line-module') : Promise.resolve(null)
   const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
   const masterPromise = session.actor.platform ? api('/agency-master') : Promise.resolve(null)
   const [staff,connections,features,module,onboarding,detail,agencyMaster] = await Promise.all([
@@ -735,11 +735,6 @@ async function render() {
   if (manage && store) {
     const line = panel('LINE接続')
     line.id='supervisor-line'
-    if (!session.actor.platform && (module.configured || !admin)) {
-      const connect = moduleConnect(base,module.configured,store)
-      if (!admin) connect.id = 'line-setup'
-      line.append(connect)
-    }
     if (current) {
       const picker = field('公式アカウント','channel',{
         choices:Object.fromEntries(connections.map(item=>[item.id,item.label])),value:current.id,
@@ -753,7 +748,7 @@ async function render() {
     const registration = details('公式LINEの接続情報を登録',lineRegistration(base))
     registration.id = 'line-register'
     registration.open = location.hash==='#line-register' ||
-      !admin && !module.configured && (!current || location.hash==='#line-setup')
+      !admin && (!current || location.hash==='#line-setup')
     line.append(registration)
     main.append(line)
   }

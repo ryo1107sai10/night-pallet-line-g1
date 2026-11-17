@@ -1,4 +1,4 @@
-import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster } from './platform.js'
+import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { checkAgencyAccess } from './agency-access.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
@@ -709,14 +709,19 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   const channels = '/stores/:store/connections'
   const connection = channels + '/:connection'
   const moduleLink = '/stores/:store/line-module'
-  api.get(moduleLink,inStore(async()=>({configured:moduleConfigured(cfg)})))
-  api.post(moduleLink,inStore((db,actor,req)=>beginModuleLink(db,cfg,actor,idOf(req,'store'),
-    staffCredential(req)!,moduleStart.parse(req.body).purpose)))
+  api.get(moduleLink,inStore(async(_db,actor)=>{
+    requireSupervisor(actor)
+    return {configured:moduleConfigured(cfg)}
+  }))
+  api.post(moduleLink,inStore((db,actor,req)=>{
+    requireSupervisor(actor)
+    return beginModuleLink(db,cfg,actor,idOf(req,'store'),staffCredential(req)!,moduleStart.parse(req.body).purpose)
+  }))
   api.post(moduleLink+'/complete',async(req,res)=>{
     const data=moduleReturn.parse(req.body),store=idOf(req,'store'),session=staffCredential(req)
     const authorized=async(db:DB)=>{
       const actor=await requestActor(db,req)
-      checkAgencyAccess(actor,req)
+      requireSupervisor(actor)
       await storeAccess(db,actor,store,true)
       return actor
     }
