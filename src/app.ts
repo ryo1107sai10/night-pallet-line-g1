@@ -1,4 +1,5 @@
-import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster } from './platform.js'
+import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster } from './platform.js'
+import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { checkAgencyAccess } from './agency-access.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
@@ -159,6 +160,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     })
     res.sendFile(here(signedIn?'../public/platform.html':'../public/staff-login.html'))
   })
+  app.get('/platform/tours/',async(req,res)=>{
+    res.set('X-Robots-Tag','noindex, nofollow')
+    try { await tx(pool,db=>platformPrincipal(db,platformCredential(req))) }
+    catch(error){
+      if(error instanceof Fault && error.status===401){res.redirect(302,'/platform/');return}
+      throw error
+    }
+    res.sendFile(here('../public/tour-editor.html'))
+  })
   app.get(guidePath,(_req,res)=>res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/line-invite.html')))
   app.get(moduleReturnPath,(_req,res)=>res.sendFile(here('../public/line-module-return.html')))
   app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
@@ -167,7 +177,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     res.sendFile(here('../public/interview/guest.html'))
   })
   const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs'])
-  const tourAssets=new Set(['tour.mjs','tour.css'])
+  const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
     if(tourAssets.has(asset)){
@@ -213,6 +223,14 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   }
   api.get('/platform/session',async(req,res)=>{
     res.json(await tx(pool,db=>platformSession(db,platformCredential(req))))
+  })
+  api.get('/platform/tours',async(req,res)=>{
+    res.json(await tx(pool,db=>readTours(db,platformCredential(req))))
+  })
+  api.put('/platform/tours/:tour',async(req,res)=>{
+    const id=tourId.parse(req.params.tour)
+    const input=tourInput.parse(req.body)
+    res.json(await tx(pool,db=>publishTour(db,platformCredential(req),id,input)))
   })
   api.get('/platform/tenants',async(req,res)=>{
     res.json(await tx(pool,db=>platformTenants(db,platformCredential(req))))

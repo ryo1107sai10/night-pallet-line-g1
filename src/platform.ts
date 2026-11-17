@@ -21,6 +21,12 @@ export async function platformSession(db:DB,credential:string|undefined) {
   return {actor:{id:principal.id,email:principal.email,role:'platform',display_name,organization}}
 }
 
+export async function platformPrincipal(db:DB,credential:string|undefined) {
+  const principal=await authenticate(db,credential,'platform')
+  await supervisedAgency(db,principal)
+  return principal
+}
+
 export async function platformTenants(db:DB,credential:string|undefined) {
   const principal=await authenticate(db,credential,'platform')
   const {agency_id}=await supervisedAgency(db,principal)

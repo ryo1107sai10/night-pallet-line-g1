@@ -1641,6 +1641,26 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   assert.doesNotMatch(portalHTML,/id="npl-tour"|id="manage-line"/)
   assert.equal((await send('/static/tour.mjs',{headers:{Cookie:admin}})).status,401)
   assert.equal((await open('/static/tour.mjs')).status,200)
+  assert.equal((await send('/platform/tours/',{headers:{Cookie:admin},redirect:'manual'})).status,302)
+  assert.match(await (await open('/platform/tours/')).text(),/公開前のプレビュー/)
+  const catalog=expect(await request('/platform/tours',{cookie:platform.cookie}),200)
+  const tour=catalog.calendar
+  assert.equal(tour.revision,0)
+  const edit={title:'Googleカレンダーで面談枠を管理',revision:0,
+    steps:tour.steps.map(({id,caption,body})=>({id,caption,body}))}
+  edit.steps[0].body='店舗を選び、面談枠を開きます。'
+  const publish=(data,cookie=platform.cookie)=>request('/platform/tours/calendar',{method:'PUT',cookie,data})
+  expect(await request('/platform/tours',{cookie:admin}),401)
+  expect(await publish(edit,admin),401)
+  expect(await publish({...edit,steps:edit.steps.slice(1)}),400)
+  const result=await Promise.all([publish(edit),publish(edit)])
+  assert.deepEqual(result.map(item=>item.status).sort(),[200,409])
+  const currentTour=expect(await request('/platform/tours',{cookie:platform.cookie}),200).calendar
+  assert.equal(currentTour.revision,1)
+  assert.equal(currentTour.title,edit.title)
+  assert.equal(currentTour.steps[0].body,edit.steps[0].body)
+  assert.equal(currentTour.steps[0].target,tour.steps[0].target)
+  expect(await request('/platform/tours/constructor',{method:'PUT',cookie:platform.cookie,data:edit}),400)
   const oldOperations=await send('/operations/',{headers:{Cookie:admin},redirect:'manual'})
   assert.equal(oldOperations.status,302)
   assert.equal(oldOperations.headers.get('location'),'/master/')
