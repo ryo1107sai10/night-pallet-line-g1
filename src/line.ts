@@ -382,9 +382,11 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
         [sourceParam,c.id,action==='interview_link'?'recruitment':'customer'])
       if (rowCount) sourceId=sourceParam
     }
+    // 兼用OAでは action が用途の振り分けそのものになるため、どちらのリンク postback でも宛先を封緘する（フェーズ4）。
     const recipient=key&&user&&((c.purpose==='customer'&&['follow','refollow'].includes(kind))||
       (c.purpose==='recruitment'&&action==='interview_link')||
-      (c.purpose==='customer'&&action==='customer_link'))
+      (c.purpose==='customer'&&action==='customer_link')||
+      (c.purpose==='shared'&&(action==='interview_link'||action==='customer_link')))
       ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,user) : null
     const eventPurpose=c.purpose==='shared'?'unclassified':c.purpose
     // テスター本人確認のメッセージ方式は、モジュール経路だけでなく全経路で使える（フェーズ3・項目2）。

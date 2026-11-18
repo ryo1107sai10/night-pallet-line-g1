@@ -59,8 +59,12 @@ async function createLinkToken(db: DB, cfg: Config, c: Channel, identity: {
 
 // 発行ガード: postback 経路（フローA）とシナリオ経路（フローD）で共通。
 // 採用専用OA・友だち状態・機能フラグ・停止状態・世代一致をすべて満たす場合のみ true。
-export async function interviewLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string) {
-  if (c.purpose !== 'recruitment' || c.stopped || generation !== c.generation) return false
+// 兼用OAでの発行は postback 経路だけが allowShared=true を渡す（action=interview_link が用途の振り分けになる）。
+// シナリオ経路は従来どおり採用専用OAのみ（フェーズ2で固定した挙動を変えない）。
+export async function interviewLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string,
+  allowShared = false) {
+  const purposeOk = c.purpose === 'recruitment' || (allowShared && c.purpose === 'shared')
+  if (!purposeOk || c.stopped || generation !== c.generation) return false
   const features = await storeFeatures(db, c.store_id)
   if (!features.interviews_enabled || !features.token_interviews_enabled) return false
   const { rows: [rel] } = await db.query<{ following: boolean }>(
