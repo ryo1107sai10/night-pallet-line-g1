@@ -11,6 +11,7 @@ import { ensureRecruitmentCase, type WorkflowSubject } from './forms.js'
 import { recordSource } from './sources.js'
 import { refreshMenu, rememberContact } from './rich-menus.js'
 import { onInterviewReleased, scheduleInterviewNotices, setWaitlist } from './interview-notices.js'
+import { issueManageInterviewLink } from './interview-link.js'
 import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
@@ -33,7 +34,8 @@ export const interviewChange=z.discriminatedUnion('action',[
   z.strictObject({action:z.literal('reschedule'),revision,slot:uuid}),
   z.strictObject({action:z.literal('cancel'),revision}),
 ])
-type Applicant = {tenant_id:string;store_id:string;channel_id:string;applicant_key:string;guest?:true}
+type Applicant = {tenant_id:string;store_id:string;channel_id:string;applicant_key:string;guest?:true;
+  link_token_hash?:string|null}
 export const recruitmentSubject=(a:Applicant):WorkflowSubject=>({...a,purpose:'recruitment',subject:a.applicant_key})
 type Booking = {id:string;slot_id:string;status:'confirmed'|'cancelled'|'completed';revision:number;applicant_name:string;
   starts_at:Date;ends_at:Date;method:'onsite'|'online';instructions:string}
@@ -105,12 +107,13 @@ export async function interviewApplicant(db:DB,credential:string|undefined,write
   const target=await route(db,channelId)
   await scope(db,target.tenant_id,target.store_id)
   if (write) await lockDispatch(db,target.tenant_id)
-  const {rows:[applicant]}=await db.query<Applicant>(`SELECT s.tenant_id,s.store_id,s.channel_id,s.applicant_key
+  const {rows:[applicant]}=await db.query<Applicant>(`SELECT s.tenant_id,s.store_id,s.channel_id,s.applicant_key,s.link_token_hash
     FROM interview_session s JOIN channel c ON c.id=s.channel_id AND (s.audience='guest' OR c.generation=s.generation)
-    WHERE s.token_hash=$1 AND s.channel_id=$2 AND s.audience=$3 AND s.expires_at>now()
-      AND c.purpose<>'customer' AND (s.audience='guest' OR
-        (c.checks->>'login_published'='true' AND c.checks->>'provider_verified'='true'))`,
-    [digest(key),channelId,guestConnection?'guest':'line'])
+    WHERE s.token_hash=$1 AND s.channel_id=$2 AND s.audience=ANY($3) AND s.expires_at>now()
+      AND c.purpose<>'customer' AND (s.audience='guest' OR s.audience='token' OR
+        (c.checks->>'login_published'='true' AND c.checks->>'provider_verified'='true'))
+      AND (s.audience<>'token' OR NOT c.stopped)`,
+    [digest(key),channelId,guestConnection?['guest']:['line','token']])
   if (!applicant) throw invalid()
   return guestConnection?{...applicant,guest:true as const}:applicant
 }
@@ -315,12 +318,19 @@ export async function confirmInterview(db:DB,cfg:Config,a:Applicant,input:z.infe
   const emailBox=guestEmail?seal(cfg,'guest-interview-email:'+id,guestEmail):null
   await db.query(`INSERT INTO interview_booking (id,tenant_id,store_id,channel_id,applicant_key,slot_id,applicant_name,status,guest_email_box)
     VALUES($1,$2,$3,$4,$5,$6,$7,'confirmed',$8)`,[id,a.tenant_id,a.store_id,a.channel_id,a.applicant_key,input.slot,input.name,emailBox])
+  if (a.link_token_hash) {
+    // トークン経路: 予約確定と同一トランザクションでリンクを消費する。
+    await db.query('UPDATE interview_link_token SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL',
+      [a.link_token_hash])
+  }
   if(!a.guest){
     const subject=recruitmentSubject(a)
     await ensureRecruitmentCase(db,subject)
     await refreshMenu(db,subject)
     await setWaitlist(db,subject,null)
-    await scheduleInterviewNotices(db,cfg,subject)
+    // D4: トークン経路では変更・取消用の新しいリンクを発行し、確定通知に同梱する。
+    const manageUrl=a.link_token_hash?await issueManageInterviewLink(db,cfg,subject,id):undefined
+    await scheduleInterviewNotices(db,cfg,subject,manageUrl)
   }
   await queueGoogleSync(db,a.store_id,id)
   await audit(db,a.tenant_id,a.store_id,null,'interview.confirm',id,null,{slot:input.slot})

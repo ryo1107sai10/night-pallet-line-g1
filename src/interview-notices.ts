@@ -37,7 +37,7 @@ export async function setInterviewNotices(db:DB,cfg:Config,identity:WorkflowSubj
   return interviewNotices(db,identity)
 }
 
-export async function scheduleInterviewNotices(db:DB,cfg:Config,identity:WorkflowSubject){
+export async function scheduleInterviewNotices(db:DB,cfg:Config,identity:WorkflowSubject,manageUrl?:string){
   const flags=await storeFeatures(db,identity.store_id)
   if(!flags.reminders_enabled)return
   const {rows:[booking]}=await db.query<{id:string;revision:number;starts_at:Date;timezone:string}>(`
@@ -47,7 +47,8 @@ export async function scheduleInterviewNotices(db:DB,cfg:Config,identity:Workflo
     WHERE b.channel_id=$1 AND b.applicant_key=$2 AND b.status='confirmed' AND s.starts_at>now()`,[identity.channel_id,identity.subject])
   if(!booking)return
   const input={object:booking.id,revision:booking.revision,expiry:booking.starts_at}
-  await queueService(db,cfg,identity,{...input,kind:'interview_confirm',due:new Date()})
+  await queueService(db,cfg,identity,{...input,kind:'interview_confirm',due:new Date(),
+    ...(manageUrl?{body:manageUrl}:{})})
   const civilDate=localPart(+booking.starts_at,booking.timezone).date
   const eve=new Date(Date.parse(civilDate+'T00:00:00Z')-day).toISOString().slice(0,10)
   const due=localInstant(eve+'T18:00',booking.timezone)

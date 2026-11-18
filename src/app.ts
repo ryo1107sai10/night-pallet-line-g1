@@ -45,6 +45,7 @@ import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitli
 import { serviceHistory } from './service-delivery.js'
 import { changeThread, classifyThread, handoffInput, changeHandoff, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
 import { hostInput, queueGoogleSync, saveHost } from './interview-hosts.js'
+import { redeemInterviewLink } from './interview-link.js'
 import { workflowChecks } from './workflow-checks.js'
 
 
@@ -118,7 +119,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     workspace.use(path,staffPage,express.static(here('../public/'+section),{index:false,redirect:false}))
   }
   workspace.get('/interview/staff.html',staffPage,(_req,res)=>res.sendFile(here('../public/interview/staff.html')))
-  for (const page of ['google-return.html','guest.html']) {
+  for (const page of ['google-return.html','guest.html','token.html']) {
     app.get('/interview/'+page,(_req,res)=>res.sendFile(here('../public/interview/'+page)))
   }
   const interviewAssets=express.static(here('../public/interview'),{index:false,redirect:false})
@@ -179,6 +180,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.get('/book/:connection',(req,res)=>{
     idOf(req,'connection')
     res.sendFile(here('../public/interview/guest.html'))
+  })
+  app.get('/reserve/:connection',(req,res)=>{
+    idOf(req,'connection')
+    res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/interview/token.html'))
   })
   const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','supervisor-handoff.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
@@ -343,6 +348,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.patch('/interview/bookings/:booking',async(req,res)=>{
     const input=interviewChange.parse(req.body)
     res.json(await tx(pool,async db=>updateInterview(db,cfg,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input,google)))
+  })
+  api.post('/interview-link/:connection/redeem',async(req,res)=>{
+    const connection=idOf(req,'connection')
+    await gate(pool,cfg,'interview-link-redeem:'+connection+':'+address(req),60)
+    const cookie=await redeemInterviewLink(pool,cfg,connection,req.body)
+    res.set('Set-Cookie',cookie).json({signed_in:true})
   })
   const guestPath='/guest-interview/:connection'
   const guestApplicant=(db:DB,req:Request,write=false)=>{
