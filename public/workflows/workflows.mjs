@@ -143,9 +143,8 @@ function formEditor(root,data,path,refresh,use){
     })
     editor.replaceChildren(node)
     if(existing?.published){
-      const channel=data.channels.find(channel=>channel.id===choice.value)
-      const url='https://liff.line.me/'+channel.liff_id+'?'+new URLSearchParams({form:existing.id,use})
-      editor.prepend(button('公開フォームのリンクをコピー',async()=>{await navigator.clipboard.writeText(url);notice('リンクをコピーしました。')}))
+      editor.prepend(el('p','公開中のフォームは、LINEトークで送られる専用URL（来店予約・設定／面談予約のリンク）から回答できます。'+
+        '送信先ごとに発行されるURLのため、ここに固定リンクは表示しません。','muted'))
     }
   }
   const pickForms=()=>{

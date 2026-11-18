@@ -201,7 +201,7 @@ export async function designateRegistrationMaster(db: DB, principal: Actor, tena
 
 const autoCheckKeys = ['token_verified', 'webhook_verified', 'tester_verified', 'receive_verified', 'send_accepted'] as const
 const manualCheckKeys = ['ownership_verified', 'provider_verified', 'redelivery_enabled', 'auto_reply_checked',
-  'non_developer', 'delivery_confirmed', 'login_published'] as const
+  'non_developer', 'delivery_confirmed'] as const
 
 type SetupRow = {
   profile_confirmed_at: Date | null; profile_digest: string | null;
@@ -228,7 +228,7 @@ export async function storeSetupState(db: DB, cfg: Config, store: string) {
     const pick = (keys: readonly string[]) => Object.fromEntries(keys.map(key =>
       [key, !!(item.checks as Record<string, boolean | undefined>)[key]]))
     connections.push({ id: item.id, label: item.label, purpose: item.purpose, status: item.status,
-      has_liff: !!item.liff_id, webhook_url: item.webhook_url,
+      webhook_url: item.webhook_url,
       auto: pick(autoCheckKeys), manual: pick(manualCheckKeys) })
   }
   const { rows: [onboarding] } = await db.query<{ mode: string }>(

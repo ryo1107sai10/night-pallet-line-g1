@@ -1,22 +1,20 @@
 import type pg from 'pg'
 import { z } from 'zod'
 import {
-  audit, conflict, digest, email, Fault, keyed, missing, newId, once, opaque, revision, route, scope, seal, text, token, tx, unseal, uuid,
+  audit, conflict, digest, email, Fault, keyed, missing, newId, once, opaque, revision, route, scope, seal, text, token, unseal, uuid,
   type Actor, type Config, type DB,
 } from './core.js'
-import { channel, type LineAPI } from './line.js'
+import { channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
 import { ensureRecruitmentCase, type WorkflowSubject } from './forms.js'
-import { recordSource } from './sources.js'
-import { refreshMenu, rememberContact } from './rich-menus.js'
+import { refreshMenu } from './rich-menus.js'
 import { onInterviewReleased, scheduleInterviewNotices, setWaitlist } from './interview-notices.js'
 import { issueManageInterviewLink } from './interview-link.js'
 import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
 
-const loginSchema=z.strictObject({connection:uuid,id_token:z.string().min(20).max(12000),source:uuid.optional()})
 export const interviewSlotInput=z.strictObject({
   channel:uuid,starts_at:z.iso.datetime({offset:true}),ends_at:z.iso.datetime({offset:true}),
   method:z.literal('onsite').default('onsite'),instructions:text(800),published:z.boolean(),
@@ -53,36 +51,6 @@ async function recruitmentConnection(db:DB,id:string) {
   return c
 }
 
-export async function startInterviewSession(pool:pg.Pool,cfg:Config,api:LineAPI,input:unknown) {
-  if (!cfg.external) throw unauthorized()
-  const data=loginSchema.parse(input)
-  const connection=await tx(pool,async db=>{
-    const target=await route(db,data.connection)
-    await scope(db,target.tenant_id,target.store_id)
-    const c=await recruitmentConnection(db,target.id)
-    if (!c.login_id || !c.checks.provider_verified || !c.checks.login_published) throw unauthorized()
-    return {...c,login_id:c.login_id}
-  })
-  const user=await api.verifyID(connection.login_id,data.id_token)
-  const raw=token()
-  await tx(pool,async db=>{
-    await scope(db,connection.tenant_id,connection.store_id)
-    await lockDispatch(db,connection.tenant_id)
-    const c=await recruitmentConnection(db,connection.id)
-    if (c.generation!==connection.generation || !c.checks.provider_verified || !c.checks.login_published) throw unauthorized()
-    const identity=keyed(cfg,'interview:'+c.id+':'+user)
-    const subject=recruitmentSubject({tenant_id:c.tenant_id,store_id:c.store_id,channel_id:c.id,applicant_key:identity})
-    await recordSource(db,subject,data.source)
-    await rememberContact(db,cfg,c,user,subject)
-    await db.query(`INSERT INTO interview_session
-      (token_hash,tenant_id,store_id,channel_id,generation,applicant_key,expires_at)
-      VALUES($1,$2,$3,$4,$5,$6,now()+interval '30 minutes')`,
-      [digest(raw),c.tenant_id,c.store_id,c.id,c.generation,identity])
-    await db.query('DELETE FROM interview_session WHERE channel_id=$1 AND expires_at<=now()',[c.id])
-  })
-  return `night_interview=${connection.id}.${raw}; Path=/api/v1/interview/; HttpOnly; Secure; SameSite=Strict; Max-Age=1800`
-}
-
 export async function startGuestInterviewSession(db:DB,cfg:Config,connection:string) {
   const target=await route(db,connection)
   await scope(db,target.tenant_id,target.store_id)
@@ -110,10 +78,8 @@ export async function interviewApplicant(db:DB,credential:string|undefined,write
   const {rows:[applicant]}=await db.query<Applicant>(`SELECT s.tenant_id,s.store_id,s.channel_id,s.applicant_key,s.link_token_hash
     FROM interview_session s JOIN channel c ON c.id=s.channel_id AND (s.audience='guest' OR c.generation=s.generation)
     WHERE s.token_hash=$1 AND s.channel_id=$2 AND s.audience=ANY($3) AND s.expires_at>now()
-      AND c.purpose<>'customer' AND (s.audience='guest' OR s.audience='token' OR
-        (c.checks->>'login_published'='true' AND c.checks->>'provider_verified'='true'))
-      AND (s.audience<>'token' OR NOT c.stopped)`,
-    [digest(key),channelId,guestConnection?['guest']:['line','token']])
+      AND c.purpose<>'customer' AND (s.audience='guest' OR NOT c.stopped)`,
+    [digest(key),channelId,guestConnection?['guest']:['token']])
   if (!applicant) throw invalid()
   return guestConnection?{...applicant,guest:true as const}:applicant
 }

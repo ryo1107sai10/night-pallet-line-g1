@@ -15,7 +15,7 @@ import { InterviewGoogle} from '../dist/interview-availability.js'
 import { workOnce} from '../dist/jobs.js'
 import { starter, validate, renderMessage} from '../public/studio/engine.mjs'
 
-// LIFF不要化フェーズ4前半の結合試験。
+// フェーズ4前半の結合試験。
 // 作業1-1: 兼用OA（shared）での postback 発行（interview_link / customer_link）。
 // 作業1-2: 顧客リンクのシナリオ差し込み変数 {{customer_link}}（テスト送信＋実配信 automation）。
 // 実PostgreSQL（embedded）＋ HTTP経由、LINE APIは模擬fetchで受ける。
@@ -34,11 +34,12 @@ const userA1 = 'U' + '9'.repeat(32)
 const userA2 = 'U' + 'a'.repeat(32)
 const userA3 = 'U' + 'b'.repeat(32)
 const userSH = 'U' + 'c'.repeat(32)
+const userB1 = 'U' + 'd'.repeat(32)
 const bots = { 'access-token-customer': botC, 'access-token-shared': botS}
 const clients = { 'access-token-customer': '1234567892', 'access-token-shared': '1234567896'}
 const consoleChecks = {
 ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
-login_published: true, non_developer: true, delivery_confirmed: true,
+non_developer: true, delivery_confirmed: true,
 token_verified: true, webhook_verified: true,
 }
 const dummyCustomer = 'https://example.test/account/sample'
@@ -92,15 +93,33 @@ const customerIdOf = async (connection, who) =>
 (await read('SELECT id FROM customer WHERE channel_id=$1 AND user_key=$2',
 [connection, userKey(cfg, { id: connection}, who)])).rows[0]?.id
 
-// テスターを作成→LIFF検証→友だち追加まで済ませ、シナリオのテスト送信先として使える状態にする。
+// リンクトークンを発行せずに顧客セッションを用意する（フラグOFF検証用）。
+// 顧客レコードは follow の処理で作られている前提で、customer_session を直接発行する。
+async function directCustomerSession(conn, who) {
+const cookie = await tx(pool, async db => {
+await scope(db, tenant, storeId)
+const { rows: [c]} = await db.query('SELECT id,tenant_id,store_id,generation FROM channel WHERE id=$1', [conn])
+const { rows: [customer]} = await db.query('SELECT id FROM customer WHERE channel_id=$1 AND user_key=$2',
+[conn, userKey(cfg, { id: conn}, who)])
+const raw = randomBytes(32).toString('base64url')
+await db.query(`INSERT INTO customer_session(token_hash,tenant_id,store_id,channel_id,customer_id,generation,expires_at)
+VALUES($1,$2,$3,$4,$5,$6,now()+interval '2 hours')`,
+[digest(raw), c.tenant_id, c.store_id, c.id, customer.id, c.generation])
+return 'night_customer=' + conn + '.' + raw
+})
+return { status: 200, cookie}
+}
+
+// テスターを作成→メッセージ方式で本人確認→友だち追加まで済ませ、シナリオのテスト送信先として使える状態にする。
 async function prepareTester(conn, who) {
 const prefix = '/stores/' + storeId + '/connections/' + conn
 const invite = expect(await post(prefix + '/tests', admin, { purpose: 'customer'}, idempotency()), 201)
-expect(await post('/auth/line/verify', null, {
-connection: conn, purpose: 'customer', code: invite.code,
-id_token: 'idtoken:' + who, allow_test_message: true,
-}), 200)
-await inbound(conn, conn === customerCh? botC: botS, [eventFor('follow-' + who, 'follow', who)])
+const destination = conn === customerCh? botC: botS
+await inbound(conn, destination, [eventFor('code-' + who, 'message', who, {
+message: { type: 'text', text: '接続テスト ' + invite.code },
+})])
+await inbound(conn, destination, [eventFor('follow-' + who, 'follow', who)])
+await worker()
 await worker()
 return invite.id
 }
@@ -201,14 +220,6 @@ case '/v2/bot/info': {
 const tokenValue = options.headers.Authorization?.replace('Bearer ', '')
 return Response.json({ userId: bots[tokenValue]})
 }
-case '/oauth2/v2.1/verify': {
-const idToken = options.body.get('id_token')?? ''
-return Response.json({
-iss: 'https://access.line.me', aud: options.body.get('client_id'),
-sub: idToken.startsWith('idtoken:')? idToken.slice('idtoken:'.length): userS1,
-exp: Date.now() / 1000 + 600,
-})
-}
 case '/v2/bot/message/quota': return Response.json({ type: 'limited', value: 200})
 case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0})
 case '/v2/bot/message/push': {
@@ -242,12 +253,12 @@ management_authority: '検証用', channel_secret: channelSecret, token_type: 'c
 }
 customerCh = expect(await post('/stores/' + storeId + '/connections', admin, {
 ...common, label: '顧客OA', purpose: 'customer',
-messaging_id: '1234567892', login_id: '1234567894', liff_id: '1234567894-test',
+messaging_id: '1234567892',
 access_token: 'access-token-customer',
 }, idempotency()), 201).id
 sharedCh = expect(await post('/stores/' + storeId + '/connections', admin, {
 ...common, label: '兼用OA', purpose: 'shared',
-messaging_id: '1234567896', login_id: '1234567895', liff_id: '1234567895-test',
+messaging_id: '1234567896',
 access_token: 'access-token-shared',
 }, idempotency()), 201).id
 await tx(pool, async db => {
@@ -448,8 +459,8 @@ assert.notEqual(rawA, rawB, '受信者ごとに異なるURLになること')
 test('作業1-2: 実配信でも機能フラグOFFではURLは送られず、トークンも発行されない', async () => {
 await inbound(customerCh, botC, [eventFor('p4-a3-follow', 'follow', userA3)])
 await worker()
-const login = await post('/customer/login', null, { connection: customerCh, id_token: 'idtoken:' + userA3})
-expect(login, 200)
+// この検証では「リンクを発行しないこと」自体が対象なので、セッションはリンクを経由せず用意する。
+const login = await directCustomerSession(customerCh, userA3)
 await consentWith(login.cookie)
 const slot = await makeSlot('自動配信C', 4)
 await bookAndConfirm(login.cookie, slot)
@@ -467,6 +478,41 @@ const notes = await read(
 assert.ok(notes.rows.some(row => row.detail.includes('発行条件')),
 '保留として記録されること: ' + JSON.stringify(notes.rows))
 await setFeatures({ token_customers_enabled: true})
+})
+
+test('作業1-2: 実配信の {{booking_url}} は顧客リンクの実URLに差し替わって届く', async () => {
+const graph = linkScenarioGraph(customerCh, '予約確定＋変更URL案内')
+graph.nodes[0].body = '{{store}}でご予約が確定しました。予約の確認・変更・取消はこちら: {{booking_url}}'
+await publishScenario(graph)
+await inbound(customerCh, botC, [eventFor('p4-b1-follow', 'follow', userB1)])
+await worker()
+await inbound(customerCh, botC, [
+eventFor('p4-b1-pb', 'postback', userB1, { postback: { data: 'action=customer_link'}}),
+])
+await flush(2)
+const linkPush = pushesTo(userB1).find(item => item.text.includes('/account/'))
+assert.ok(linkPush, '同意取得用の顧客リンクが届くこと')
+const redeemed = await post('/customer-link/' + customerCh + '/redeem', null, { token: rawOf(linkPush.text)})
+expect(redeemed, 200)
+await consentWith(redeemed.cookie)
+const slot = await makeSlot('自動配信D', 6)
+await bookAndConfirm(redeemed.cookie, slot)
+await flush(6)
+const delivered = pushesTo(userB1).find(item => item.text.includes('予約の確認・変更・取消はこちら'))
+assert.ok(delivered, 'booking_url を含む実配信が届くこと')
+assert.ok(!delivered.text.includes('link.invalid'), 'プレースホルダは送られないこと')
+assert.ok(!delivered.text.includes('liff.line.me'), 'LIFF URLは送られないこと')
+assert.ok(!delivered.text.includes('{{booking_url}}'), '変数は送られないこと')
+const raw = rawOf(delivered.text)
+assert.ok(raw, '実URLが差し込まれること: ' + delivered.text)
+assert.ok(delivered.text.includes('/account/' + customerCh + '?t=' + raw))
+// 差し替えられたURLは、実際に発行された顧客リンクトークンであること（ハッシュがDBの発行記録と一致）。
+// なお同じ人への再発行で旧トークンは失効する仕様のため、ここでは引換までは行わない
+// （引換・予約表示の確認は顧客リンクの各試験で担保済み）。
+const customerId = await customerIdOf(customerCh, userB1)
+const issued = await read('SELECT token_hash FROM link_token WHERE channel_id=$1 AND subject=$2',
+[customerCh, customerId])
+assert.ok(issued.rows.some(row => row.token_hash === digest(raw)), '発行記録と一致すること')
 })
 
 test('作業1-2: 兼用OAの顧客シナリオ実配信でも専用URLが届く', async () => {

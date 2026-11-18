@@ -86,7 +86,7 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
   }
 }
 
-// LIFFなし面談予約: リッチメニューの postback から予約リンクを発行する。
+// 面談予約リンク: リッチメニューの postback から予約リンクを発行する。
 // 発行条件（友だち状態・機能フラグ・停止状態）は interviewLinkEligible で共通判定する。
 // 兼用OAでも action=interview_link の postback からは発行する（フェーズ4: allowShared=true）。
 async function tryIssueInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,event:{
@@ -98,7 +98,7 @@ async function tryIssueInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnType<type
   await issueInterviewLink(db,cfg,c,user,event.source_id ?? undefined)
 }
 
-// LIFFなし顧客向けリンク: リッチメニューの postback から来店予約・設定用リンクを発行する（フェーズ3・項目3）。
+// 顧客向けリンク: リッチメニューの postback から来店予約・設定用リンクを発行する（フェーズ3・項目3）。
 // 発行条件は customerLinkEligible（友だち状態・機能フラグ・停止状態）で共通判定する。
 // 兼用OAでも action=customer_link の postback からは発行する（フェーズ4: allowShared=true）。
 async function tryIssueCustomerLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,event:{

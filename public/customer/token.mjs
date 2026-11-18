@@ -1,5 +1,5 @@
-// LIFFなし顧客向けページ（固有トークン方式）: URLの t を引換APIで customer_session に
-// 交換してから、LIFF版と同じ来店予約・配信設定・回答フォームのUIを開く。
+// 顧客向けページ（固有トークン方式）: URLの t を引換APIで customer_session に
+// 交換してから、来店予約・配信設定・回答フォームのUIを開く。
 const connection = location.pathname.split('/').filter(Boolean).at(-1)
 const status = document.querySelector('#status')
 const fallback = document.querySelector('#fallback')

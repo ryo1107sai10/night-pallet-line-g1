@@ -26,8 +26,8 @@ const labels:Record<Feature,string> = {
   inbox_enabled:'LINE受信箱',
   interviewers_enabled:'担当者別の面談枠',google_write_enabled:'Googleカレンダーへの面談登録',
   guest_interviews_enabled:'ログイン不要の対面面談予約',
-  token_interviews_enabled:'LINEトークからの面談予約（LIFFなし）',
-  token_customers_enabled:'LINEトークからの来店予約・設定（LIFFなし）',
+  token_interviews_enabled:'LINEトークからの面談予約',
+  token_customers_enabled:'LINEトークからの来店予約・設定',
 }
 const columns = 'revision,'+Object.keys(labels).join(',')
 const firstFeatures:Feature[]=['tags_enabled','visits_enabled','interviews_enabled','google_calendar_enabled']

@@ -14,7 +14,7 @@ import { accept, authenticate, createInvite, disableStaff, gate, login, logout, 
   requireAdmin, sessionCookie, storeAccess, storeList } from './auth.js'
 import {
   channel, channelCredentials, connectionTestEvent, connectionSchema, consoleSchema, createChannel, evidence, issueTester, LineAPI,
-  queueTest, receiveModuleWebhook, receiveWebhook, replaceCredentials, replaceCredentialsSchema, summary, verifyLiff, verifyLiffSchema,
+  queueTest, receiveModuleWebhook, receiveWebhook, replaceCredentials, replaceCredentialsSchema, summary,
 } from './line.js'
 import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, moduleReturnPath,
   moduleStart, rememberModuleBot, requireModule} from './line-module.js'
@@ -22,14 +22,14 @@ import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboardi
   onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
 import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop } from './jobs.js'
-import { customerFields, consentVersion, updateProfile, profileInput, openCustomerSession, authenticateCustomer,
+import { customerFields, consentVersion, updateProfile, profileInput, authenticateCustomer,
   customerSessionCookie, setPreferences, customerById, selfPreferenceInput, emitDelivery } from './customer.js'
 import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBookingChange, ownBookingInput,
   requestBooking, slotInput, bookingChange, staffBooking } from './booking.js'
 import { endScope, locationOf, updateAutomation } from './automation.js'
 import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
   interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
-  guestInterviewCreate, interviewHours, saveInterviewHours, startGuestInterviewSession, startInterviewSession,
+  guestInterviewCreate, interviewHours, saveInterviewHours, startGuestInterviewSession,
   updateInterview, recruitmentSubject } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
   googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
@@ -38,7 +38,7 @@ import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, t
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
 import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
   type WorkflowSubject } from './forms.js'
-import { saveSource, setSourceStatus, sourceInput, sourceQr, sourceReport, sourceReportInput, sourceStatus } from './sources.js'
+import { saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInput, sourceStatus } from './sources.js'
 import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepareCampaign, stopCampaign } from './campaigns.js'
 import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
 import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitlistInput } from './interview-notices.js'
@@ -186,7 +186,6 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   app.get(guidePath,(_req,res)=>res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/line-invite.html')))
   app.get(moduleReturnPath,(_req,res)=>res.sendFile(here('../public/line-module-return.html')))
-  app.get('/liff/:connection',(_req,res)=>res.sendFile(here('../public/liff.html')))
   app.get('/book/:connection',(req,res)=>{
     idOf(req,'connection')
     res.sendFile(here('../public/interview/guest.html'))
@@ -294,32 +293,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     res.set('Set-Cookie',sessionCookie(cfg,'','platform')).json(result)
   })
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
-  api.get('/liff/:connection',async (req,res)=>{
-    await gate(pool,cfg,'liff-config:' + address(req),120)
-    const data = await tx(pool,async db=>{
-      const r = await route(db,idOf(req,'connection'))
-      await scope(db,r.tenant_id,r.store_id)
-      const c = await channel(db,r.id)
-      if (!cfg.external || !c.liff_id || !c.checks.login_published || !c.checks.provider_verified) {
-        throw new Fault(409,'LIFF_NOT_READY','LINE内画面の公開準備中です。')
-      }
-      return { liff_id:c.liff_id,customer:c.purpose!=='recruitment',recruitment:c.purpose!=='customer',purposes:c.purpose==='shared' ? ['customer','recruitment'] : [c.purpose] }
-    })
-    res.json(data)
-  })
-  api.post('/auth/line/verify',async (req,res)=>{
-    if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境で本人確認を行ってください。')
-    await gate(pool,cfg,'liff-verify:' + address(req),50)
-    res.json(await verifyLiff(pool,cfg,line,verifyLiffSchema.parse(req.body)))
-  })
 
   const localCustomerSession = (req:Request) => req.headers.cookie?.split(';').map(value=>value.trim())
     .find(value=>value.startsWith('night_customer='))?.slice('night_customer='.length)
-  api.post('/customer/login',async(req,res)=>{
-    await gate(pool,cfg,'customer-login:'+address(req),60)
-    const value=await openCustomerSession(pool,cfg,line,req.body)
-    res.set('Set-Cookie',customerSessionCookie(cfg,value)).json({signed_in:true})
-  })
   api.get('/customer/account',async(req,res)=>{
     res.json(await tx(pool,async db=>{
       const c=await authenticateCustomer(db,localCustomerSession(req))
@@ -350,7 +326,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const p=ownBookingChange.parse(req.body)
     res.json(await tx(pool,async db=>{
       const c=await authenticateCustomer(db,localCustomerSession(req))
-      return changeBooking(db,null,idOf(req,'booking'),{...p,reason:'LIFFの本人操作'},c)
+      return changeBooking(db,null,idOf(req,'booking'),{...p,reason:'本人の操作'},c)
     }))
   })
   const customerSubject=async(db:DB,req:Request):Promise<WorkflowSubject>=>{
@@ -360,10 +336,6 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
 
   const interviewCredential=(req:Request)=>req.headers.cookie?.split(';').map(value=>value.trim())
     .find(value=>value.startsWith('night_interview='))?.slice('night_interview='.length)
-  api.post('/interview/login',async(req,res)=>{
-    await gate(pool,cfg,'interview-login:'+address(req),60)
-    res.set('Set-Cookie',await startInterviewSession(pool,cfg,line,req.body)).json({signed_in:true})
-  })
   api.get('/interview/calendar',async(req,res)=>{
     const {start}=interviewDates.parse(req.query)
     res.json(await tx(pool,async db=>interviewCalendar(db,await interviewApplicant(db,interviewCredential(req)),google,start)))
@@ -497,8 +469,6 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     saveSource(db,actor,idOf(req,'store'),workPurpose(req),sourceInput.parse(req.body)),201))
   api.patch(workflow+'/sources/:source',workflowStaff((db,actor,req)=>
     setSourceStatus(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'source'),sourceStatus.parse(req.body).active)))
-  api.get(workflow+'/sources/:source/qr',workflowStaff((db,_actor,req)=>
-    sourceQr(db,idOf(req,'store'),workPurpose(req),idOf(req,'source'))))
   api.get(workflow+'/rich-menus',workflowStaff((db,_actor,req)=>listMenus(db,idOf(req,'store'),workPurpose(req))))
   api.put(workflow+'/rich-menus',async(req,res)=>{
     const store=idOf(req,'store'),use=workPurpose(req),data=menuInput.parse(req.body)

@@ -28,7 +28,7 @@ export async function setInterviewNotices(db:DB,cfg:Config,identity:WorkflowSubj
   const result=await db.query(`UPDATE workflow_contact SET notices=$3,notices_changed_at=clock_timestamp()
     WHERE channel_id=$1 AND purpose='recruitment' AND subject=$2`,
     [identity.channel_id,identity.subject,enabled])
-  if(!result.rowCount&&enabled)throw new Fault(409,'REOPEN_LIFF','面談画面を開き直してLINEの本人確認を行ってください。')
+  if(!result.rowCount&&enabled)throw new Fault(409,'REOPEN_LINK','面談画面を開き直して本人確認を行ってください。')
   if(!enabled){
     await interruptService(db,'subject',identity.subject,'応募者が通知を停止',[...allNotices])
     await db.query('DELETE FROM interview_waitlist WHERE channel_id=$1 AND applicant_key=$2',[identity.channel_id,identity.subject])

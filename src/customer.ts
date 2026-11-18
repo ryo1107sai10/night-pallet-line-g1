@@ -1,13 +1,10 @@
-import type pg from 'pg'
 import { z } from 'zod'
-import { digest, Fault, audit, conflict, missing, newId, revision, route, scope, seal, text, token, tx,
+import { digest, Fault, audit, conflict, missing, newId, revision, route, scope, seal, text,
   type Actor, type Config, type DB } from './core.js'
-import { channel, LineAPI, userKey, type Channel } from './line.js'
+import { userKey, type Channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { applyTagRules } from './customer-tags.js'
 import { requireFeature } from './store-features.js'
-import { recordSource } from './sources.js'
-import { rememberContact } from './rich-menus.js'
 
 export const consentVersion = 'customer-line-v1'
 export const customerFields = 'id,channel_id,display_name,memo,assigned_to,verified_20_at,tags,active_chat,service_consent,marketing_consent,all_stop,marketing_stop,last_reply_at,verified_at,revision'
@@ -24,7 +21,6 @@ export type Preferences = z.infer<typeof preferenceInput>
 export const profileInput = z.strictObject({revision,display_name:z.string().trim().max(100),memo:z.string().max(1000),
   assigned_to:z.uuid().nullable(),verified20:z.boolean(),active_chat:z.boolean(),
   tags:z.array(text(80)).max(30).optional(),reason:text(200)})
-export const lineCustomerLogin = z.strictObject({connection:z.uuid(),id_token:z.string().min(20).max(12000),source:z.uuid().optional()})
 export const selfPreferenceInput = z.strictObject({preferences:preferenceInput,version:z.literal(consentVersion),revision})
 const safeSession = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 
@@ -78,7 +74,7 @@ export async function setPreferences(db:DB,c:Customer,p:Preferences,expected:num
     marketing_stop=NOT $3,preference_at=$5,revision=revision+1,updated_at=now() WHERE id=$1 AND revision=$6`,
     [c.id,p.service_consent,p.marketing_consent,p.all_stop,at,expected])
   if (!updated.rowCount) throw conflict()
-  const id=await preferenceEvidence(db,c,p,null,'liff',at,!p.marketing_consent)
+  const id=await preferenceEvidence(db,c,p,null,'link',at,!p.marketing_consent)
   if (p.all_stop || (!p.service_consent && c.service_consent) || (!p.marketing_consent && c.marketing_consent)) {
     await endCustomerRuns(db,c.id,'同意撤回または配信停止')
   }
@@ -124,34 +120,6 @@ export async function updateProfile(db:DB,actor:Actor,id:string,p:z.infer<typeof
 
 export const customerSessionCookie=(cfg:Config,value:string,maxAge=1800)=>`night_customer=${value}; Path=/api/v1/customer/;
   HttpOnly; SameSite=Strict; Max-Age=${maxAge}`.replace(/\s+/g,' ')+(cfg.external?'; Secure':'')
-
-export async function openCustomerSession(pool:pg.Pool,cfg:Config,line:LineAPI,input:unknown) {
-  if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境でLINE本人確認を行ってください。')
-  const p=lineCustomerLogin.parse(input)
-  const c=await tx(pool,async db=>{
-    const r=await route(db,p.connection)
-    await scope(db,r.tenant_id,r.store_id)
-    const found=await channel(db,r.id)
-    if (found.purpose==='recruitment'||!found.login_id||!found.checks.provider_verified||!found.checks.login_published) throw missing()
-    return {...found,login_id:found.login_id}
-  })
-  const user=await line.verifyID(c.login_id,p.id_token)
-  const raw=token()
-  await tx(pool,async db=>{
-    await scope(db,c.tenant_id,c.store_id)
-    await lockDispatch(db,c.tenant_id)
-    const current=await channel(db,c.id)
-    if (current.generation!==c.generation || !current.checks.provider_verified || !current.checks.login_published) throw conflict()
-    const record=await ensureCustomer(db,cfg,c,user,true)
-    const identity={...record,purpose:'customer' as const,subject:record.id}
-    await recordSource(db,identity,p.source)
-    await rememberContact(db,cfg,current,user,identity)
-    await db.query(`INSERT INTO customer_session(token_hash,tenant_id,store_id,channel_id,customer_id,generation,expires_at)
-      VALUES($1,$2,$3,$4,$5,$6,now()+interval '30 minutes')`,[digest(raw),record.tenant_id,record.store_id,c.id,record.id,c.generation])
-    await db.query('DELETE FROM customer_session WHERE expires_at<now() AND channel_id=$1',[c.id])
-  })
-  return c.id+'.'+raw
-}
 
 export async function authenticateCustomer(db:DB,value:string|undefined) {
   const [channelId,raw,extra]=(value??'').split('.')

@@ -14,7 +14,7 @@ import { LineAPI } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
 
-// LIFFなし面談予約（固有トークン方式）フェーズ1の結合試験。
+// 面談予約リンク（固有トークン方式）フェーズ1の結合試験。
 // 実PostgreSQL（embedded）＋ HTTP経由、LINE APIは模擬fetchで受ける。
 const origin = 'https://example.test'
 const cfg = { origin, master: randomBytes(32), external: true, automation: true }
@@ -24,11 +24,10 @@ const user2 = 'U' + '3'.repeat(32)
 const user3 = 'U' + '4'.repeat(32)
 const channelSecret = 'a'.repeat(32)
 const accessToken = 'test-channel-token'
-const loginId = '1234567891'
 const pass = 'Only used in local tests!'
 const consoleChecks = {
   ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
-  login_published: true, non_developer: true, delivery_confirmed: false,
+  non_developer: true, delivery_confirmed: false,
 }
 let pg, owner, pool, server, dir, base, tenant, storeId, connection, admin
 const pushesLog = []
@@ -98,10 +97,6 @@ before(async () => {
         return Response.json({ client_id: '1234567890' })
       case '/v2/bot/info':
         return Response.json({ userId: bot })
-      case '/oauth2/v2.1/verify': {
-        assert.equal(options.body.get('client_id'), loginId)
-        return Response.json({ iss: 'https://access.line.me', sub: user, exp: Date.now() / 1000 + 600, aud: loginId })
-      }
       case '/v2/bot/message/quota': return Response.json({ type: 'limited', value: 200 })
       case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0 })
       case '/v2/bot/message/push': {
@@ -130,7 +125,7 @@ before(async () => {
   }, idempotency()), 201).id
   connection = expect(await post('/stores/' + storeId + '/connections', admin, {
     label: '採用OA', purpose: 'recruitment', owner_name: 'リンク法人', provider_id: 'provider',
-    messaging_id: '1234567890', login_id: loginId, liff_id: loginId + '-test',
+    messaging_id: '1234567890',
     account_type: 'unverified', management_authority: '検証用', channel_secret: channelSecret,
     access_token: accessToken, token_type: 'console',
   }, idempotency()), 201).id
@@ -218,12 +213,6 @@ test('引換→カレンダー→予約確定でトークン消費・採用ケ�
   assert.equal(confirm.rowCount, 1)
   assert.ok(confirm.rows[0].body_box, '確定通知に管理リンク（封緘）が同梱されること')
 
-  // LIFF経路のセッションでも同じ予約が見える（applicant_key が合流すること）
-  const liff = await post('/interview/login', null, { connection, id_token: 'signed-token-first-user' })
-  expect(liff, 200)
-  const liffCalendar = expect(await request('/interview/calendar?start=' + slotDate, { cookie: liff.cookie }), 200)
-  assert.ok(liffCalendar.bookings.some(item => item.id === bookingId))
-
   await worker()
   await worker()
   const confirmPush = pushesLog.find(item => item.to === user && item.messages[0].text.includes('面談予約が確定しました。'))
@@ -253,7 +242,7 @@ test('期限切れトークンは LINK_EXPIRED で拒否される', async () => 
   assert.equal(result.data.code, 'LINK_EXPIRED')
 })
 
-test('D4リンクからは既存予約の取消ができる', async () => {
+test('D4リンクからは既存予約の取消ができ、別に発行したリンクのセッションでも同じ予約が見える', async () => {
   const redeemed = await post('/interview-link/' + connection + '/redeem', null, { token: manageRaw })
   expect(redeemed, 200)
   const calendar = expect(await request('/interview/calendar?start=' + slotDate, { cookie: redeemed.cookie }), 200)
@@ -261,6 +250,18 @@ test('D4リンクからは既存予約の取消ができる', async () => {
   assert.ok(booking)
   expect(await patch('/interview/bookings/' + bookingId, redeemed.cookie,
     { action: 'cancel', revision: booking.revision }), 200)
+
+  // 同じ応募者に新しく発行したリンクのセッションでも、同じ予約が見える（applicant_key が合流すること）。
+  await inbound([postback('link-postback-again', user)])
+  await worker()
+  await worker()
+  const again = pushesLog.filter(item => item.to === user && item.messages[0].text.includes('/reserve/')).at(-1)
+  assert.ok(again, '再発行した予約URLのPushが届くこと')
+  const againRaw = again.messages[0].text.match(/\?t=([A-Za-z0-9_-]{43})/)[1]
+  const second = await post('/interview-link/' + connection + '/redeem', null, { token: againRaw })
+  expect(second, 200)
+  const secondCalendar = expect(await request('/interview/calendar?start=' + slotDate, { cookie: second.cookie }), 200)
+  assert.ok(secondCalendar.bookings.some(item => item.id === bookingId && item.status === 'cancelled'))
 })
 
 test('ブロック中ユーザーと機能フラグOFFでは発行されない', async () => {

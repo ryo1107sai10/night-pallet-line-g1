@@ -14,7 +14,7 @@ import { LineAPI, userKey } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
 
-// LIFFなし全機能化（フェーズ3）の結合試験。
+// トークン方式への一本化（フェーズ3の到達点＝LIFF撤去後）の結合試験。
 // 実PostgreSQL（embedded）＋ HTTP経由、LINE APIは模擬fetchで受ける。
 const origin = 'https://example.test'
 const cfg = { origin, master: randomBytes(32), external: true, automation: true }
@@ -22,7 +22,6 @@ const channelSecret = 'a'.repeat(32)
 const pass = 'Only used in local tests!'
 const botR = 'U' + '1'.repeat(32)
 const botC = 'U' + '5'.repeat(32)
-const botL = 'U' + '6'.repeat(32)
 const userR = 'U' + '2'.repeat(32)
 const userR2 = 'U' + '4'.repeat(32)
 const userR3 = 'U' + '9'.repeat(32)
@@ -30,16 +29,14 @@ const userC = 'U' + '3'.repeat(32)
 const userC2 = 'U' + '8'.repeat(32)
 const userC3 = 'U' + 'b'.repeat(32)
 const userC4 = 'U' + 'c'.repeat(32)
-const userL = 'U' + '7'.repeat(32)
-const loginId = '1234567894'
-const bots = { 'access-token-recruit': botR, 'access-token-customer': botC, 'access-token-liff': botL }
-const clients = { 'access-token-recruit': '1234567890', 'access-token-customer': '1234567892', 'access-token-liff': '1234567893' }
+const bots = { 'access-token-recruit': botR, 'access-token-customer': botC }
+const clients = { 'access-token-recruit': '1234567890', 'access-token-customer': '1234567892' }
 const baseChecks = {
   ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
   non_developer: true, token_verified: true, webhook_verified: true,
 }
 let pg, owner, pool, server, dir, base, tenant, storeId, admin, line, google
-let recruit, customer, liffChannel
+let recruit, customer
 const pushes = []
 const signed = raw => createHmac('sha256', channelSecret).update(raw).digest('base64')
 const send = (url, options = {}) => fetch(base + url, { redirect: 'error', ...options })
@@ -122,10 +119,6 @@ before(async () => {
         const tokenValue = options.headers.Authorization?.replace('Bearer ', '')
         return Response.json({ userId: bots[tokenValue] })
       }
-      case '/oauth2/v2.1/verify': {
-        assert.equal(options.body.get('client_id'), loginId)
-        return Response.json({ iss: 'https://access.line.me', sub: userL, exp: Date.now() / 1000 + 600, aud: loginId })
-      }
       case '/v2/bot/message/quota': return Response.json({ type: 'limited', value: 200 })
       case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0 })
       case '/v2/bot/message/push': {
@@ -157,19 +150,14 @@ before(async () => {
     owner_name: '検証法人', provider_id: 'provider', account_type: 'unverified',
     management_authority: '検証用', channel_secret: channelSecret, token_type: 'console',
   }
-  // LIFFなし（login_id / liff_id を送らない）で登録する2チャネル
+  // Messaging APIのみで登録する2チャネル（本人確認はトークン方式）
   recruit = expect(await post('/stores/' + storeId + '/connections', admin, {
-    ...common, label: '採用OA（LIFFなし）', purpose: 'recruitment',
+    ...common, label: '採用OA', purpose: 'recruitment',
     messaging_id: '1234567890', access_token: 'access-token-recruit',
   }, idempotency()), 201).id
   customer = expect(await post('/stores/' + storeId + '/connections', admin, {
-    ...common, label: '顧客OA（LIFFなし）', purpose: 'customer',
+    ...common, label: '顧客OA', purpose: 'customer',
     messaging_id: '1234567892', access_token: 'access-token-customer',
-  }, idempotency()), 201).id
-  // 従来どおり LIFF を設定したチャネル
-  liffChannel = expect(await post('/stores/' + storeId + '/connections', admin, {
-    ...common, label: '採用OA（LIFFあり）', purpose: 'recruitment',
-    messaging_id: '1234567893', login_id: loginId, liff_id: loginId + '-test', access_token: 'access-token-liff',
   }, idempotency()), 201).id
   await tx(pool, async db => {
     await scope(db, tenant, storeId)
@@ -190,11 +178,11 @@ after(async () => {
   if (dir) await rm(dir, { recursive: true, force: true })
 })
 
-test('項目1: LIFFなしでチャネル登録でき、LIFFの不整合な組み合わせは拒否される', async () => {
+test('項目1: Messaging APIのみでチャネル登録でき、撤去済みのLIFF項目は拒否される', async () => {
   const summaryR = await connectionSummary(recruit)
-  assert.equal(summaryR.liff_id, null)
-  assert.equal(summaryR.login_id, null)
-  assert.equal(summaryR.liff_url, null)
+  assert.ok(!('liff_id' in summaryR), '接続サマリに LIFF ID は含まれないこと')
+  assert.ok(!('login_id' in summaryR), '接続サマリにログインチャネルIDは含まれないこと')
+  assert.ok(!('liff_url' in summaryR), '接続サマリに LIFF URL は含まれないこと')
   assert.equal(summaryR.status, 'pending')
   const common = {
     owner_name: '検証法人', provider_id: 'provider', account_type: 'unverified',
@@ -202,26 +190,20 @@ test('項目1: LIFFなしでチャネル登録でき、LIFFの不整合な組み
     label: '不正な接続', purpose: 'recruitment', access_token: 'access-token-recruit',
   }
   const prefix = '/stores/' + storeId + '/connections'
-  // LIFF IDだけ（ログインチャネルIDなし）は拒否
-  expect(await post(prefix, admin, { ...common, messaging_id: '1234567890', liff_id: loginId + '-test' }, idempotency()), 400)
-  // LIFF IDの接頭辞がログインチャネルIDと一致しない場合は拒否
-  expect(await post(prefix, admin, {
-    ...common, messaging_id: '1234567890', login_id: loginId, liff_id: '1234567899-test',
-  }, idempotency()), 400)
-  // ログインチャネルIDとMessaging APIチャネルIDの同一指定は拒否
-  expect(await post(prefix, admin, {
-    ...common, messaging_id: '1234567890', login_id: '1234567890', liff_id: '1234567890-test',
-  }, idempotency()), 400)
-  // LIFFなしチャネルでは LIFF 画面は開けない（従来どおり 409）
-  expect(await request('/liff/' + recruit), 409)
+  // 撤去済みの項目を含む登録はスキーマで拒否される
+  expect(await post(prefix, admin, { ...common, messaging_id: '1234567890', liff_id: '1234567894-test' }, idempotency()), 400)
+  expect(await post(prefix, admin, { ...common, messaging_id: '1234567890', login_id: '1234567894' }, idempotency()), 400)
+  // LIFF画面・LIFF本人確認のAPIは撤去済み
+  expect(await request('/liff/' + recruit), 404)
+  expect(await post('/auth/line/verify', null, { connection: recruit, purpose: 'recruitment', code: 'x', id_token: 'y' }), 404)
 })
 
-test('項目1+2: LIFFなしチャネルでテスターをメッセージ方式で確認し、接続済みまで進める', async () => {
+test('項目1+2: テスターをメッセージ方式で確認し、接続済みまで進める', async () => {
   await setChecks(recruit, { ...baseChecks, delivery_confirmed: false })
   const prefix = '/stores/' + storeId + '/connections/' + recruit
   const invite = expect(await post(prefix + '/tests', admin, { purpose: 'recruitment' }, idempotency()), 201)
-  assert.equal(invite.liff_url, null, 'LIFFなしでは招待URLは発行されない')
-  // テスターがトークで「接続テスト {code}」を送信すると本人確認が完了する（LIFF不要）
+  assert.ok(!('liff_url' in invite), 'テスター招待に LIFF URL は含まれないこと')
+  // テスターがトークで「接続テスト {code}」を送信すると本人確認が完了する
   await inbound(recruit, botR, [
     eventFor('p3-code', 'message', userR, { message: { type: 'text', text: '接続テスト ' + invite.code } }),
   ])
@@ -238,46 +220,18 @@ test('項目1+2: LIFFなしチャネルでテスターをメッセージ方式�
   const afterSend = expect(await request(prefix + '/tests', { cookie: admin }), 200)
   assert.equal(afterSend.find(item => item.id === invite.id).send_status, 'accepted')
   assert.ok(job.id)
-  // ログイン公開（login_published）が false でも、残りの検収が揃えば「接続済み」になる
+  // 残りの検収が揃えば「接続済み」になる（ログイン公開の確認項目は存在しない）
   const current = await connectionSummary(recruit)
   const confirmed = expect(await patch(prefix + '/console', admin, {
     ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
-    login_published: false, non_developer: true, delivery_confirmed: true,
+    non_developer: true, delivery_confirmed: true,
     reason: '検証端末で確認', revision: current.revision,
   }), 200)
   assert.equal(confirmed.status, 'connected')
   assert.equal(confirmed.checks.tester_verified, true)
 })
 
-test('項目1回帰: LIFFありチャネルはログイン公開とLIFF本人確認が揃うまで接続済みにならない', async () => {
-  // テスター発行の時点ではログイン公開まで記録済みにする（実運用の順序どおり）。
-  // 「接続済み」にならないことは、後のコンソール保存で login_published を外して確認する。
-  await setChecks(liffChannel, { ...baseChecks, login_published: true, delivery_confirmed: false })
-  const prefix = '/stores/' + storeId + '/connections/' + liffChannel
-  const invite = expect(await post(prefix + '/tests', admin, { purpose: 'recruitment' }, idempotency()), 201)
-  assert.ok(invite.liff_url, 'LIFFありでは従来どおり招待URLが発行される')
-  expect(await post('/auth/line/verify', null, {
-    connection: liffChannel, purpose: 'recruitment', code: invite.code,
-    id_token: 'signed-token-from-line-platform', allow_test_message: true,
-  }), 200)
-  await inbound(liffChannel, botL, [eventFor('p3-liff-follow', 'follow', userL)])
-  expect(await post(prefix + '/tests/' + invite.id + '/send', admin, {}, idempotency()), 202)
-  await worker()
-  const consoleBody = {
-    ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
-    non_developer: true, delivery_confirmed: true, reason: '検証端末で確認',
-  }
-  const pending = expect(await patch(prefix + '/console', admin, {
-    ...consoleBody, login_published: false, revision: (await connectionSummary(liffChannel)).revision,
-  }), 200)
-  assert.equal(pending.status, 'pending', 'ログイン未公開の間は接続済みにならないこと')
-  const connected = expect(await patch(prefix + '/console', admin, {
-    ...consoleBody, login_published: true, revision: (await connectionSummary(liffChannel)).revision,
-  }), 200)
-  assert.equal(connected.status, 'connected')
-})
-
-test('項目3: 顧客リンクの postback→Push→引換で来店予約・配信設定・フォームがLIFFなしで使える', async () => {
+test('項目3: 顧客リンクの postback→Push→引換で来店予約・配信設定・フォームが使える', async () => {
   await setChecks(customer, { ...baseChecks, delivery_confirmed: true })
   await inbound(customer, botC, [eventFor('p3-c-follow', 'follow', userC)])
   await worker()
@@ -336,15 +290,14 @@ test('項目3: 顧客リンクの postback→Push→引換で来店予約・配�
   assert.equal(responses.rowCount, 1)
 })
 
-test('項目4: 流入元をLIFFなしチャネルのトークン発行時に紐づけ、引換で帰属が記録される（採用）', async () => {
+test('項目4: 流入元をトークン発行時に紐づけ、引換で帰属が記録される（採用）', async () => {
   const workflow = '/stores/' + storeId + '/workflows/recruitment'
-  // LIFFなしチャネルでも流入元を作成できる（従来は LIFF 必須で 404 だった）
   const entry = expect(await post(workflow + '/sources', admin, { channel: recruit, label: '求人媒体X' }, idempotency()), 201)
   const report = expect(await request(workflow + '/sources?days=30', { cookie: admin }), 200)
   const found = report.entries.find(item => item.id === entry.id)
-  assert.equal(found.url, null, 'LIFFなしでは入口URLは LIFF URL にならない')
+  assert.equal(found.url, undefined, '流入元の入口はURLではなく postback 文字列のみ')
   assert.equal(found.postback, 'action=interview_link&source=' + entry.id)
-  assert.ok(report.channels.some(item => item.id === recruit), 'LIFFなしチャネルも流入元の対象になる')
+  assert.ok(report.channels.some(item => item.id === recruit), '流入元の対象になること')
 
   await inbound(recruit, botR, [eventFor('p3-r2-follow', 'follow', userR2)])
   await inbound(recruit, botR, [

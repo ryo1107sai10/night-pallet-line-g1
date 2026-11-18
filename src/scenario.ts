@@ -199,7 +199,7 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
     if (!proof) throw new Fault(404,'TESTER_NOT_AVAILABLE','この店舗・用途の有効なテスト利用者を選択してください。')
     const checks = c.checks
     if (!checks.token_verified || !checks.webhook_verified || !checks.ownership_verified || !checks.provider_verified ||
-      !checks.login_published || !checks.redelivery_enabled || !checks.auto_reply_checked || !checks.non_developer) {
+      !checks.redelivery_enabled || !checks.auto_reply_checked || !checks.non_developer) {
       throw new Fault(409,'TEST_NOT_READY','先に公式アカウントのLINE接続を確認してください。')
     }
     const result=await preview(db,store,current.graph,data.fixture)

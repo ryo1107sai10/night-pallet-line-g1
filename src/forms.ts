@@ -21,7 +21,7 @@ type Form={id:string;channel_id:string;title:string;description:string;fields:z.
 
 export async function listForms(db:DB,store:string,use:WorkflowSubject['purpose']) {
   await requireFeature(db,store,'forms_enabled')
-  const {rows:channels}=await db.query(`SELECT id,label,liff_id FROM channel
+  const {rows:channels}=await db.query(`SELECT id,label FROM channel
     WHERE purpose=$1 OR purpose='shared' ORDER BY label,id`,[use])
   const {rows:forms}=await db.query<Form>(`SELECT id,channel_id,title,description,fields,published,revision
     FROM workflow_form WHERE purpose=$1 ORDER BY created_at,id`,[use])

@@ -6,7 +6,7 @@ import { z } from 'zod'
 import { LineModuleAPI, moduleWebhookPath, requireModule } from './line-module.js'
 import {
   type Actor, type Config, type DB, type Route, type LineModuleConfig, Fault, audit, conflict, digest, keyed,
-  looseId, missing, newId, opaque, purpose, revision, route, scope, seal, text, token,
+  looseId, missing, newId, purpose, revision, route, scope, seal, text, token,
   tx, unseal, userId, uuid,
 } from './core.js'
 
@@ -22,48 +22,38 @@ const credentialFields = {
 const credentialsSchema = z.strictObject(credentialFields)
 export const connectionSchema = z.strictObject({
   label: text(100), purpose: z.enum(['customer','recruitment','shared']), owner_name: text(160),
-  provider_id: text(80), messaging_id: looseId, login_id: looseId.optional(),
-  liff_id: z.string().regex(/^\d{5,20}-[A-Za-z0-9]+$/).optional(),
+  provider_id: text(80), messaging_id: looseId,
   bot_user_id: userId.optional(), account_type: z.enum(['unverified','verified','premium']),
   existing_tools: z.string().trim().max(300).optional(),
   existing_webhook: httpsUrl.optional(), management_authority: text(160), ...credentialFields,
 })
-  // LIFF（LINEログイン）は任意。Messaging APIだけでも登録できる（フェーズ3・項目1）。
-  // LIFFを使う場合だけ、従来どおり LIFF ID とログインチャネルIDの対応を要求する。
-  .refine(data => !data.login_id || data.login_id !== data.messaging_id,
-    { path: ['login_id'], message: 'LINEログインチャネルIDとMessaging APIチャネルIDを確認してください。' })
-  .refine(data => !data.liff_id || (!!data.login_id && data.liff_id.startsWith(data.login_id + '-')),
-    { path: ['liff_id'], message: 'LIFF IDとLINEログインチャネルIDを確認してください。' })
 export const replaceCredentialsSchema = credentialsSchema.extend({ revision, reason: text(200) })
 export const consoleSchema = z.strictObject({ revision, reason: text(200),
   ownership_verified: z.boolean(), provider_verified: z.boolean(), redelivery_enabled: z.boolean(),
-  auto_reply_checked: z.boolean(), login_published: z.boolean(), non_developer: z.boolean(), delivery_confirmed: z.boolean(),
+  auto_reply_checked: z.boolean(), non_developer: z.boolean(), delivery_confirmed: z.boolean(),
 })
 type Credentials = z.infer<typeof credentialsSchema>
 type SendCredentials = Credentials | {module:LineModuleConfig;bot:string}
 type Checks = {
   ownership_verified?: boolean; provider_verified?: boolean; redelivery_enabled?: boolean;
-  auto_reply_checked?: boolean; login_published?: boolean; non_developer?: boolean; delivery_confirmed?: boolean;
+  auto_reply_checked?: boolean; non_developer?: boolean; delivery_confirmed?: boolean;
   token_verified?: boolean; webhook_verified?: boolean;
 }
 export type Channel = Route & {
   label: string; purpose: 'customer' | 'recruitment' | 'shared'; owner_name: string; provider_id: string | null;
-  login_id: string | null; liff_id: string | null; bot_user_id: string; account_type: string | null;
+  bot_user_id: string; account_type: string | null;
   existing_tools: string | null; existing_webhook: string | null; management_authority: string;
   credentials: string | null; checks: Checks; stopped: boolean; revision: number; generation: number;
   basic_id:string|null; module_status:'attached'|'active'|'standby'|'detached'|'suspended'|null; module_status_at:Date|null;
 }
-type ConnectionState = Pick<Channel,'module_channel_id'|'module_status'|'checks'|'liff_id'>
+type ConnectionState = Pick<Channel,'module_channel_id'|'module_status'|'checks'>
 export const channelTestReady = (c:ConnectionState) => !!(c.checks.ownership_verified && c.checks.token_verified && c.checks.webhook_verified &&
   (c.module_channel_id ? c.module_status==='active' :
-    c.checks.provider_verified && c.checks.redelivery_enabled && c.checks.auto_reply_checked &&
-    // LINEログインの公開確認は、LIFFを設定したチャネルにだけ要求する（フェーズ3・項目1）。
-    (!c.liff_id || c.checks.login_published)))
+    c.checks.provider_verified && c.checks.redelivery_enabled && c.checks.auto_reply_checked))
 export const testDeliveryConfirmed = (c:ConnectionState) => channelTestReady(c) && c.checks.delivery_confirmed===true
 export const messagingReady = (c:ConnectionState) => testDeliveryConfirmed(c) &&
   (!!c.module_channel_id || c.checks.non_developer===true)
-// 接続済み判定は LIFF の有無に依存しない。LIFF を設定したチャネルは従来どおり
-// messagingReady を満たせば使え、LIFF 未設定でも Messaging API の検収だけで接続済みになる。
+// 接続済み判定は Messaging API の検収だけで決まる（本人確認はトークン方式）。
 export const channelReady = (c:Channel) => messagingReady(c)
 
 export async function channel(db: DB, id: string) {
@@ -90,10 +80,10 @@ export async function createChannel(db: DB, cfg: Config, actor: Actor, store: st
     [c.id,c.tenant_id,c.store_id,c.messaging_id])
   const { access_token, channel_secret, token_type } = data
   await db.query(`INSERT INTO channel(id,tenant_id,store_id,label,purpose,owner_name,provider_id,
-    login_id,liff_id,bot_user_id,account_type,existing_webhook,existing_tools,management_authority,credentials)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-    [c.id,c.tenant_id,c.store_id,data.label,data.purpose,data.owner_name,data.provider_id,data.login_id ?? null,
-      data.liff_id ?? null,data.bot_user_id,data.account_type,data.existing_webhook ?? null,data.existing_tools ?? null,
+    bot_user_id,account_type,existing_webhook,existing_tools,management_authority,credentials)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    [c.id,c.tenant_id,c.store_id,data.label,data.purpose,data.owner_name,data.provider_id,
+      data.bot_user_id,data.account_type,data.existing_webhook ?? null,data.existing_tools ?? null,
       data.management_authority,seal(cfg,secretContext(c),JSON.stringify({access_token,channel_secret,token_type}))])
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.register',c.id)
   return { id: c.id }
@@ -112,7 +102,7 @@ export async function replaceCredentials(db: DB, cfg: Config, actor: Actor, c: C
 
 const testerLifetime = "interval '2 hours'"
 
-// A signed chat message can arrive before LIFF verification, within the same invitation.
+// A signed chat message can arrive before tester verification, within the same invitation.
 export const connectionTestEvent = `e.channel_id=t.channel_id AND e.user_key=t.user_key AND e.generation=t.generation
   AND t.verified_at IS NOT NULL
   AND ((e.kind='message' AND e.received_at>=t.expires_at-${testerLifetime}
@@ -120,11 +110,10 @@ export const connectionTestEvent = `e.channel_id=t.channel_id AND e.user_key=t.u
     OR (e.kind='follow' AND e.received_at>=t.verified_at AND e.occurred_at>=t.verified_at))
   AND e.received_at<=least(t.expires_at,now()) AND e.occurred_at<=least(t.expires_at,now())`
 
-type Evidence = {liff_verified:boolean;tester_verified:boolean;receive_verified:boolean;send_accepted:boolean}
-// テスター本人確認は LIFF（verifyLiff）でもメッセージ方式（接続テスト {code}）でも verified_at が立つ。
-// liff_verified は従来表示との互換用、tester_verified は LIFF なし検収の判定用に同じ実績を別名で返す。
+type Evidence = {tester_verified:boolean;receive_verified:boolean;send_accepted:boolean}
+// テスター本人確認はメッセージ方式（接続テスト {code}）で verified_at が立つ。
 const testerVerified = `EXISTS(SELECT 1 FROM tester WHERE channel_id=c.id AND generation=c.generation AND verified_at IS NOT NULL)`
-const evidenceColumns = `${testerVerified} AS liff_verified, ${testerVerified} AS tester_verified,
+const evidenceColumns = `${testerVerified} AS tester_verified,
     EXISTS(SELECT 1 FROM tester t JOIN webhook_event e ON ${connectionTestEvent}
       WHERE t.channel_id=c.id AND t.generation=c.generation) AS receive_verified,
     EXISTS(SELECT 1 FROM test_send WHERE channel_id=c.id AND generation=c.generation AND status='accepted' AND scenario_id IS NULL) AS send_accepted`
@@ -140,14 +129,13 @@ function verifiedConnection(c:ConnectionState,checks:Checks & Evidence) {
   const base = ['ownership_verified','provider_verified','redelivery_enabled','auto_reply_checked','non_developer',
     'token_verified','webhook_verified','receive_verified','send_accepted','delivery_confirmed']
   if (!base.every(key=>checks[key as keyof typeof checks]===true)) return false
-  // LIFF を設定したチャネルは従来どおり、ログイン公開と LIFF 本人確認まで揃って初めて接続済み。
-  // LIFF 未設定のチャネルは、その2点をテスター本人確認（メッセージ方式を含む）で代替する。
-  return c.liff_id ? checks.login_published===true && checks.liff_verified===true : checks.tester_verified===true
+  // 本人確認はテスター確認（メッセージ方式）の実績で判定する。
+  return checks.tester_verified===true
 }
 
 export async function connectionProgress(db:DB,connection?:string) {
   const {rows}=await db.query<ConnectionState & Evidence & {id:string;store_id:string}>(`SELECT
-    c.id,c.store_id,c.checks,c.module_status,c.liff_id,r.module_channel_id,${evidenceColumns}
+    c.id,c.store_id,c.checks,c.module_status,r.module_channel_id,${evidenceColumns}
     FROM channel c JOIN channel_route r ON r.id=c.id
     WHERE ($1::uuid IS NULL OR c.id=$1) ORDER BY c.label,c.id`,[connection ?? null])
   return rows.map(({id,store_id,...state})=>({id,store_id,verified:verifiedConnection(state,{...state.checks,...state})}))
@@ -156,11 +144,9 @@ export async function connectionProgress(db:DB,connection?:string) {
 export async function summary(db: DB, cfg: Config, c: Channel) {
   const { credentials, module_bot_id, ...safe } = c
   const checks = { ...c.checks, ...await evidence(db,c) }
-  if (c.module_channel_id) checks.liff_verified = false
   const complete = verifiedConnection(c,checks)
   return { ...safe, checks, status: complete ? 'connected' : 'pending',
     webhook_url: cfg.origin + (c.module_channel_id ? moduleWebhookPath : '/api/v1/webhooks/line/' + c.id),
-    liff_url: c.liff_id ? cfg.origin + '/liff/' + c.id : null,
   }
 }
 
@@ -216,18 +202,6 @@ export class LineAPI {
     return result.ok && (await result.json()).success === true
   }
 
-  async verifyID(loginId: string, idToken: string) {
-    const response = await this.call('/oauth2/v2.1/verify', { method: 'POST',
-      body: new URLSearchParams({ client_id: loginId, id_token: idToken }),
-    })
-    if (response.status >= 500 || response.status === 429) throw lineUnavailable()
-    if (!response.ok) throw invalidLiff()
-    const verified = z.object({ iss: z.literal('https://access.line.me'), aud: z.literal(loginId),
-      exp: z.number(), sub: userId }).safeParse(await response.json())
-    if (!verified.success || verified.data.exp <= Date.now()/1000) throw invalidLiff()
-    return verified.data.sub
-  }
-
   async quota(cred: SendCredentials) {
     const headers = await this.headers(cred)
     const [limit,consumption] = await Promise.all([
@@ -274,7 +248,6 @@ export class LineAPI {
 }
 
 const lineUnavailable = () => new Fault(502,'LINE_UNAVAILABLE','LINEとの通信結果を確認できません。',true)
-const invalidLiff = () => new Fault(401,'INVALID_LIFF','LINEの本人確認またはテストコードを確認してください。')
 const signatureError = () => new Fault(401,'INVALID_WEBHOOK','Webhookを確認できません。')
 const moduleUserId = z.union([userId,z.string().regex(/^LU[0-9a-f]{32}-U[0-9a-f]{32}$/i)])
 const eventSchema = z.object({ webhookEventId: text(100), type: text(100), timestamp: z.int().min(0).max(8640000000000000),
@@ -389,8 +362,7 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
       (c.purpose==='shared'&&(action==='interview_link'||action==='customer_link')))
       ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,user) : null
     const eventPurpose=c.purpose==='shared'?'unclassified':c.purpose
-    // テスター本人確認のメッセージ方式は、モジュール経路だけでなく全経路で使える（フェーズ3・項目2）。
-    // LIFF方式（verifyLiff）も従来どおり併存する。
+    // テスター本人確認はメッセージ方式（接続テスト {code}）で行う。
     const test=phrase?.match(/^接続テスト ([A-Za-z0-9_-]{43})$/)
     const written=await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
       occurred_at,kind,purpose,user_key,recipient_box,stop_signal,action,source_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
@@ -411,10 +383,8 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
 export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.infer<typeof purpose>) {
   if (c.purpose !== 'shared' && c.purpose !== usage) throw missing()
   if (!c.checks.ownership_verified || (c.module_channel_id ? c.module_status==='detached'||c.module_status==='suspended' :
-    !c.checks.provider_verified || (!!c.liff_id && !c.checks.login_published))) {
-    throw new Fault(409,'CONSOLE_CHECKS_REQUIRED',c.liff_id
-      ? '所有権、プロバイダーおよびLINEログインの公開を確認してください。'
-      : '所有権とプロバイダーを確認してください。')
+    !c.checks.provider_verified)) {
+    throw new Fault(409,'CONSOLE_CHECKS_REQUIRED','所有権とプロバイダーを確認してください。')
   }
   const id = newId()
   const code = token()
@@ -422,35 +392,7 @@ export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.inf
     code_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()+${testerLifetime}) RETURNING expires_at`,
     [id,c.tenant_id,c.store_id,c.id,c.generation,usage,digest(code)])
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.tester_invite',id,null,{purpose:usage})
-  return { id, code, expires_at: result.rows[0].expires_at, liff_url: c.liff_id ? 'https://liff.line.me/' + c.liff_id : null }
-}
-
-export const verifyLiffSchema = z.strictObject({
-  connection: uuid, purpose, code: opaque, id_token: z.string().min(20).max(12000),
-  allow_test_message: z.literal(true),
-})
-
-export async function verifyLiff(pool: pg.Pool, cfg: Config, api: LineAPI, data: z.infer<typeof verifyLiffSchema>) {
-  const setup = await tx(pool, async db => {
-    const r = await route(db,data.connection)
-    await scope(db,r.tenant_id,r.store_id)
-    const c = await channel(db,r.id)
-    const result = await db.query(`SELECT id FROM tester WHERE channel_id=$1 AND code_hash=$2 AND generation=$3
-      AND purpose=$4 AND expires_at>now() AND verified_at IS NULL`,[c.id,digest(data.code),c.generation,data.purpose])
-    if (!result.rowCount || !c.login_id) throw invalidLiff()
-    return {...c,login_id:c.login_id}
-  })
-  const recipient = await api.verifyID(setup.login_id,data.id_token)
-  await tx(pool, async db => {
-    await scope(db,setup.tenant_id,setup.store_id)
-    const result = await db.query(`UPDATE tester t SET verified_at=now(),user_key=$2,recipient=$3
-      FROM channel c WHERE t.code_hash=$1 AND t.channel_id=c.id AND c.id=$4 AND t.generation=c.generation
-        AND t.expires_at>now() AND t.verified_at IS NULL RETURNING t.id`,
-      [digest(data.code),userKey(cfg,setup,recipient),seal(cfg,'tester:' + digest(data.code),recipient),setup.id])
-    if (!result.rowCount) throw invalidLiff()
-    await audit(db,setup.tenant_id,setup.store_id,null,'line.liff_verified',result.rows[0].id,null,{purpose:data.purpose})
-  })
-  return { verified: true }
+  return { id, code, expires_at: result.rows[0].expires_at }
 }
 
 export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: string, key: string) {

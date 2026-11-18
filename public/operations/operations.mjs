@@ -160,7 +160,7 @@ function bookings(root,slots,entries,people,enabled){
   if(!enabled)root.append(el('p','この店舗では来店予約の新規受付を停止しています。'))
   if(enabled)root.append(details('受付枠を作成',form([
     field('枠名','label'),field('開始（例 2026-11-20T22:00+09:00）','starts_at'),
-    field('終了（タイムゾーン付き）','ends_at'),field('定員','capacity','number',4),field('LIFFに公開','published','checkbox',true),
+    field('終了（タイムゾーン付き）','ends_at'),field('定員','capacity','number',4),field('公開','published','checkbox',true),
   ],'受付枠を作成',data=>changed('/slots','POST',{...data,capacity:Number(data.capacity),published:data.published==='on'},'受付枠を作成しました。'))))
   const choices=[['','選択してください'],...slots.map(s=>[s.id,stamp(s.starts_at)+' '+s.label+'（残り'+s.remaining+'人）'])]
   if(enabled)root.append(details('スタッフが予約を登録',form([

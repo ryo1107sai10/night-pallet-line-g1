@@ -139,7 +139,7 @@ export async function redeemInterviewLink(pool: pg.Pool, cfg: Config, connection
     if (row.used_at) throw linkUsed()
     if (+row.expires_at <= Date.now()) throw linkExpired()
     if (row.generation !== c.generation) throw linkInvalid()
-    // 流入元の帰属は、LIFF経路のログイン時と同じく本人確認が成立した時点で記録する（項目4）。
+    // 流入元の帰属は、本人確認が成立した時点で記録する（項目4）。
     await recordSource(db, subjectFor(c, row.applicant_key), row.source_id ?? undefined)
     const session = token()
     await db.query(`INSERT INTO interview_session

@@ -11,11 +11,13 @@ import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
 import { bootstrap, designateMaster, inviteSupervisor, migrate } from '../dist/setup.js'
 import { prepareSupervisorHandoff } from '../dist/supervisor-handoff.js'
-import { LineAPI } from '../dist/line.js'
+import { LineAPI, channel as channelRow, userKey } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
+import { issueInterviewLinkToken } from '../dist/interview-link.js'
+import { issueCustomerLinkToken } from '../dist/customer-link.js'
 import { starter } from '../public/studio/engine.mjs'
-import { liffAppId, lineSetupLinks } from '../public/line-setup.mjs'
+import { lineSetupLinks } from '../public/line-setup.mjs'
 
 const origin = 'https://example.test'
 const cfg = { origin, master:randomBytes(32), external:true, automation:true }
@@ -94,16 +96,41 @@ test('公式LINEの設定ボタンは対象チャネルの画面を開き、未�
   const defaults=lineSetupLinks()
   assert.equal(defaults.manager,'https://manager.line.biz/')
   assert.equal(defaults.messagingSettings,root)
-  const links=lineSetupLinks({provider_id:'2000000010',messaging_id:ids.messaging,login_id:ids.login,liff_id:ids.login+'-test'})
+  const links=lineSetupLinks({provider_id:'2000000010',messaging_id:ids.messaging})
   assert.equal(links.provider,root+'provider/2000000010/settings')
   assert.equal(links.messagingBasics,root+'channel/'+ids.messaging)
   assert.equal(links.messagingSettings,root+'channel/'+ids.messaging+'/messaging-api')
-  assert.equal(links.liff,root+'channel/'+ids.login+'/liff')
-  assert.equal(links.liffEdit,links.liff+'/'+ids.login+'-test')
-  assert.equal(liffAppId('https://liff.line.me/'+ids.login+'-test?from=copy'),ids.login+'-test')
-  assert.equal(liffAppId('https://liff.line.me.example/'+ids.login+'-test'),'')
   assert.equal(lineSetupLinks({messaging_id:'../token?secret=sample'}).messagingSettings,root)
 })
+
+// 本人確認はトークン方式に一本化した。セッションはリンク発行→引換APIで取得する。
+// Token発行のみの関数を使うため、Pushジョブは積まれずテストの送信検証と混ざらない。
+async function issueToken(kind,connectionId,userId,store,sourceId){
+  return tx(pool,async db=>{
+    await scope(db,signup.tenant,store)
+    const ch=await channelRow(db,connectionId)
+    if(kind==='interview'){
+      await db.query('UPDATE store SET token_interviews_enabled=true WHERE id=$1',[ch.store_id])
+      const link=await issueInterviewLinkToken(db,cfg,ch,userId,sourceId)
+      return link.raw
+    }
+    await db.query('UPDATE store SET token_customers_enabled=true WHERE id=$1',[ch.store_id])
+    const link=await issueCustomerLinkToken(db,cfg,ch,userId,sourceId)
+    return link.raw
+  })
+}
+async function interviewSession(connectionId,userId,store,sourceId){
+  const token=await issueToken('interview',connectionId,userId,store,sourceId)
+  const result=await post('/interview-link/'+connectionId+'/redeem',null,{token})
+  expect(result,200)
+  return result
+}
+async function customerSession(connectionId,userId,store,sourceId){
+  const token=await issueToken('customer',connectionId,userId,store,sourceId)
+  const result=await post('/customer-link/'+connectionId+'/redeem',null,{token})
+  expect(result,200)
+  return result
+}
 
 test('共有カレンダーの空き時間照合は店舗を限定し、短期のサーバー権限を使う',async()=>{
   const store=randomUUID(),calendar='shared@example.test',account='calendar-reader@project.iam.gserviceaccount.com'
@@ -200,12 +227,6 @@ before(async ()=>{
       case '/v2/bot/channel/webhook/test':
         assert.equal((await web({destination:bot,events:[]})).status,200)
         return Response.json({success:true})
-      case '/oauth2/v2.1/verify': {
-        assert.ok([ids.login,ids.redLogin].includes(options.body.get('client_id')))
-        const proof=options.body.get('id_token')
-        return Response.json({iss:'https://access.line.me',sub:proof.includes('second')?user2:user,exp:Date.now()/1000+600,
-          aud:proof.includes('bad')?'9999999999':proof.includes('red-store')?ids.redLogin:ids.login})
-      }
       case '/v2/bot/message/quota': return Response.json({type:'limited',value:200})
       case '/v2/bot/message/quota/consumption': return Response.json({totalUsage:200-remainingQuota})
       case '/v2/bot/message/push': {
@@ -337,7 +358,7 @@ test('AT02 同一法人の許可店舗・別法人・DB行レベル分離、店�
 
 test('AT01/04 接続台帳とWebhookの署名・destination・再送',async ()=>{
   const data = {label:'接続検証',purpose:'shared',owner_name:'甲法人',provider_id:'provider',
-    messaging_id:ids.messaging,login_id:ids.login,liff_id:ids.login+'-test',
+    messaging_id:ids.messaging,
     account_type:'unverified',management_authority:'管理者確認',channel_secret:channelSecret,
     access_token:accessToken,token_type:'console'}
   const prefix = '/stores/'+storeId+'/connections'
@@ -370,22 +391,21 @@ test('AT01/04 接続台帳とWebhookの署名・destination・再送',async ()=>
 
 const consoleChecks = {
   ownership_verified:true,provider_verified:true,redelivery_enabled:true,auto_reply_checked:true,
-  login_published:true,non_developer:true,delivery_confirmed:false,
+  non_developer:true,delivery_confirmed:false,
 }
 const getChannel = async () => expect(await request(path.slice(0,path.lastIndexOf('/')),{cookie:admin}),200)[0]
 async function prepareTester(usage='recruitment') {
   const invite = expect(await post(path+'/tests',admin,{purpose:usage},idempotency()),201)
-  const proof = {connection:c,purpose:usage,code:invite.code,id_token:'signed-token-from-line-platform',allow_test_message:true}
-  expect(await post('/auth/line/verify',null,{...proof,purpose:usage==='customer'?'recruitment':'customer'}),401)
-  expect(await post('/auth/line/verify',null,{...proof,id_token:'signed-token-with-bad-audience'}),401)
-  expect(await post('/auth/line/verify',null,proof),200)
-  expect(await post('/auth/line/verify',null,proof),401)
+  // テスター確認はメッセージ方式: トークで「接続テスト {code}」を送ると本人確認が完了する。
+  assert.equal((await web({destination:bot,events:[{...event(randomUUID(),'message',Date.now()),
+    message:{id:randomUUID(),type:'text',text:'接続テスト '+invite.code}}]})).status,200)
+  await workOnce(pool,cfg,line)
   assert.equal((await web({destination:bot,events:[event(randomUUID(),'follow',Date.now())]})).status,200)
   await workOnce(pool,cfg,line)
   return invite
 }
 
-test('AT01/05/06 LIFF用途の固定、兼用OAの隔離、受付と実機確認の区別',async ()=>{
+test('AT01/05/06 用途の固定、兼用OAの隔離、受付と実機確認の区別',async ()=>{
   expect(await patch(path+'/console',admin,{...consoleChecks,reason:'公式管理画面で照合',revision:(await getChannel()).revision}),200)
   expect(await post(path+'/check-token',admin,{revision:(await getChannel()).revision}),200)
   expect(await post(path+'/check-webhook',admin,{revision:(await getChannel()).revision}),200)
@@ -536,9 +556,8 @@ test('CRM-01/BOOK-02–05 署名付きLINE・本人同意・予約競合とLINE�
   expect(await patch(root+'/automation',admin,{revision:current.revision,enabled:true,contract:true,monthly_limit:25,reason:'検証承認'}),409)
   const eligible=expect(await patch(root+'/eligibility',admin,{revision:current.revision,verified:true,reference:'検証済み'}),200)
   expect(await patch(root+'/automation',admin,{revision:eligible.revision,enabled:true,contract:true,monthly_limit:25,reason:'検証承認'}),200)
-  const original=await post('/customer/login',null,{connection:c,id_token:'signed-token-first-user'})
-  const second=await post('/customer/login',null,{connection:c,id_token:'signed-token-second-user'})
-  expect(original,200);expect(second,200)
+  const original=await customerSession(c,user,storeId)
+  const second=await customerSession(c,user2,storeId)
   const created=await request(root+'/customers',{cookie:admin})
   const people=expect(created,200)
   assert.equal(people.length,2)
@@ -599,8 +618,8 @@ test('AT25/29/48 自動配信の同一開始防止、即時撤回、LINE枠不�
     nodes:[{id:'single',type:'message',name:'案内',category:'service',body:'{{store}}からの案内です。',next:'end'},
       {id:'end',type:'end',name:'完了'}]})
   const flow=await publish(graph)
-  const first=await post('/customer/login',null,{connection:c,id_token:'signed-token-first-user'})
-  const second=await post('/customer/login',null,{connection:c,id_token:'signed-token-second-user'})
+  const first=await customerSession(c,user,storeId)
+  const second=await customerSession(c,user2,storeId)
   await terminal(first.cookie);await terminal(second.cookie)
   // One person withdraws after a signed LINE stop message, independent of delivery-event processing order.
   const stopPayload={destination:bot,events:[{...event('stop-automatic','message',Date.now()),message:{type:'text',text:'全配信停止'}}]}
@@ -639,15 +658,14 @@ test('AT25/29/48 自動配信の同一開始防止、即時撤回、LINE枠不�
 
 test('面談カレンダー: 採用権限、枠の取り合い、本人の日程変更と取消', async ()=>{
   const root='/stores/'+storeId+'/interviews'
-  const login=(token,cookie)=>post('/interview/login',cookie,{connection:c,id_token:token})
+  const login=(userId)=>interviewSession(c,userId,storeId)
   expect(await request('/interview/calendar'),401)
   expect(await request(root,{cookie:other}),404)
   const invitation=expect(await post('/staff/invites',admin,{email:'recruiter@example.test',role:'recruiter',stores:[storeId]},idempotency()),201)
   const recruiter=await activate(invitation,'recruiter@example.test','alpha')
   expect(await request('/stores/'+otherStore+'/interviews',{cookie:recruiter}),404)
-  const a=await login('signed-token-first-user')
-  const b=await login('signed-token-second-user')
-  expect(a,200);expect(b,200)
+  const a=await login(user)
+  const b=await login(user2)
   const empty=expect(await request('/interview/calendar',{cookie:a.cookie}),200)
   assert.deepEqual(empty.hours,{start:1080,end:1440,revision:1})
   const tomorrow=Date.parse(empty.today+'T00:00:00+09:00')+86400000
@@ -719,9 +737,8 @@ test('面談カレンダー: 採用権限、枠の取り合い、本人の日程
 test('面談の受付停止時間とGoogle予定: 境界、再確認、障害時停止、既存予約の維持',async()=>{
   const root='/stores/'+storeId+'/interviews'
   const settings=root+'/availability'
-  const applicant=await post('/interview/login',null,{connection:c,id_token:'signed-token-first-user'})
-  const alternate=await post('/interview/login',null,{connection:c,id_token:'signed-token-second-user'})
-  expect(applicant,200);expect(alternate,200)
+  const applicant=await interviewSession(c,user,storeId)
+  const alternate=await interviewSession(c,user2,storeId)
   const calendar=async()=>expect(await request('/interview/calendar',{cookie:applicant.cookie}),200)
   const day=Date.parse((await calendar()).today+'T00:00:00+09:00')+2*86400000
   const at=hour=>new Date(day+hour*3600000).toISOString()
@@ -795,7 +812,7 @@ test('同一法人の店舗ごとにOA・Google予定・タグ・機能設定を
   const blueManager=await activate(invite,email,'alpha')
   const registered=expect(await post(red+'/connections',admin,{
     label:'赤店の公式LINE',purpose:'shared',owner_name:'甲法人',provider_id:'provider',
-    messaging_id:'1234567893',login_id:ids.redLogin,liff_id:ids.redLogin+'-red',bot_user_id:'U'+'4'.repeat(32),
+    messaging_id:'1234567893',bot_user_id:'U'+'4'.repeat(32),
     account_type:'unverified',management_authority:'テスト用',channel_secret:channelSecret,
     access_token:accessToken,token_type:'console',
   },idempotency()),201)
@@ -803,14 +820,13 @@ test('同一法人の店舗ごとにOA・Google予定・タグ・機能設定を
   assert.ok(expect(await request(blue+'/connections',{cookie:admin}),200).some(item=>item.id===c))
   assert.deepEqual(expect(await request(red+'/connections',{cookie:admin}),200).map(item=>item.id),[registered.id])
   expect(await request(red+'/connections',{cookie:blueManager}),404)
-  const blueProof='signed-token-from-blue-store'
-  const redProof='signed-token-from-red-store'
-  const login=(connection,id_token)=>post('/interview/login',null,{connection,id_token})
-  const a=await login(c,blueProof),b=await login(registered.id,redProof)
-  expect(a,200);expect(b,200)
-  expect(await login(registered.id,blueProof),401)
-  expect(await login(c,redProof),401)
-  assert.equal(expect(await request('/liff/'+registered.id),200).liff_id,ids.redLogin+'-red')
+  const a=await interviewSession(c,user,storeId),b=await interviewSession(registered.id,user,otherStore)
+  // トークンは発行したチャネルでしか引き換えできない（店舗間の隔離はトークン側で担保する）。
+  const foreign=await issueToken('interview',c,user,storeId)
+  expect(await post('/interview-link/'+registered.id+'/redeem',null,{token:foreign}),401)
+  expect(await post('/interview-link/'+c+'/redeem',null,{token:foreign}),200)
+  // LIFF用の設定APIは撤去済み。
+  expect(await request('/liff/'+registered.id),404)
 
   const settings=store=>store+'/interviews/availability'
   const startLink=async(store,calendar_id)=>{
@@ -850,8 +866,7 @@ test('同一法人の店舗ごとにOA・Google予定・タグ・機能設定を
   const rule=(store,name,trigger)=>request(store+'/tags',{method:'PUT',cookie:admin,data:{name,trigger}})
   expect(await rule(red,'来店予約済み','booking_created'),200)
   expect(await rule(red,'常連',null),200)
-  const customer=await post('/customer/login',null,{connection:registered.id,id_token:redProof})
-  expect(customer,200)
+  const customer=await customerSession(registered.id,user,otherStore)
   const customerList=store=>request(store+'/customers',{cookie:admin})
   const record=expect(await customerList(red),200)[0]
   assert.deepEqual(record.tags,[])
@@ -915,7 +930,7 @@ async function workflowStore(label,purpose,index,features){
   const destination='U'+index.repeat(32)
   const connection=expect(await post(root+'/connections',admin,{
     label,purpose,owner_name:'甲法人',provider_id:'provider',messaging_id:'130000000'+index,
-    login_id:ids.login,liff_id:ids.login+'-'+index,bot_user_id:destination,
+    bot_user_id:destination,
     account_type:'unverified',management_authority:'検証用',channel_secret:channelSecret,access_token:accessToken,token_type:'console',
   },idempotency()),201).id
   await tx(pool,async db=>{
@@ -937,8 +952,8 @@ async function workflowStore(label,purpose,index,features){
 const worker=()=>workOnce(pool,cfg,line,google)
 const confirmation=(cookie,slot,name='応募者')=>post('/interview/bookings',cookie,{slot,name})
 
-test('採用と顧客の回答フォーム・版・流入QRを分離し、店舗の面談・体入・入店実績に集計する',async()=>{
-  const {root,connection}=await workflowStore('フォーム検証','shared','5',{
+test('採用と顧客の回答フォーム・版・流入元を分離し、店舗の面談・体入・入店実績に集計する',async()=>{
+  const {store,root,connection}=await workflowStore('フォーム検証','shared','5',{
     forms_enabled:true,recruitment_enabled:true,sources_enabled:true,
   })
   const candidate=root+'/workflows/recruitment'
@@ -952,11 +967,11 @@ test('採用と顧客の回答フォーム・版・流入QRを分離し、店舗
   const form=expect(await put(candidate+'/forms',admin,fixture),200)
   const second=expect(await put(candidate+'/forms',admin,{...fixture,title:'追加質問'}),200)
   expect(await put(guest+'/forms',admin,{...fixture,title:'来店アンケート'}),200)
-  const person=await post('/interview/login',null,{connection,id_token:'signed-token-first-user',source:entry.id})
-  expect(person,200)
-  expect(await post('/interview/login',null,{connection,id_token:'signed-token-first-user',source:competing.id}),200)
-  const guestUser=await post('/customer/login',null,{connection,id_token:'signed-token-first-user',source:entry.id})
-  expect(guestUser,200)
+  const person=await interviewSession(connection,user,store,entry.id)
+  // 別の流入元で入り直しても、帰属は最初の流入元のまま（recordSource は初回優先）。
+  await interviewSession(connection,user,store,competing.id)
+  // 顧客リンクの流入元は受付側で用途照合され、採用用の流入元は顧客側では捨てられる（帰属しない）。
+  const guestUser=await customerSession(connection,user,store)
   assert.equal(expect(await request('/customer/form?form='+form.id,{cookie:guestUser.cookie}),200),null)
   assert.equal(expect(await request('/interview/form',{cookie:person.cookie}),200).id,form.id)
   assert.equal(expect(await request('/interview/form?form='+second.id,{cookie:person.cookie}),200).id,second.id)
@@ -973,8 +988,9 @@ test('採用と顧客の回答フォーム・版・流入QRを分離し、店舗
   assert.doesNotMatch(JSON.stringify(response),/answers_box|applicant_key/)
   assert.deepEqual(expect(await request(guest+'/responses',{cookie:admin}),200),[])
   expect(await request(candidate+'/responses',{cookie:other}),404)
+  // 流入元QR（LIFF URL前提）は撤去済みで、入口は postback 文字列のみ。
+  expect(await request(candidate+'/sources/'+entry.id+'/qr',{cookie:admin}),404)
   expect(await request(guest+'/sources/'+entry.id+'/qr',{cookie:admin}),404)
-  assert.match(expect(await request(candidate+'/sources/'+entry.id+'/qr',{cookie:admin}),200).image,/^data:image\/png;base64,/)
   let [record]=expect(await request(root+'/recruitment',{cookie:admin}),200)
   assert.equal(record.applicant_name,'面談テスト')
   assert.equal(record.source,'求人媒体Ａ')
@@ -984,13 +1000,14 @@ test('採用と顧客の回答フォーム・版・流入QRを分離し、店舗
       trial_at:stage==='trial_scheduled'?new Date(Date.now()+86400000).toISOString():null}),200)
   }
   const report=expect(await request(candidate+'/sources',{cookie:admin}),200)
-  assert.match(report.entries.find(source=>source.id===entry.id).url,/source=/)
+  assert.match(report.entries.find(source=>source.id===entry.id).postback,/source=/)
+  assert.equal(report.entries.find(source=>source.id===entry.id).url,undefined)
   assert.deepEqual(report.entries.map(source=>[source.opened,source.forms,source.interviewed,source.trials,source.hired]),[[1,1,1,1,1],[0,0,0,0,0]])
   assert.equal(expect(await request(guest+'/sources',{cookie:admin}),200).entries.find(source=>source.id===channelOnly.id).opened,0)
 })
 
 test('担当者別の空き枠・Googleへの登録と取消・LINEメニュー・面談通知・キャンセル待ち',async()=>{
-  const {root,connection,inbound}=await workflowStore('面談フロー検証','recruitment','6',{
+  const {store,root,connection,inbound}=await workflowStore('面談フロー検証','recruitment','6',{
     reminders_enabled:true,waitlist_enabled:true,rich_menus_enabled:true,interviewers_enabled:true,google_write_enabled:true,
   })
   const path=root+'/interviews'
@@ -998,9 +1015,8 @@ test('担当者別の空き枠・Googleへの登録と取消・LINEメニュー�
   const normal='richmenu-'+'1'.repeat(32), booked='richmenu-'+'2'.repeat(32)
   expect(await put(menusPath,admin,{channel:connection,revision:0,base_menu:normal,booked_menu:'richmenu-'+'0'.repeat(32)}),422)
   expect(await put(menusPath,admin,{channel:connection,revision:0,base_menu:normal,booked_menu:booked}),200)
-  const first=await post('/interview/login',null,{connection,id_token:'signed-token-first-user'})
-  const second=await post('/interview/login',null,{connection,id_token:'signed-token-second-user'})
-  expect(first,200);expect(second,200)
+  const first=await interviewSession(connection,user,store)
+  const second=await interviewSession(connection,user2,store)
   assert.equal((await inbound([event('host-follow-a','follow',Date.now()),{
     ...event('host-follow-b','follow',Date.now()),source:{type:'user',userId:user2},
   }])).status,200)
@@ -1051,13 +1067,12 @@ test('担当者別の空き枠・Googleへの登録と取消・LINEメニュー�
 })
 
 test('一斉配信は承認・送信直前の同意確認を守り、兼用LINEの受信は振り分け前に漏れない',async()=>{
-  const {root,connection,inbound}=await workflowStore('配信・受信箱検証','shared','7',{campaigns_enabled:true,inbox_enabled:true})
+  const {store,root,connection,inbound}=await workflowStore('配信・受信箱検証','shared','7',{campaigns_enabled:true,inbox_enabled:true})
   const customers=root+'/workflows/customer'
   const intake=root+'/intake'
-  const one=await post('/customer/login',null,{connection,id_token:'signed-token-first-user'})
-  const two=await post('/customer/login',null,{connection,id_token:'signed-token-second-user'})
+  const one=await customerSession(connection,user,store)
+  const two=await customerSession(connection,user2,store)
   for(const [person,name] of [[one,'試験ひとり目'],[two,'試験ふたり目']]){
-    expect(person,200)
     const account=expect(await request('/customer/account',{cookie:person.cookie}),200)
     expect(await patch('/customer/preferences',person.cookie,{revision:account.revision,version:account.policy_version,
       preferences:{service_consent:true,marketing_consent:true,all_stop:false}}),200)
@@ -1217,12 +1232,12 @@ async function verifySupervisorModuleLink(tenantRequest,store,supervisorCookie){
     assert.equal(linked.module_status,'attached')
     assert.equal(linked.label,'かんたん連携テスト')
     assert.equal(linked.basic_id,'@testshop')
-    assert.equal(linked.liff_url,null)
+    assert.ok(!('liff_url' in linked))
     assert.equal(linked.status,'pending')
     assert.ok(!JSON.stringify(linked).includes(moduleConfig.secret))
     assert.ok(!JSON.stringify(linked).includes(moduleToken))
     assert.ok(!expect(await readStore('/stores/'+storeId+'/connections'),200).find(c=>c.id===done.id))
-    expect(await request('/liff/'+done.id),409)
+    expect(await request('/liff/'+done.id),404)
     assert.equal((await moduleWeb(moduleBot,[])).status,200)
     assert.equal((await moduleWeb(moduleBot,[message('偽の受信')],channelSecret)).status,401)
     assert.equal((await moduleWeb(bot,[message('別のチャネル')])).status,200)
@@ -1418,8 +1433,8 @@ test('店長引き継ぎは会話単位でステップ配信と管理会社の�
   await publish({...draft,name:'店長対応の検証',channel:connection,trigger:'manual',rejoin:true,cooldownDays:1,
     entry:'message',nodes:[{id:'message',type:'message',name:'案内',category:'service',body,next:'end'},
       {id:'end',type:'end',name:'完了'}]},store)
-  const customer=await post('/customer/login',null,{connection,id_token:'signed-token-first-user'})
-  const second=await post('/customer/login',null,{connection,id_token:'signed-token-second-user'})
+  const customer=await customerSession(connection,user,store)
+  const second=await customerSession(connection,user2,store)
   for(const person of [customer,second]){
     const account=expect(await request('/customer/account',{cookie:person.cookie}),200)
     expect(await patch('/customer/preferences',person.cookie,{revision:account.revision,version:account.policy_version,
@@ -1488,9 +1503,8 @@ test('店長引き継ぎは会話単位でステップ配信と管理会社の�
 })
 
 test('採用専用LINEでは店長対応中の面談通知を見送り、終了後の新しい通知を送る', async()=>{
-  const {root,connection,inbound}=await workflowStore('採用の店長引き継ぎ','recruitment','0',{inbox_enabled:true,reminders_enabled:true})
-  const person=await post('/interview/login',null,{connection,id_token:'signed-token-first-user'})
-  expect(person,200)
+  const {store,root,connection,inbound}=await workflowStore('採用の店長引き継ぎ','recruitment','0',{inbox_enabled:true,reminders_enabled:true})
+  const person=await interviewSession(connection,user,store)
   const at=Date.now()
   assert.equal((await inbound([
     event('recruitment-handoff-follow','follow',at),
@@ -1545,8 +1559,11 @@ test('接続確認中の採用通知は検収済みのテスト利用者への�
     {...event(randomUUID(),'follow',Date.now()),source:{type:'user',userId:user2}},
   ])).status,200)
   expect(await post(connectionPath+'/tests/'+tester.id+'/send',admin,{},idempotency()),404)
-  expect(await post('/auth/line/verify',null,{connection,purpose:'recruitment',code:tester.code,
-    id_token:'signed-token-first-user',allow_test_message:true}),200)
+  // テスター確認はメッセージ方式（トークで「接続テスト {code}」を送信）。
+  assert.equal((await inbound([
+    {...event(randomUUID(),'message',Date.now()),message:{id:'21802',type:'text',text:'接続テスト '+tester.code}},
+  ])).status,200)
+  await worker()
   assert.equal(expect(await request(connectionPath+'/tests',{cookie:admin}),200)[0].received,true)
   expect(await post(connectionPath+'/tests/'+tester.id+'/send',admin,{},idempotency()),202)
   await worker()
@@ -1554,10 +1571,9 @@ test('接続確認中の採用通知は検収済みのテスト利用者への�
     delivery_confirmed:true,reason:'開発者のLINE端末に到着',revision:await channelRevision()}),200)
   assert.notEqual(confirmed.status,'connected')
 
-  const one=await post('/interview/login',null,{connection,id_token:'signed-token-first-user'})
-  const two=await post('/interview/login',null,{connection,id_token:'signed-token-second-user'})
+  const one=await interviewSession(connection,user,store)
+  const two=await interviewSession(connection,user2,store)
   for(const user of [one,two]){
-    expect(user,200)
     expect(await put('/interview/notices',user.cookie,{enabled:true}),200)
   }
   const {today}=expect(await request('/interview/calendar',{cookie:one.cookie}),200)
