@@ -22,9 +22,10 @@ export async function recordSource(db:DB,identity:WorkflowSubject,source:string|
 
 export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpose'],days:number) {
   await requireFeature(db,store,'sources_enabled')
+  // LIFF未設定のチャネルでも流入元を作れる（帰属はトークン発行時の紐づけで記録される）。
   const {rows:channels}=await db.query(`SELECT id,label FROM channel WHERE purpose IN ($1,'shared')
-    AND liff_id IS NOT NULL ORDER BY label,id`,[use])
-  const {rows}=await db.query<{id:string;liff_id:string}>(`
+    ORDER BY label,id`,[use])
+  const {rows}=await db.query<{id:string;liff_id:string|null}>(`
     SELECT w.id,w.label,w.active,c.label AS channel_label,c.liff_id,
       coalesce(stats.opened,0) AS opened,coalesce(stats.forms,0) AS forms,
       coalesce(stats.booked,0) AS booked,coalesce(stats.interviewed,0) AS interviewed,
@@ -50,7 +51,11 @@ export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpo
       WHERE t.source_id=w.id AND t.attributed_at>=now()-make_interval(days=>$2)
     ) stats ON true WHERE w.purpose=$1 ORDER BY w.label,w.id`,[use,days])
   return {channels,entries:rows.map(({liff_id,...row})=>({
-    ...row,url:sourceLink(row.id,liff_id,use),
+    ...row,
+    // LIFFがあるチャネルは従来どおり LIFF URL を入口にする。LIFFがないチャネルでは、
+    // リッチメニューの postback データにこの文字列を設定し、トークン発行時に紐づける。
+    url:liff_id?sourceLink(row.id,liff_id,use):null,
+    postback:'action='+(use==='recruitment'?'interview_link':'customer_link')+'&source='+row.id,
   }))}
 }
 
@@ -66,7 +71,7 @@ export async function saveSource(db:DB,actor:Actor,store:string,use:WorkflowSubj
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'sources_enabled')
   const connection=await channel(db,data.channel)
-  if(!connection.liff_id||connection.store_id!==store||!['shared',use].includes(connection.purpose))throw missing()
+  if(connection.store_id!==store||!['shared',use].includes(connection.purpose))throw missing()
   const {rows:[entry]}=await db.query(`INSERT INTO workflow_source (id,tenant_id,store_id,channel_id,purpose,label)
     VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,[newId(),actor.tenant_id,store,data.channel,use,data.label])
   await audit(db,actor.tenant_id,store,actor.id,'source.create',entry.id,null,{purpose:use})

@@ -7,6 +7,11 @@ import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
 import type { Graph } from './scenario.js'
 import { messageBudget } from './delivery-budget.js'
+import { CUSTOMER_LINK_MARKER, customerLinkEligible, issueCustomerLinkToken } from './customer-link.js'
+
+// {{customer_link}} は送信直前に受信者ごと発行するため、step 時点では送信ジョブIDを含む
+// プレースホルダURLで描画して封緘し、submit 直前に実URLへ差し替える（プレースホルダは決定的に再現できる）。
+const customerLinkPlaceholder=(sendId:string)=>'https://link.invalid/customer-link/'+sendId
 
 const minute=60000
 const day=1440*minute
@@ -161,7 +166,8 @@ async function currentBooking(db:DB,run:Run,cst:Customer) {
   return linked
 }
 
-async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,cst:Customer,booking?:Booking) {
+async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,cst:Customer,booking?:Booking):
+  Promise<{values:Record<string,string>,bookingLinkValid:boolean}> {
   let staff=''
   if (cst.assigned_to) {
     const {rows:[owner]}=await db.query(`SELECT f.id FROM staff f WHERE f.id=$1 AND f.disabled_at IS NULL
@@ -255,15 +261,24 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|n
     await db.query('UPDATE enrollment SET due_at=$2 WHERE id=$1',[run.id,new Date(due)])
     return null
   }
-  const exclude=reason || (expired||due===null?'予定時刻を過ぎたため保留':null) ||
+  const id=newId()
+  const person=await liveValues(db,cfg,s,c,p,booking)
+  // 来店予約・設定URLは実URLをこの時点では発行せず、プレースホルダで封緘する（発行は submit 直前）。
+  // 発行条件を満たさない場合は、このメッセージを保留してURLを送らない（面談のシナリオ経路と同じ挙動）。
+  let linkHeld:string|null=null
+  if (node.body.includes(CUSTOMER_LINK_MARKER)) {
+    if (await customerLinkEligible(db,c,c.generation,p.user_key,true)) {
+      person.values.customer_link=customerLinkPlaceholder(id)
+    } else linkHeld='来店予約・設定URLの発行条件を満たしていません'
+  }
+  const exclude=reason || (expired||due===null?'予定時刻を過ぎたため保留':null) || linkHeld ||
     await allowance(db,s,run,p,node.category)
-  const rendered=renderMessage(node.body,await liveValues(db,cfg,s,c,p,booking))
+  const rendered=renderMessage(node.body,person)
   if (exclude || !rendered.message) {
     await note(db,run,'held',exclude??rendered.reason??'差し込み値がありません')
     await advance(db,run,node.next,run.due_at)
     return null
   }
-  const id=newId()
   const result=await db.query<Job>(`INSERT INTO automatic_send(id,tenant_id,store_id,channel_id,enrollment_id,
     customer_id,node_id,body_box,category,generation,status,next_at)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'submitting',now()+interval '45 seconds')
@@ -324,7 +339,12 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
     const s=await locationOf(db,r.store_id)
     const booking=await currentBooking(db,run,p)
     const current=run.graph.nodes.find(node=>node.id===job.node_id)
-    const expected=current?.type==='message' ? renderMessage(current.body,await liveValues(db,cfg,s,c,p,booking)).message : undefined
+    const person=await liveValues(db,cfg,s,c,p,booking)
+    // 封緘時と同じプレースホルダで再描画し、差し込み値の同一性を照合する（実URLはまだ発行しない）。
+    if (current?.type==='message' && current.body.includes(CUSTOMER_LINK_MARKER)) {
+      person.values.customer_link=customerLinkPlaceholder(job.id)
+    }
+    const expected=current?.type==='message' ? renderMessage(current.body,person).message : undefined
     const body=job.body_box?unseal(cfg,'automatic:'+job.id,job.body_box):''
     const time=Date.now()
     const reason=fresh.next_at===Infinity?'停止または予約変更後のジョブ':
@@ -340,7 +360,27 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
       return null
     }
     const to=unseal(cfg,'customer:'+c.id+':'+p.user_key,p.line_address)
-    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,body)
+    let sendBody=body
+    const placeholder=customerLinkPlaceholder(job.id)
+    if (body.includes(placeholder)) {
+      // 来店予約・設定URLは送信の直前に受信者ごと発行する（トークンの3時間期限は送信時点から数える）。
+      // 発行条件を満たさなくなっていた場合は、プレースホルダのまま送らず送信を取りやめる。
+      const abort=async (why:string)=>{
+        await db.query(`UPDATE automatic_send SET status=$2,reason=$3,next_at='infinity',body_box=NULL WHERE id=$1`,
+          [job.id,job.attempt===1?'cancelled':'unknown',why])
+        await end(db,run,why)
+        return null
+      }
+      if (!await customerLinkEligible(db,c,c.generation,p.user_key,true)) {
+        return abort('来店予約・設定URLの発行条件を満たしません')
+      }
+      const link=await issueCustomerLinkToken(db,cfg,c,to)
+      await audit(db,c.tenant_id,c.store_id,null,'customer_link.issue',link.id,null,
+        {channel_id:c.id,source:'scenario_auto',enrollment_id:run.id})
+      sendBody=body.split(placeholder).join(link.url)
+      if (sendBody.length>5000) return abort('差し込み後に5000文字を超えています')
+    }
+    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody)
       .catch(()=>({status:'unknown',requestId:null,authError:false}))}
   })
   if (!submitted) return

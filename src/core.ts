@@ -74,11 +74,18 @@ export function unseal(cfg: Config, context: string, value: string) {
 
 export function poolFor(url: string | undefined) {
   if (!url) throw new Error('Database URL is required.')
-  return new pg.Pool({
+  const pool = new pg.Pool({
     connectionString: url,
     options: '-c search_path=night,pg_catalog -c timezone=UTC -c statement_timeout=8000',
     connectionTimeoutMillis: 5000,
   })
+  // プールが idle クライアントのエラーを 'error' イベントとして再発火したとき、
+  // 受け手が無いと EventEmitter が throw してプロセスが落ちる（DB再起動時の
+  // 57P01 等）。既定の受け手を付け、記録だけしてプロセスは生かす。
+  pool.on('error', error => {
+    console.error('database pool error', error.message)
+  })
+  return pool
 }
 
 export async function assertAppRole(pool: pg.Pool) {

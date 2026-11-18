@@ -46,6 +46,10 @@ import { serviceHistory } from './service-delivery.js'
 import { changeThread, classifyThread, handoffInput, changeHandoff, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
 import { hostInput, queueGoogleSync, saveHost } from './interview-hosts.js'
 import { redeemInterviewLink } from './interview-link.js'
+import { completeStoreSetup, confirmStoreSetup, createRegistration, designateRegistrationMaster,
+  registrationInput, registrationProgress, reopenStoreSetup, setupConfirmInput, setupRevisionInput,
+  storeSetupState } from './registration.js'
+import { CUSTOMER_LINK_SESSION_TTL_SECONDS, redeemCustomerLink } from './customer-link.js'
 import { workflowChecks } from './workflow-checks.js'
 
 
@@ -127,6 +131,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     if (/\.(mjs|css)$/i.test(req.path)) interviewAssets(req,res,next)
     else next()
   })
+  app.get('/customer/token.html',(_req,res)=>res.sendFile(here('../public/customer/token.html')))
+  const customerAssets=express.static(here('../public/customer'),{index:false,redirect:false})
+  workspace.use('/customer',(req,res,next)=>{
+    if (/\.(mjs|css)$/i.test(req.path)) customerAssets(req,res,next)
+    else next()
+  })
   app.get(['/api/health','/healthz'],async(_req,res)=>{ await pool.query('SELECT 1');res.json({status:'ok'}) })
   app.get('/',(_req,res)=>{
     if (cfg.publicBookingConnection) res.redirect(302,'/book/'+cfg.publicBookingConnection)
@@ -184,6 +194,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.get('/reserve/:connection',(req,res)=>{
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/interview/token.html'))
+  })
+  app.get('/account/:connection',(req,res)=>{
+    idOf(req,'connection')
+    res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
   const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','supervisor-handoff.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
@@ -243,6 +257,19 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.get('/platform/tenants',async(req,res)=>{
     res.json(await tx(pool,db=>platformTenants(db,platformCredential(req))))
+  })
+  api.post('/platform/registrations',async(req,res)=>{
+    const data=registrationInput.parse(req.body)
+    const principal=await tx(pool,db=>platformPrincipal(db,platformCredential(req)))
+    res.status(201).json(await tx(pool,db=>createRegistration(db,cfg,principal,data,keyOf(req))))
+  })
+  api.get('/platform/registrations/progress',async(req,res)=>{
+    res.json(await tx(pool,async db=>registrationProgress(db,await platformPrincipal(db,platformCredential(req)))))
+  })
+  api.post('/platform/registrations/:tenant/master',async(req,res)=>{
+    const {address}=z.strictObject({address:email}).parse(req.body)
+    res.json(await tx(pool,async db=>designateRegistrationMaster(db,
+      await platformPrincipal(db,platformCredential(req)),idOf(req,'tenant'),address)))
   })
   api.post('/platform/tenants/:tenant/enter',async(req,res)=>{
     z.strictObject({}).parse(req.body)
@@ -354,6 +381,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     await gate(pool,cfg,'interview-link-redeem:'+connection+':'+address(req),60)
     const cookie=await redeemInterviewLink(pool,cfg,connection,req.body)
     res.set('Set-Cookie',cookie).json({signed_in:true})
+  })
+  api.post('/customer-link/:connection/redeem',async(req,res)=>{
+    const connection=idOf(req,'connection')
+    await gate(pool,cfg,'customer-link-redeem:'+connection+':'+address(req),60)
+    const value=await redeemCustomerLink(pool,cfg,connection,req.body)
+    res.set('Set-Cookie',customerSessionCookie(cfg,value,CUSTOMER_LINK_SESSION_TTL_SECONDS)).json({signed_in:true})
   })
   const guestPath='/guest-interview/:connection'
   const guestApplicant=(db:DB,req:Request,write=false)=>{
@@ -646,6 +679,13 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       ORDER BY f.email LIMIT 150`)
     return rows
   }))
+  api.get('/stores/:store/setup',inStore((db,_actor,req)=>storeSetupState(db,cfg,idOf(req,'store')),false))
+  api.post('/stores/:store/setup/confirm',inStore((db,actor,req)=>
+    confirmStoreSetup(db,cfg,actor,idOf(req,'store'),setupConfirmInput.parse(req.body))))
+  api.post('/stores/:store/setup/complete',inStore((db,actor,req)=>
+    completeStoreSetup(db,cfg,actor,idOf(req,'store'),setupRevisionInput.parse(req.body))))
+  api.post('/stores/:store/setup/reopen',inStore((db,actor,req)=>
+    reopenStoreSetup(db,actor,idOf(req,'store'),setupRevisionInput.parse(req.body))))
   api.get('/stores/:store/features',inStore((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
   api.patch('/stores/:store/features',inStore((db,actor,req)=>{
     requireAdmin(actor)

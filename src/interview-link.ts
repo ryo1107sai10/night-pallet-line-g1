@@ -11,6 +11,7 @@ import { locationOf } from './automation.js'
 import type { WorkflowSubject } from './forms.js'
 import { rememberContact } from './rich-menus.js'
 import { queueService } from './service-delivery.js'
+import { recordSource } from './sources.js'
 
 // D2: トークン有効期限は3時間。D3: 引換後のセッション有効期限は2時間。
 export const LINK_TOKEN_TTL_SECONDS = 3 * 3600
@@ -40,7 +41,7 @@ type CreatedLink = { id: string; raw: string; url: string; expires: Date }
 
 // 未使用リンクは応募者ごとに常に1本だけ生かす（再発行で旧リンクを失効させる）。
 async function createLinkToken(db: DB, cfg: Config, c: Channel, identity: {
-  user_key: string; applicant_key: string; booking_id?: string
+  user_key: string; applicant_key: string; booking_id?: string; source_id?: string
 }): Promise<CreatedLink> {
   await db.query(`UPDATE interview_link_token SET revoked_at=now()
     WHERE channel_id=$1 AND applicant_key=$2 AND used_at IS NULL AND revoked_at IS NULL`,
@@ -49,17 +50,21 @@ async function createLinkToken(db: DB, cfg: Config, c: Channel, identity: {
   const id = newId()
   const expires = new Date(Date.now() + LINK_TOKEN_TTL_SECONDS * 1000)
   await db.query(`INSERT INTO interview_link_token
-    (id,token_hash,tenant_id,store_id,channel_id,generation,user_key,applicant_key,booking_id,expires_at)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    (id,token_hash,tenant_id,store_id,channel_id,generation,user_key,applicant_key,booking_id,expires_at,source_id)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
     [id, digest(raw), c.tenant_id, c.store_id, c.id, c.generation, identity.user_key,
-      identity.applicant_key, identity.booking_id ?? null, expires])
+      identity.applicant_key, identity.booking_id ?? null, expires, identity.source_id ?? null])
   return { id, raw, url: interviewLinkUrl(cfg, c.id, raw), expires }
 }
 
 // 発行ガード: postback 経路（フローA）とシナリオ経路（フローD）で共通。
 // 採用専用OA・友だち状態・機能フラグ・停止状態・世代一致をすべて満たす場合のみ true。
-export async function interviewLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string) {
-  if (c.purpose !== 'recruitment' || c.stopped || generation !== c.generation) return false
+// 兼用OAでの発行は postback 経路だけが allowShared=true を渡す（action=interview_link が用途の振り分けになる）。
+// シナリオ経路は従来どおり採用専用OAのみ（フェーズ2で固定した挙動を変えない）。
+export async function interviewLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string,
+  allowShared = false) {
+  const purposeOk = c.purpose === 'recruitment' || (allowShared && c.purpose === 'shared')
+  if (!purposeOk || c.stopped || generation !== c.generation) return false
   const features = await storeFeatures(db, c.store_id)
   if (!features.interviews_enabled || !features.token_interviews_enabled) return false
   const { rows: [rel] } = await db.query<{ following: boolean }>(
@@ -76,18 +81,19 @@ export async function interviewLinkEligible(db: DB, c: Channel, generation: numb
 
 // 発行の共通部品: 宛先を登録し、未使用の旧リンクを失効させて新しいトークンを1本作る。
 // 送信（Pushのキュー投入や本文への差し込み）と監査は呼び出し側が行う。
-export async function issueInterviewLinkToken(db: DB, cfg: Config, c: Channel, user: string) {
+// sourceId は流入分析用（項目4）: postback に含まれていた流入元をトークンへ引き継ぐ。
+export async function issueInterviewLinkToken(db: DB, cfg: Config, c: Channel, user: string, sourceId?: string) {
   const applicantKey = keyed(cfg, 'interview:' + c.id + ':' + user)
   const subject = subjectFor(c, applicantKey)
   await rememberContact(db, cfg, c, user, subject)
-  return createLinkToken(db, cfg, c, { user_key: userKey(cfg, c, user), applicant_key: applicantKey })
+  return createLinkToken(db, cfg, c, { user_key: userKey(cfg, c, user), applicant_key: applicantKey, source_id: sourceId })
 }
 
 // フローA: リッチメニューの postback を受けたワーカーから呼ぶ。呼び出し側のトランザクション内で実行する。
-export async function issueInterviewLink(db: DB, cfg: Config, c: Channel, user: string) {
+export async function issueInterviewLink(db: DB, cfg: Config, c: Channel, user: string, sourceId?: string) {
   const applicantKey = keyed(cfg, 'interview:' + c.id + ':' + user)
   const subject = subjectFor(c, applicantKey)
-  const link = await issueInterviewLinkToken(db, cfg, c, user)
+  const link = await issueInterviewLinkToken(db, cfg, c, user, sourceId)
   const body = '面談予約のご案内です。下記のURLからご希望の日時をお選びください（有効期限: 発行から3時間）。\n' + link.url
   await queueService(db, cfg, subject, {
     kind: 'interview_link', object: link.id, revision: 1, due: new Date(), expiry: link.expires, body,
@@ -127,12 +133,14 @@ export async function redeemInterviewLink(pool: pg.Pool, cfg: Config, connection
     if (c.stopped) throw linkInvalid()
     const { rows: [row] } = await db.query<{
       id: string; generation: number; applicant_key: string; expires_at: Date;
-      used_at: Date | null; revoked_at: Date | null
+      used_at: Date | null; revoked_at: Date | null; source_id: string | null
     }>('SELECT * FROM interview_link_token WHERE token_hash=$1 AND channel_id=$2', [digest(raw), c.id])
     if (!row || row.revoked_at) throw linkInvalid()
     if (row.used_at) throw linkUsed()
     if (+row.expires_at <= Date.now()) throw linkExpired()
     if (row.generation !== c.generation) throw linkInvalid()
+    // 流入元の帰属は、LIFF経路のログイン時と同じく本人確認が成立した時点で記録する（項目4）。
+    await recordSource(db, subjectFor(c, row.applicant_key), row.source_id ?? undefined)
     const session = token()
     await db.query(`INSERT INTO interview_session
       (token_hash,tenant_id,store_id,channel_id,generation,applicant_key,expires_at,audience,link_token_hash)
