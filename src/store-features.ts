@@ -12,6 +12,7 @@ export const featureInput = z.strictObject({
   interviewers_enabled:z.boolean().optional(),google_write_enabled:z.boolean().optional(),
   guest_interviews_enabled:z.boolean().optional(),
   token_interviews_enabled:z.boolean().optional(),
+  token_customers_enabled:z.boolean().optional(),
 })
 type FeatureInput = z.infer<typeof featureInput>
 type StoreFeatures = Required<FeatureInput>
@@ -26,6 +27,7 @@ const labels:Record<Feature,string> = {
   interviewers_enabled:'担当者別の面談枠',google_write_enabled:'Googleカレンダーへの面談登録',
   guest_interviews_enabled:'ログイン不要の対面面談予約',
   token_interviews_enabled:'LINEトークからの面談予約（LIFFなし）',
+  token_customers_enabled:'LINEトークからの来店予約・設定（LIFFなし）',
 }
 const columns = 'revision,'+Object.keys(labels).join(',')
 const firstFeatures:Feature[]=['tags_enabled','visits_enabled','interviews_enabled','google_calendar_enabled']
@@ -68,13 +70,13 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
       AND status IN ('queued','submitting','unknown')`,[store,features.campaigns_enabled===false])
   }
   if (features.reminders_enabled===false||features.waitlist_enabled===false||features.inbox_enabled===false
-    ||features.token_interviews_enabled===false) {
+    ||features.token_interviews_enabled===false||features.token_customers_enabled===false) {
     await db.query(`UPDATE service_delivery SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
       next_at='infinity',reason='店舗で機能を停止' WHERE store_id=$1 AND status IN ('queued','submitting','unknown')
       AND (($2 AND kind IN ('interview_confirm','interview_reminder')) OR ($3 AND kind='interview_waitlist') OR ($4 AND kind='chat_reply')
-        OR ($5 AND kind='interview_link'))`,
+        OR ($5 AND kind='interview_link') OR ($6 AND kind='customer_link'))`,
     [store,features.reminders_enabled===false,features.waitlist_enabled===false,features.inbox_enabled===false,
-      features.token_interviews_enabled===false])
+      features.token_interviews_enabled===false,features.token_customers_enabled===false])
   }
   await audit(db,actor.tenant_id,store,actor.id,'store.features',store,null,features)
   return settings

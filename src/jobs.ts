@@ -5,6 +5,7 @@ import { channel, channelCredentials, channelTestReady, LineAPI, userKey } from 
 import { lockDispatch } from './dispatch-lock.js'
 import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
 import { INTERVIEW_LINK_MARKER, interviewLinkEligible, issueInterviewLink, issueInterviewLinkToken } from './interview-link.js'
+import { customerLinkEligible, issueCustomerLink } from './customer-link.js'
 import { deliverCampaign } from './campaigns.js'
 import { updateRichMenu } from './rich-menus.js'
 import { deliverService } from './service-delivery.js'
@@ -74,6 +75,9 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
     if (event.kind==='postback'&&event.action==='interview_link'&&event.user_key&&event.recipient_box) {
       await tryIssueInterviewLink(db,cfg,c,event)
     }
+    if (event.kind==='postback'&&event.action==='customer_link'&&event.user_key&&event.recipient_box) {
+      await tryIssueCustomerLink(db,cfg,c,event)
+    }
     await processCustomerWebhook(db,cfg,c,event)
     if(event.user_key&&event.stop_signal==='all')await db.query(`UPDATE workflow_contact SET notices=false
       WHERE channel_id=$1 AND user_key=$2 AND notices_changed_at<=$3`,[c.id,event.user_key,event.occurred_at])
@@ -85,12 +89,23 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
 // LIFFなし面談予約: リッチメニューの postback から予約リンクを発行する。
 // 発行条件（採用専用OA・友だち状態・機能フラグ・停止状態）は interviewLinkEligible で共通判定する。
 async function tryIssueInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,event:{
-  event_id:string;generation:number;user_key:string|null;recipient_box:string|null
+  event_id:string;generation:number;user_key:string|null;recipient_box:string|null;source_id:string|null
 }) {
   if (!event.user_key) return
   if (!await interviewLinkEligible(db,c,event.generation,event.user_key)) return
   const user=unseal(cfg,'webhook:'+c.id+':'+event.event_id,event.recipient_box!)
-  await issueInterviewLink(db,cfg,c,user)
+  await issueInterviewLink(db,cfg,c,user,event.source_id ?? undefined)
+}
+
+// LIFFなし顧客向けリンク: リッチメニューの postback から来店予約・設定用リンクを発行する（フェーズ3・項目3）。
+// 発行条件は customerLinkEligible（顧客専用OA・友だち状態・機能フラグ・停止状態）で共通判定する。
+async function tryIssueCustomerLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,event:{
+  event_id:string;generation:number;user_key:string|null;recipient_box:string|null;source_id:string|null
+}) {
+  if (!event.user_key) return
+  if (!await customerLinkEligible(db,c,event.generation,event.user_key)) return
+  const user=unseal(cfg,'webhook:'+c.id+':'+event.event_id,event.recipient_box!)
+  await issueCustomerLink(db,cfg,c,user,event.source_id ?? undefined)
 }
 
 // フローD: シナリオのテスト送信に含まれる面談予約URLマーカーを、送信直前に受信者ごとの実URLへ置き換える。
