@@ -19,6 +19,9 @@ import { createLinkToken, findLinkToken } from './link-token.js'
 // LIFF経路の customer_session は30分のまま変えない。
 export const CUSTOMER_LINK_SESSION_TTL_SECONDS = 2 * 3600
 
+// シナリオ本文の差し込み変数。面談の INTERVIEW_LINK_MARKER と対で、送信直前に受信者ごとの実URLへ置き換える。
+export const CUSTOMER_LINK_MARKER = '{{customer_link}}'
+
 export const customerLinkUrl = (cfg: Config, connection: string, raw: string) =>
   cfg.origin + '/account/' + connection + '?t=' + raw
 
@@ -27,10 +30,14 @@ const linkInvalid = () => new Fault(401, 'LINK_INVALID',
 const linkExpired = () => new Fault(410, 'LINK_EXPIRED',
   'このURLは有効期限が切れています。LINEのトーク画面メニューから再度「来店予約・設定」をタップしてください。')
 
-// 発行ガード: postback 経路の共通判定。顧客専用OA・友だち状態・機能フラグ・停止状態・
-// 世代一致をすべて満たす場合のみ true（兼用OAは面談の D5 と同じく対象外から始める）。
-export async function customerLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string) {
-  if (c.purpose !== 'customer' || c.stopped || generation !== c.generation) return false
+// 発行ガード: postback 経路とシナリオ経路の共通判定。顧客専用OA・友だち状態・機能フラグ・
+// 停止状態・世代一致をすべて満たす場合のみ true。
+// 兼用OAは、postback（action=customer_link が振り分けになる）と、顧客シナリオの配信先として
+// 正規に使えるシナリオ経路だけが allowShared=true を渡す（フェーズ4）。
+export async function customerLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string,
+  allowShared = false) {
+  const purposeOk = c.purpose === 'customer' || (allowShared && c.purpose === 'shared')
+  if (!purposeOk || c.stopped || generation !== c.generation) return false
   const features = await storeFeatures(db, c.store_id)
   if (!features.token_customers_enabled) return false
   const { rows: [rel] } = await db.query<{ following: boolean }>(
@@ -45,9 +52,9 @@ export async function customerLinkEligible(db: DB, c: Channel, generation: numbe
   return true
 }
 
-// フロー: リッチメニューの postback を受けたワーカーから呼ぶ。呼び出し側のトランザクション内で実行する。
-// 顧客レコードを確定させ、宛先を登録してから、リンクURL入りの Push を配信キューへ積む。
-export async function issueCustomerLink(db: DB, cfg: Config, c: Channel, user: string, sourceId?: string) {
+// 発行の共通部品: 顧客レコードを確定させ、宛先を登録して新しいトークンを1本作る。
+// 送信（Pushのキュー投入やシナリオ本文への差し込み）と監査は呼び出し側が行う（面談の issueInterviewLinkToken と対）。
+export async function issueCustomerLinkToken(db: DB, cfg: Config, c: Channel, user: string, sourceId?: string) {
   const customer = await ensureCustomer(db, cfg, c, user, false, userKey(cfg, c, user))
   const identity: WorkflowSubject = {
     tenant_id: c.tenant_id, store_id: c.store_id, channel_id: c.id, purpose: 'customer', subject: customer.id,
@@ -56,13 +63,19 @@ export async function issueCustomerLink(db: DB, cfg: Config, c: Channel, user: s
   const link = await createLinkToken(db, c, {
     purpose: 'customer', subject: customer.id, user_key: userKey(cfg, c, user), source_id: sourceId,
   })
-  const url = customerLinkUrl(cfg, c.id, link.raw)
-  const body = '来店予約・配信設定のご案内です。下記のURLから、予約の確認・変更と配信設定を行えます（有効期限: 発行から3時間）。\n' + url
-  await queueService(db, cfg, identity, {
+  return { ...link, url: customerLinkUrl(cfg, c.id, link.raw), customer, identity }
+}
+
+// フロー: リッチメニューの postback を受けたワーカーから呼ぶ。呼び出し側のトランザクション内で実行する。
+// 発行したリンクURL入りの Push を配信キューへ積む。
+export async function issueCustomerLink(db: DB, cfg: Config, c: Channel, user: string, sourceId?: string) {
+  const link = await issueCustomerLinkToken(db, cfg, c, user, sourceId)
+  const body = '来店予約・配信設定のご案内です。下記のURLから、予約の確認・変更と配信設定を行えます（有効期限: 発行から3時間）。\n' + link.url
+  await queueService(db, cfg, link.identity, {
     kind: 'customer_link', object: link.id, revision: 1, due: new Date(), expiry: link.expires, body,
   })
   await audit(db, c.tenant_id, c.store_id, null, 'customer_link.issue', link.id, null, { channel_id: c.id })
-  return { ...link, url }
+  return link
 }
 
 // 引換: トークンを検証し、既存の customer_session を発行して Cookie 値（channelId.raw）を返す。
@@ -77,7 +90,7 @@ export async function redeemCustomerLink(pool: pg.Pool, cfg: Config, connection:
     await scope(db, target.tenant_id, target.store_id)
     await lockDispatch(db, target.tenant_id)
     const c = await channel(db, target.id)
-    if (c.purpose !== 'customer') throw missing()
+    if (c.purpose === 'recruitment') throw missing()
     await requireFeature(db, c.store_id, 'token_customers_enabled')
     if (c.stopped) throw linkInvalid()
     const row = await findLinkToken(db, c.id, raw)
