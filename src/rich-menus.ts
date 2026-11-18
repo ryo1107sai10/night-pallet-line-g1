@@ -17,7 +17,8 @@ export function contactAddress(cfg:Config,row:{channel_id:string;purpose:string;
 
 export async function rememberContact(db:DB,cfg:Config,c:Channel,user:string,identity:WorkflowSubject){
   const features=await storeFeatures(db,c.store_id)
-  if(!features.rich_menus_enabled&&!features.reminders_enabled&&!features.waitlist_enabled)return
+  if(!features.rich_menus_enabled&&!features.reminders_enabled&&!features.waitlist_enabled
+    &&!features.token_interviews_enabled)return
   const contact=seal(cfg,contactContext(c.id,identity.purpose,identity.subject),user)
   await db.query(`INSERT INTO workflow_contact (tenant_id,store_id,channel_id,purpose,subject,user_key,recipient_box,last_seen_at,menu_due_at)
     VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),CASE WHEN $8 THEN now() END)

@@ -9,7 +9,7 @@ import { storeFeatures } from './store-features.js'
 import type { WorkflowSubject } from './forms.js'
 import { contactAddress } from './rich-menus.js'
 
-type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'
+type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'|'interview_link'
 type Scheduled={kind:Kind;object:string;revision:number;due:Date;expiry:Date;body?:string;actor?:string}
 type ServiceJob=WorkflowSubject & {id:string;kind:Kind;object_id:string;object_revision:number;body_box:string|null;
   actor_id:string|null;generation:number;scope_version:string;status:string;attempt:number;next_at:Date|number;expires_at:Date;
@@ -59,12 +59,13 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
     return {userKey:thread.user_key,to:unseal(cfg,'inbox-recipient:'+job.channel_id+':'+thread.user_key,thread.address_box),
       body:unseal(cfg,'service:'+job.id,job.body_box)}
   }
-  if(!liffId)return
   const {rows:[contact]}=await db.query<{user_key:string;recipient_box:string;notices:boolean}>(`
     SELECT user_key,recipient_box,notices FROM workflow_contact WHERE channel_id=$1 AND purpose=$2 AND subject=$3`,
   [job.channel_id,job.purpose,job.subject])
-  if(!contact?.notices)return
-  if(verificationOnly&&!await testRecipient(db,connection,contact.user_key))return
+  if(!contact)return
+  // interview_link は本人がメニューをタップして依頼した送信なので、通知オプトインは要求しない。
+  if(job.kind!=='interview_link'&&!contact.notices)return
+  if(verificationOnly&&job.kind!=='interview_link'&&!await testRecipient(db,connection,contact.user_key))return
   const {rows:[activity]}=await db.query<{kind:string|null;stop:boolean;recent_message:boolean}>(`SELECT
     EXISTS (SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$4
       AND kind='message' AND occurred_at BETWEEN now()-interval '7 days' AND now()) AS recent_message,
@@ -75,8 +76,13 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   [job.channel_id,contact.user_key,job.subject,connection.generation])
   if(activity.stop||activity.kind==='unfollow'||!activity.kind&&!(verificationOnly&&activity.recent_message))return
   const to=contactAddress(cfg,{...job,recipient_box:contact.recipient_box})
-  const link='https://liff.line.me/'+liffId+'?use=recruitment'
+  if(job.kind==='interview_link'){
+    if(!job.body_box)return
+    return {userKey:contact.user_key,to,body:unseal(cfg,'service:'+job.id,job.body_box)}
+  }
+  const link=liffId?'https://liff.line.me/'+liffId+'?use=recruitment':''
   if(job.kind==='interview_waitlist'){
+    if(!link)return
     const slot=unseal(cfg,'service:'+job.id,job.body_box!)
     const {rowCount}=await db.query(`SELECT 1 FROM interview_waitlist w JOIN interview_slot s ON s.id=$3 AND s.channel_id=w.channel_id
       WHERE w.channel_id=$1 AND w.applicant_key=$2 AND w.until_at>=s.starts_at AND s.starts_at>now() AND w.method=s.method
@@ -93,7 +99,10 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   if(!booking)return
   const at=new Intl.DateTimeFormat('ja-JP',{dateStyle:'long',timeStyle:'short',timeZone:timezone}).format(booking.starts_at)
   const prefix=job.kind==='interview_reminder'?'面談のリマインドです。':'面談予約が確定しました。'
-  return {userKey:contact.user_key,to,body:[prefix,at+'（'+(booking.method==='onsite'?'対面':'オンライン')+'）',booking.instructions,link].join('\n')}
+  // D4: トークン経路の確定通知には、変更・取消用トークンURL（body_box）を同梱する。
+  const manage=job.kind==='interview_confirm'&&job.body_box?unseal(cfg,'service:'+job.id,job.body_box):null
+  return {userKey:contact.user_key,to,body:[prefix,at+'（'+(booking.method==='onsite'?'対面':'オンライン')+'）',booking.instructions,link,
+    ...(manage?['予約の確認・変更・取消はこちら',manage]:[])].filter(line=>line!=='').join('\n')}
 }
 
 export async function serviceHistory(db:DB,purpose:WorkflowSubject['purpose']){
@@ -140,9 +149,10 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     const location=await locationOf(db,r.store_id)
     const features=await storeFeatures(db,r.store_id)
     const enabled=job.kind==='chat_reply'?features.inbox_enabled:
+      job.kind==='interview_link'?features.interviews_enabled&&features.token_interviews_enabled:
       job.kind==='interview_waitlist'?features.waitlist_enabled&&features.interviews_enabled:features.reminders_enabled
     const belongs=connection.purpose==='shared'||connection.purpose===job.purpose
-    const connected=job.kind==='chat_reply'?messagingReady(connection):channelReady(connection)
+    const connected=job.kind==='chat_reply'||job.kind==='interview_link'?messagingReady(connection):channelReady(connection)
     const verificationOnly=!connected&&job.kind==='interview_confirm'&&!!connection.liff_id&&testDeliveryConfirmed(connection)
     const ready=enabled&&belongs&&(connected||verificationOnly)&&job.generation===connection.generation&&
       !connection.stopped&&!location.stopped&&!location.tenant_stopped&&location.contract_active&&!!location.eligible_at

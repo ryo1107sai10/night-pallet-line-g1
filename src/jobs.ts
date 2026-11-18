@@ -3,7 +3,9 @@ import { type Actor, type Config, type DB, type Route, audit, conflict, scope, t
 import { channel, channelCredentials, channelTestReady, LineAPI } from './line.js'
 
 import { lockDispatch } from './dispatch-lock.js'
-import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
+import { endScope, locationOf, processCustomerWebhook, runAutomation } from './automation.js'
+import { storeFeatures } from './store-features.js'
+import { issueInterviewLink } from './interview-link.js'
 import { deliverCampaign } from './campaigns.js'
 import { updateRichMenu } from './rich-menus.js'
 import { deliverService } from './service-delivery.js'
@@ -70,12 +72,36 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
           (excluded.event_at=channel_relationship.event_at AND excluded.following=false)`,
       [event.tenant_id,event.store_id,event.channel_id,event.user_key,event.occurred_at,event.kind!=='unfollow'])
     }
+    if (event.kind==='postback'&&event.action==='interview_link'&&event.user_key&&event.recipient_box) {
+      await tryIssueInterviewLink(db,cfg,c,event)
+    }
     await processCustomerWebhook(db,cfg,c,event)
     if(event.user_key&&event.stop_signal==='all')await db.query(`UPDATE workflow_contact SET notices=false
       WHERE channel_id=$1 AND user_key=$2 AND notices_changed_at<=$3`,[c.id,event.user_key,event.occurred_at])
     await db.query('UPDATE webhook_event SET processed_at=now(),recipient_box=NULL WHERE channel_id=$1 AND event_id=$2',
       [channelId,event.event_id])
   }
+}
+
+// LIFFなし面談予約: リッチメニューの postback から予約リンクを発行する。
+// 発行条件（採用専用OA・友だち状態・機能フラグ・停止状態）をすべて満たす場合のみ発行する。
+async function tryIssueInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,event:{
+  event_id:string;generation:number;user_key:string|null;recipient_box:string|null
+}) {
+  if (c.purpose!=='recruitment'||c.stopped||event.generation!==c.generation) return
+  const features=await storeFeatures(db,c.store_id)
+  if (!features.interviews_enabled||!features.token_interviews_enabled) return
+  const {rows:[rel]}=await db.query<{following:boolean}>(
+    'SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2',[c.id,event.user_key])
+  if (!rel?.following) return
+  const {rows:[latest]}=await db.query<{kind:string}>(`SELECT kind FROM webhook_event
+    WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow','unfollow')
+    ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,event.user_key])
+  if (latest?.kind==='unfollow') return
+  const location=await locationOf(db,c.store_id)
+  if (location.stopped||location.tenant_stopped) return
+  const user=unseal(cfg,'webhook:'+c.id+':'+event.event_id,event.recipient_box!)
+  await issueInterviewLink(db,cfg,c,user)
 }
 
 async function sendCandidate(db: DB, r: Route, id?: string) {

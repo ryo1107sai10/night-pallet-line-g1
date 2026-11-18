@@ -266,6 +266,7 @@ const eventSchema = z.object({ webhookEventId: text(100), type: text(100), times
   module:z.object({type:z.string(),botId:userId}).optional(),
   follow:z.object({isUnblocked:z.boolean().optional()}).optional(),
   message:z.object({type:z.string().max(100),id:z.string().max(100).optional(),text:z.string().optional()}).optional(),
+  postback:z.object({data:text(500)}).optional(),
   unsend:z.object({messageId:z.string().max(100)}).optional(),
   source: z.object({ type: z.string(), userId: moduleUserId.optional() }).optional(),
 })
@@ -353,14 +354,18 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     const kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
     const phrase=event.message?.type==='text'?event.message.text?.trim():null
     const stopSignal=phrase==='全配信停止'?'all':phrase==='販促停止'?'marketing':null
-    const recipient=key&&user&&c.purpose==='customer'&&['follow','refollow'].includes(kind)
+    // postback は認識した action だけを保存する（生データは保存しない）。
+    const action=kind==='postback'&&event.postback&&
+      new URLSearchParams(event.postback.data).get('action')==='interview_link'?'interview_link':null
+    const recipient=key&&user&&((c.purpose==='customer'&&['follow','refollow'].includes(kind))||
+      (c.purpose==='recruitment'&&action==='interview_link'))
       ? seal(cfg,'webhook:'+c.id+':'+event.webhookEventId,user) : null
     const eventPurpose=c.purpose==='shared'?'unclassified':c.purpose
     const test=c.module_channel_id && phrase?.match(/^接続テスト ([A-Za-z0-9_-]{43})$/)
     const written=await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
-      occurred_at,kind,purpose,user_key,recipient_box,stop_signal) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      occurred_at,kind,purpose,user_key,recipient_box,stop_signal,action) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       ON CONFLICT(channel_id,event_id) DO NOTHING`,
-    [c.tenant_id,c.store_id,c.id,event.webhookEventId,c.generation,new Date(event.timestamp),test?'test_link':kind,eventPurpose,key,recipient,stopSignal])
+    [c.tenant_id,c.store_id,c.id,event.webhookEventId,c.generation,new Date(event.timestamp),test?'test_link':kind,eventPurpose,key,recipient,stopSignal,action])
     if (!written.rowCount || !key || !user) continue
     if (test) {
       const hash=digest(test[1])
