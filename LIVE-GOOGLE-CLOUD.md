@@ -1,11 +1,11 @@
 # Google Cloudで1店舗を検証
 
-検証専用プロジェクトに、東京のCloud RunとCloud SQL for PostgreSQLを使用します。管理画面、LINE内の応募フォーム・面談予約、Googleの認可は同じHTTPSの公開先を使います。
+検証専用プロジェクトに、東京のCloud RunとCloud SQL for PostgreSQLを使用します。管理画面、LINEトークから開く応募フォーム・面談予約、Googleの認可は同じHTTPSの公開先を使います。
 
 ## 管理者が用意するもの
 
 1. プロジェクトに利用するGoogle Cloudの請求先を設定します。Cloud SQLの30日間無料試用を利用できる場合は、同じプロジェクト・東京リージョンでPostgreSQLを作成します。Cloud Runなどは利用量に応じた料金が発生する場合があります。[プロジェクトの請求先](https://cloud.google.com/billing/docs/how-to/modify-project) · [Cloud SQLの無料試用](https://docs.cloud.google.com/sql/docs/postgres/free-trial-instance)
-2. 検証用の店舗名、管理者のメールアドレス、採用用LINE公式アカウントの `@ID`、スマートフォンで試すLINE利用者を用意します。LINE公式アカウントでMessaging APIを有効にし、同じプロバイダーのLINEログインチャネルに `openid` を付けたLIFFを用意します。公式アカウントは稼働中のWebhookと分離した検証用アカウントを使います。[LINEのLIFF設定](https://developers.line.biz/ja/docs/liff/registering-liff-apps/)
+2. 検証用の店舗名、管理者のメールアドレス、採用用LINE公式アカウントの `@ID`、スマートフォンで試すLINE利用者を用意します。LINE公式アカウントでMessaging APIを有効にします。本人確認はトークン方式のため、LINEログインやLIFFは不要です。公式アカウントは稼働中のWebhookと分離した検証用アカウントを使います。
 3. テスト予定を書き込めるGoogleカレンダーを用意します。Google CloudのOAuthクライアントをウェブアプリケーションとして作成し、公開先の `/interview/google-return.html` を承認済みリダイレクトURIに設定します。外部アプリのテストユーザーに、カレンダーへアクセスできるGoogleアカウントを追加します。[Google OAuth設定](https://developers.google.com/identity/protocols/oauth2/web-server)
 
 LINEのチャネルシークレットとアクセストークンは公開後の管理画面に入力します。DBの資格情報とGoogleのOAuthクライアントシークレットは、Google Cloud Secret Managerに保存します。
@@ -22,10 +22,10 @@ LINEのチャネルシークレットとアクセストークンは公開後の�
 
 ## 1店舗で実機検証
 
-1. 管理画面に管理者招待で入り、検証用店舗と採用用公式アカウントを登録する。管理画面に出るURLで、LIFFのエンドポイントとWebhookを設定する。
+1. 管理画面に管理者招待で入り、検証用店舗と採用用公式アカウントを登録する。管理画面に出るURLで、Webhookを設定する。
 2. 「店舗で使う機能」で回答フォーム・応募選考・面談予約・Google照合を有効にする。「店舗業務」で採用フォームを公開する。
 3. 「面談枠の管理」でGoogleカレンダーの空き状況を参照できることを確認し、Googleに「予定あり」で入れた時間と、空いている時間に対面枠を公開する。
-4. 検証用公式アカウントのトークからスマートフォンで採用フォームを開き、LINE本人確認、回答送信、対面枠の確定を行う。重複枠が予約できず、空き枠の予約と応募回答が店舗側に表示されることを確認する。
+4. 検証用公式アカウントのリッチメニュー（postback）から届く専用URLでスマートフォンから採用フォームを開き、本人確認、回答送信、対面枠の確定を行う。重複枠が予約できず、空き枠の予約と応募回答が店舗側に表示されることを確認する。
 5. 別の空き枠を選んだままGoogleに予定を追加し、確定時に拒否されることも確認する。
 
 [実機検証の詳細と後片付け](LIVE-INTERVIEW.md)

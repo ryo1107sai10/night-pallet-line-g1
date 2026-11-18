@@ -9,9 +9,12 @@ import type { Graph } from './scenario.js'
 import { messageBudget } from './delivery-budget.js'
 import { CUSTOMER_LINK_MARKER, customerLinkEligible, issueCustomerLinkToken } from './customer-link.js'
 
-// {{customer_link}} は送信直前に受信者ごと発行するため、step 時点では送信ジョブIDを含む
+// {{customer_link}} と {{booking_url}} は送信直前に受信者ごと発行するため、step 時点では送信ジョブIDを含む
 // プレースホルダURLで描画して封緘し、submit 直前に実URLへ差し替える（プレースホルダは決定的に再現できる）。
+// {{booking_url}} の着地先も顧客リンク（/account）で、予約の確認・変更・取消がそのまま行える。
 const customerLinkPlaceholder=(sendId:string)=>'https://link.invalid/customer-link/'+sendId
+const bookingUrlPlaceholder=(sendId:string)=>'https://link.invalid/booking-url/'+sendId
+const usesBookingUrl=(body:string)=>/\{\{\s*booking_url\s*\}\}/.test(body)
 
 const minute=60000
 const day=1440*minute
@@ -175,8 +178,9 @@ async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,cst:Customer,boo
     if (owner) staff='店舗担当者'
   }
   const display=booking?new Intl.DateTimeFormat('ja-JP',{timeZone:s.timezone,dateStyle:'long',timeStyle:'short'}).format(booking.starts_at):''
+  // booking_url は呼び出し側がプレースホルダで上書きする（送信直前に顧客リンクを発行して差し替える）。
   return {values:{name:cst.display_name??'',store:s.name,staff,booking:display,price:'',
-    booking_url:booking&&c.liff_id?'https://liff.line.me/'+c.liff_id:''},bookingLinkValid:!!booking&&!!c.liff_id&&cfg.external}
+    booking_url:''},bookingLinkValid:false}
 }
 
 async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer,
@@ -271,6 +275,14 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|n
       person.values.customer_link=customerLinkPlaceholder(id)
     } else linkHeld='来店予約・設定URLの発行条件を満たしていません'
   }
+  // 予約変更URLも実URLをこの時点では発行せず、プレースホルダで封緘する（発行は submit 直前）。
+  // 予約がない、または発行条件を満たさない場合は、このメッセージを保留してURLを送らない。
+  if (!linkHeld && usesBookingUrl(node.body)) {
+    if (booking && await customerLinkEligible(db,c,c.generation,p.user_key,true)) {
+      person.values.booking_url=bookingUrlPlaceholder(id)
+      person.bookingLinkValid=true
+    } else linkHeld='予約変更URLの発行条件を満たしていません'
+  }
   const exclude=reason || (expired||due===null?'予定時刻を過ぎたため保留':null) || linkHeld ||
     await allowance(db,s,run,p,node.category)
   const rendered=renderMessage(node.body,person)
@@ -344,6 +356,10 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
     if (current?.type==='message' && current.body.includes(CUSTOMER_LINK_MARKER)) {
       person.values.customer_link=customerLinkPlaceholder(job.id)
     }
+    if (current?.type==='message' && usesBookingUrl(current.body) && booking) {
+      person.values.booking_url=bookingUrlPlaceholder(job.id)
+      person.bookingLinkValid=true
+    }
     const expected=current?.type==='message' ? renderMessage(current.body,person).message : undefined
     const body=job.body_box?unseal(cfg,'automatic:'+job.id,job.body_box):''
     const time=Date.now()
@@ -361,9 +377,9 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
     }
     const to=unseal(cfg,'customer:'+c.id+':'+p.user_key,p.line_address)
     let sendBody=body
-    const placeholder=customerLinkPlaceholder(job.id)
-    if (body.includes(placeholder)) {
-      // 来店予約・設定URLは送信の直前に受信者ごと発行する（トークンの3時間期限は送信時点から数える）。
+    const placeholders=[customerLinkPlaceholder(job.id),bookingUrlPlaceholder(job.id)].filter(p=>body.includes(p))
+    if (placeholders.length) {
+      // 来店予約・設定URL／予約変更URLは送信の直前に受信者ごと発行する（トークンの3時間期限は送信時点から数える）。
       // 発行条件を満たさなくなっていた場合は、プレースホルダのまま送らず送信を取りやめる。
       const abort=async (why:string)=>{
         await db.query(`UPDATE automatic_send SET status=$2,reason=$3,next_at='infinity',body_box=NULL WHERE id=$1`,
@@ -372,12 +388,13 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
         return null
       }
       if (!await customerLinkEligible(db,c,c.generation,p.user_key,true)) {
-        return abort('来店予約・設定URLの発行条件を満たしません')
+        return abort(body.includes(customerLinkPlaceholder(job.id))
+          ?'来店予約・設定URLの発行条件を満たしません':'予約変更URLの発行条件を満たしません')
       }
       const link=await issueCustomerLinkToken(db,cfg,c,to)
       await audit(db,c.tenant_id,c.store_id,null,'customer_link.issue',link.id,null,
         {channel_id:c.id,source:'scenario_auto',enrollment_id:run.id})
-      sendBody=body.split(placeholder).join(link.url)
+      sendBody=placeholders.reduce((text,p)=>text.split(p).join(link.url),body)
       if (sendBody.length>5000) return abort('差し込み後に5000文字を超えています')
     }
     return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody)

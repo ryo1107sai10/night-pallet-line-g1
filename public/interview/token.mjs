@@ -1,7 +1,7 @@
 import { mountInterview } from './calendar.mjs'
 
-// LIFFなし面談予約（固有トークン方式）: URLの t を引換APIでセッションに交換してから
-// LIFF版と同じカレンダー・フォーム・通知UIを開く。
+// 面談予約ページ（固有トークン方式）: URLの t を引換APIでセッションに交換してから
+// カレンダー・フォーム・通知UIを開く。
 const connection = location.pathname.split('/').filter(Boolean).at(-1)
 const status = document.querySelector('#status')
 const fallback = document.querySelector('#fallback')

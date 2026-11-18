@@ -15,7 +15,7 @@ import { InterviewGoogle} from '../dist/interview-availability.js'
 import { workOnce} from '../dist/jobs.js'
 import { starter, validate} from '../public/studio/engine.mjs'
 
-// LIFFなし面談予約フェーズ2: シナリオ（ステップ配信）のテスト送信から、
+// 面談予約フェーズ2: シナリオ（ステップ配信）のテスト送信から、
 // 受信者ごとの専用URLを送信直前に発行して差し込むことの結合試験。
 // 実PostgreSQL（embedded）＋ HTTP経由、LINE APIは模擬fetchで受ける。
 const origin = 'https://example.test'
@@ -32,12 +32,10 @@ const accessToken = 'test-channel-token'
 const accessToken2 = 'test-channel-token-2'
 const messagingId = '1234567890'
 const messagingId2 = '1234567899'
-const loginId = '1234567891'
-const loginId2 = '1234567892'
 const pass = 'Only used in local tests!'
 const consoleChecks = {
 ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
-login_published: true, non_developer: true, delivery_confirmed: true,
+non_developer: true, delivery_confirmed: true,
 token_verified: true, webhook_verified: true,
 }
 const dummyLink = 'https://example.test/reserve/sample'
@@ -81,15 +79,16 @@ method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Line-Signature
 assert.equal(response.status, 200)
 }
 
-// テスターを作成→LIFF検証→友だち追加まで済ませ、シナリオのテスト送信先として使える状態にする。
+// テスターを作成→メッセージ方式で本人確認→友だち追加まで済ませ、シナリオのテスト送信先として使える状態にする。
 async function prepareTester(conn, who) {
 const prefix = '/stores/' + storeId + '/connections/' + conn
 const invite = expect(await post(prefix + '/tests', admin, { purpose: 'recruitment'}, idempotency()), 201)
-expect(await post('/auth/line/verify', null, {
-connection: conn, purpose: 'recruitment', code: invite.code,
-id_token: 'idtoken:' + who, allow_test_message: true,
-}), 200)
-await inbound(conn, conn === connection? bot: bot2, [eventFor('follow-' + who, 'follow', who)])
+const destination = conn === connection? bot: bot2
+await inbound(conn, destination, [eventFor('code-' + who, 'message', who, {
+message: { type: 'text', text: '接続テスト ' + invite.code },
+})])
+await inbound(conn, destination, [eventFor('follow-' + who, 'follow', who)])
+await worker()
 await worker()
 return invite.id
 }
@@ -139,14 +138,6 @@ return Response.json({ client_id: at === accessToken2? messagingId2: messagingId
 }
 case '/v2/bot/info':
 return Response.json({ userId: options.headers.Authorization === 'Bearer ' + accessToken2? bot2: bot})
-case '/oauth2/v2.1/verify': {
-const idToken = options.body.get('id_token')?? ''
-return Response.json({
-iss: 'https://access.line.me', aud: options.body.get('client_id'),
-sub: idToken.startsWith('idtoken:')? idToken.slice('idtoken:'.length): user,
-exp: Date.now() / 1000 + 600,
-})
-}
 case '/v2/bot/message/quota': return Response.json({ type: 'limited', value: 200})
 case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0})
 case '/v2/bot/message/push': {
@@ -179,11 +170,11 @@ management_authority: '検証用', channel_secret: channelSecret, token_type: 'c
 }
 connection = expect(await post('/stores/' + storeId + '/connections', admin, {
 ...connectionInput, label: '採用OA', purpose: 'recruitment',
-messaging_id: messagingId, login_id: loginId, liff_id: loginId + '-test', access_token: accessToken,
+messaging_id: messagingId, access_token: accessToken,
 }, idempotency()), 201).id
 shared = expect(await post('/stores/' + storeId + '/connections', admin, {
 ...connectionInput, label: '兼用OA', purpose: 'shared',
-messaging_id: messagingId2, login_id: loginId2, liff_id: loginId2 + '-test', access_token: accessToken2,
+messaging_id: messagingId2, access_token: accessToken2,
 }, idempotency()), 201).id
 await tx(pool, async db => {
 await scope(db, tenant, storeId)

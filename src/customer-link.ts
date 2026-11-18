@@ -16,7 +16,6 @@ import { recordSource } from './sources.js'
 import { createLinkToken, findLinkToken } from './link-token.js'
 
 // 顧客リンクのセッションは、面談トークンと同じ2時間（決定D3の考え方を顧客用途にも適用）。
-// LIFF経路の customer_session は30分のまま変えない。
 export const CUSTOMER_LINK_SESSION_TTL_SECONDS = 2 * 3600
 
 // シナリオ本文の差し込み変数。面談の INTERVIEW_LINK_MARKER と対で、送信直前に受信者ごとの実URLへ置き換える。
@@ -80,7 +79,7 @@ export async function issueCustomerLink(db: DB, cfg: Config, c: Channel, user: s
 
 // 引換: トークンを検証し、既存の customer_session を発行して Cookie 値（channelId.raw）を返す。
 // 面談リンクと違い、引換では消費しない（リンクは期限内なら再引換でき、再発行で旧リンクが失効する）。
-// セッション発行後の来店予約・配信設定・フォームは、LIFF経路と同じ API がそのまま使える。
+// セッション発行後の来店予約・配信設定・フォームは、共通の API がそのまま使える。
 export async function redeemCustomerLink(pool: pg.Pool, cfg: Config, connection: string, input: unknown) {
   const parsed = z.strictObject({ token: opaque }).safeParse(input)
   if (!parsed.success) throw linkInvalid()
@@ -99,7 +98,7 @@ export async function redeemCustomerLink(pool: pg.Pool, cfg: Config, connection:
     if (row.generation !== c.generation) throw linkInvalid()
     const customer = await customerById(db, row.subject)
     if (customer.channel_id !== c.id) throw linkInvalid()
-    // LIFF経路の openCustomerSession と同じく、本人確認済みとして扱い、流入元の帰属を記録する。
+    // 本人確認済みとして扱い、流入元の帰属を記録する。
     await db.query('UPDATE customer SET verified_at=coalesce(verified_at,now()) WHERE id=$1', [customer.id])
     const identity: WorkflowSubject = {
       tenant_id: c.tenant_id, store_id: c.store_id, channel_id: c.id, purpose: 'customer', subject: customer.id,

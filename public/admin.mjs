@@ -1,5 +1,5 @@
 import {workspace,workspacePath,scopeWorkspaceLinks,rememberReturnWorkspace} from '/static/workspace-path.mjs'
-import {liffAppId,lineSetupLinks} from './line-setup.mjs'
+import {lineSetupLinks} from './line-setup.mjs'
 
 const $ = selector => document.querySelector(selector)
 const masterEntry = /^\/master\/?$/i.test(location.pathname)
@@ -15,8 +15,8 @@ const staffRoles = Object.fromEntries(Object.entries(roles).filter(([role])=>rol
 const featureNames = {
   tags_enabled:'顧客タグ', visits_enabled:'来店予約',
   guest_interviews_enabled:'ログイン不要の対面面談予約',
-  token_interviews_enabled:'LINEトークからの面談予約（LIFFなし）',
-  token_customers_enabled:'LINEトークからの来店予約・設定（LIFFなし）',
+  token_interviews_enabled:'LINEトークからの面談予約',
+  token_customers_enabled:'LINEトークからの来店予約・設定',
   interviews_enabled:'面談予約', google_calendar_enabled:'面談時にGoogleカレンダーを照合',
   forms_enabled:'回答フォーム', recruitment_enabled:'応募・選考管理', sources_enabled:'流入分析',
   campaigns_enabled:'絞り込み配信',
@@ -40,17 +40,16 @@ const featureGuides = {
   interviewers_enabled:'担当者ごとに面談枠を分けて管理します。',
   google_write_enabled:'確定した面談をGoogleカレンダーへ登録します。',
   guest_interviews_enabled:'ログイン不要の対面面談予約を受け付けます。',
-  token_interviews_enabled:'LIFFを使わず、LINEトークで送る専用URLから面談予約を受け付けます。',
-  token_customers_enabled:'LIFFを使わず、LINEトークで送る専用URLから来店予約と通知設定を受け付けます。',
+  token_interviews_enabled:'LINEトークで送る専用URLから面談予約を受け付けます。',
+  token_customers_enabled:'LINEトークで送る専用URLから来店予約と通知設定を受け付けます。',
 }
 const featureBilling = new Set(['campaigns_enabled','reminders_enabled','token_interviews_enabled','token_customers_enabled'])
 const sendStatus = { queued:'待機中',submitting:'LINEへ提出中',accepted:'LINE受付済',failed:'送信失敗',unknown:'結果不明',cancelled:'取消' }
 const checks = {
   ownership_verified:'法人が所有する公式アカウントと管理権限を確認した',
-  provider_verified:'Messaging APIとLINEログインが同じプロバイダー内にある',
+  provider_verified:'Messaging APIが法人のプロバイダー内にある',
   redelivery_enabled:'Webhookの再送を有効にした',
   auto_reply_checked:'既存ツールと公式管理画面の応答重複を確認した',
-  login_published:'LINEログインチャネルを公開した',
   non_developer:'開発者権限のない利用者をテストに使用する',
   delivery_confirmed:'テスト利用者の端末でメッセージの受信を確認した',
 }
@@ -193,23 +192,15 @@ function lineRegistration(base) {
   const provider = lineLink('プロバイダー設定を開く',destinations.provider)
   const basics = lineLink('チャネル基本設定を開く',destinations.messagingBasics)
   const messaging = lineLink('Messaging API設定を開く',destinations.messagingSettings)
-  const login = lineLink('LINEログインの基本設定を開く',destinations.loginBasics)
-  const liff = lineLink('LIFF設定を開く',destinations.liff)
   const form = formOf([
     lineStep('公式アカウントとMessaging API',
-      '未設定なら公式アカウント管理画面でMessaging APIを有効にします。チャネル基本設定からIDとシークレット、Messaging API設定からトークンを取得します。',
+      '未設定なら公式アカウント管理画面でMessaging APIを有効にします。チャネル基本設定からIDとシークレット、Messaging API設定からトークンを取得します。本人確認はLINEトークへ送るリンク方式で行うため、LINEログインの設定は不要です。',
       [lineLink('LINE公式アカウント管理を開く',destinations.manager),provider,basics,messaging],
       template('messaging-fields'),template('credentials-fields')),
-    lineStep('LINEログインとLIFF（任意）',
-      'LIFFを使う場合だけ設定します。空欄のまま登録するとMessaging APIだけの接続になり、本人確認はLINEトークのリンク方式（LIFFなし）で行います。LIFF IDかLIFF URLを貼り付けると、ログインのチャネルIDも入力されます。',
-      [login,liff],template('liff-fields')),
     lineStep('店舗での利用情報',
       'この店舗での用途と、公式アカウントの管理権限を記録します。',[],template('channel-fields')),
   ],'接続情報を登録',async (data,key)=>{
-    const parsedLiff = liffAppId(data.liff_id ?? '')
-    if (data.liff_id && !parsedLiff) throw new Error('LINE Developersで発行されたLIFF IDまたはLIFF URLを入力してください。')
-    if (parsedLiff) data.liff_id = parsedLiff
-    for (const optional of ['existing_webhook','existing_tools','login_id','liff_id']) if (!data[optional]) delete data[optional]
+    for (const optional of ['existing_webhook','existing_tools']) if (!data[optional]) delete data[optional]
     const created = await api(base+'/connections','POST',data,key)
     channelId = created.id
     if (['#line-setup','#line-register'].includes(location.hash)) history.replaceState(null,'','#line-connection')
@@ -218,22 +209,13 @@ function lineRegistration(base) {
   })
   const fields = form.elements
   function updateLinks() {
-    const links = lineSetupLinks({provider_id:fields.provider_id.value,messaging_id:fields.messaging_id.value,
-      login_id:fields.login_id.value})
+    const links = lineSetupLinks({provider_id:fields.provider_id.value,messaging_id:fields.messaging_id.value})
     provider.href = links.provider
     basics.href = links.messagingBasics
     messaging.href = links.messagingSettings
-    login.href = links.loginBasics
-    liff.href = links.liff
     messaging.hidden = links.messagingSettings===links.messagingBasics
     basics.textContent = messaging.hidden ? 'LINE Developersでチャネルを選ぶ' : 'チャネル基本設定を開く'
-    liff.hidden = links.liff===links.loginBasics
-    login.textContent = liff.hidden ? 'LINEログインチャネルを選ぶ' : 'LINEログインの基本設定を開く'
   }
-  fields.liff_id.addEventListener('input',()=>{
-    const id = liffAppId(fields.liff_id.value)
-    if (id) fields.login_id.value = id.split('-')[0]
-  })
   form.addEventListener('input',updateLinks)
   updateLinks()
   return form
@@ -352,18 +334,14 @@ function connectedPanel(base, c, testers) {
     el('p',types[c.purpose]+' · '+c.owner_name+' · '+c.account_type,'muted'))
   const links = lineSetupLinks(c)
   const urlSettings = [connectionSetting('Webhook URL',c.webhook_url,'Webhook設定を開く',links.messagingSettings)]
-  if (c.liff_url) urlSettings.push(connectionSetting('LIFF エンドポイントURL',c.liff_url,'LIFFアプリ設定を開く',links.liffEdit))
-  const urls = details(c.liff_id?'Webhook・LIFFの設定先':'Webhookの設定先',...urlSettings)
+  const urls = details('Webhookの設定先',...urlSettings)
   urls.open = c.status!=='connected'
   const shortcuts = el('div',null,'actions')
   shortcuts.append(lineLink('Messaging API設定を開く',links.messagingSettings))
-  if (c.liff_id) shortcuts.append(lineLink('LIFFアプリ設定を開く',links.liffEdit))
   box.append(shortcuts,urls,el('p','設定記録を保存し、トークンとWebhookを確認してからテスト利用者を登録します。','muted'))
-  // LIFF未設定のチャネルでは、LINEログインの公開確認は対象外として表示しない。
-  const consoleEntries = Object.entries(checks)
-    .filter(([key])=>c.liff_id||key!=='login_published')
-    .map(([key,label])=>[key,!c.liff_id&&key==='provider_verified'?'Messaging APIが法人のプロバイダー内にある':label])
-  const consoleInputs = consoleEntries.map(([key,label])=>field(label,key,{type:'checkbox',value:c.checks[key]}))
+  const consoleInputs = Object.entries(checks)
+    .map(([key,label])=>[key,key==='provider_verified'?'Messaging APIが法人のプロバイダー内にある':label])
+    .map(([key,label])=>field(label,key,{type:'checkbox',value:c.checks[key]}))
   box.append(details('公式管理画面で確認した項目',formOf([...consoleInputs,field('確認者・根拠','reason')],
     '確認内容を保存',async data=>{
       const values = Object.fromEntries(Object.keys(checks).map(key=>[key,data[key]==='on']))
@@ -372,7 +350,7 @@ function connectedPanel(base, c, testers) {
   const steps = [
     ['トークンとボットの照合','token_verified','token'],
     ['Webhookの疎通','webhook_verified','webhook'],
-    c.liff_id?['LIFF本人確認','liff_verified']:['テスター本人確認（メッセージ方式でも可）','tester_verified'],
+    ['テスター本人確認（メッセージ方式）','tester_verified'],
     ['テスト利用者から受信','receive_verified'],
     ['LINEへのテスト送信受付','send_accepted'],
   ]
@@ -391,19 +369,13 @@ function connectedPanel(base, c, testers) {
   const selected = c.purpose==='shared' ? {customer:'顧客',recruitment:'採用'} : {[c.purpose]:types[c.purpose]}
   const invite = formOf([field('テスト用途','purpose',{choices:selected})],'テストコードを発行',async (data,key)=>{
     const result = await api(prefix+'/tests','POST',data,key)
-    invitation.textContent = result.liff_url
-      ? 'LINE内で開くURL　'+result.liff_url+'\nテストコード　'+result.code+
-        '\n期限（日本時間）　'+date(result.expires_at)
-      : 'テストコード　'+result.code+'\n公式アカウントのトークで「接続テスト '+result.code+'」と送信すると本人確認が完了します。'+
-        '\n期限（日本時間）　'+date(result.expires_at)
+    invitation.textContent = 'テストコード　'+result.code+'\n公式アカウントのトークで「接続テスト '+result.code+'」と送信すると本人確認が完了します。'+
+      '\n期限（日本時間）　'+date(result.expires_at)
     invitation.hidden = false
-    feedback(result.liff_url?'発行しました。テスト利用者にURLとコードを渡してください。'
-      :'発行しました。テスト利用者にコードを渡し、トークで送信してもらってください。')
+    feedback('発行しました。テスト利用者にコードを渡し、トークで送信してもらってください。')
   })
   const tests = details('テスト利用者の登録と送信',
-    el('p',c.liff_id
-      ? '本人確認後、テスト利用者から公式アカウントへメッセージを1通送ってもらいます。'
-      : 'テストコードのメッセージで本人確認した後、テスト利用者から公式アカウントへメッセージを1通送ってもらいます。'),
+    el('p','テストコードのメッセージで本人確認した後、テスト利用者から公式アカウントへメッセージを1通送ってもらいます。'),
     invite,invitation,button('テストの進捗を更新',refresh))
   for (const tester of testers) {
     const row = el('div',null,'record')
@@ -534,8 +506,7 @@ function moduleConnection(base,c,testers) {
       await change(prefix+'/module-delivery','POST',{revision:c.revision},'送受信の確認を記録しました。')
     }))
   }
-  box.append(tests,el('p','LINE内の本人確認を使う応募・予約には、LIFFの設定が別途必要です。','muted'),
-    stopForm(prefix+'/stop',c,'公式アカウントの配信'))
+  box.append(tests,stopForm(prefix+'/stop',c,'公式アカウントの配信'))
   return box
 }
 
@@ -764,7 +735,6 @@ function setupPanel(setup, store, base) {
     }
     lineBox.append(autoList)
     const manual = Object.entries(checks)
-      .filter(([key])=>connection.has_liff || key!=='login_published')
       .map(([key,label])=>label+'：'+(connection.manual[key] ? '確認済' : '未確認'))
     lineBox.append(el('p','公式管理画面で確認する項目（LINE接続パネルで保存）　'+manual.join(' / '),'muted'))
   }

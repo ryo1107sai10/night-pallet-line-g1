@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import QRCode from 'qrcode'
 import { audit, missing, newId, text, uuid, type Actor, type DB } from './core.js'
 import { channel } from './line.js'
 import type { WorkflowSubject } from './forms.js'
@@ -9,8 +8,6 @@ import { requireFeature } from './store-features.js'
 export const sourceInput=z.strictObject({channel:uuid,label:text(100)})
 export const sourceStatus=z.strictObject({active:z.boolean()})
 export const sourceReportInput=z.strictObject({days:z.coerce.number().int().min(1).max(365).default(30)})
-const sourceLink=(id:string,liffId:string,use:WorkflowSubject['purpose'])=>
-  'https://liff.line.me/'+encodeURIComponent(liffId)+'?'+new URLSearchParams({source:id,use})
 
 export async function recordSource(db:DB,identity:WorkflowSubject,source:string|undefined) {
   if(!source)return
@@ -22,11 +19,11 @@ export async function recordSource(db:DB,identity:WorkflowSubject,source:string|
 
 export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpose'],days:number) {
   await requireFeature(db,store,'sources_enabled')
-  // LIFF未設定のチャネルでも流入元を作れる（帰属はトークン発行時の紐づけで記録される）。
+  // 流入元の帰属は、リッチメニューの postback に含まれる source= をトークン発行時に紐づけて記録する。
   const {rows:channels}=await db.query(`SELECT id,label FROM channel WHERE purpose IN ($1,'shared')
     ORDER BY label,id`,[use])
-  const {rows}=await db.query<{id:string;liff_id:string|null}>(`
-    SELECT w.id,w.label,w.active,c.label AS channel_label,c.liff_id,
+  const {rows}=await db.query<{id:string}>(`
+    SELECT w.id,w.label,w.active,c.label AS channel_label,
       coalesce(stats.opened,0) AS opened,coalesce(stats.forms,0) AS forms,
       coalesce(stats.booked,0) AS booked,coalesce(stats.interviewed,0) AS interviewed,
       coalesce(stats.trials,0) AS trials,coalesce(stats.hired,0) AS hired
@@ -50,21 +47,11 @@ export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpo
       LEFT JOIN recruitment_case k ON t.purpose='recruitment' AND k.channel_id=t.channel_id AND k.applicant_key=t.subject
       WHERE t.source_id=w.id AND t.attributed_at>=now()-make_interval(days=>$2)
     ) stats ON true WHERE w.purpose=$1 ORDER BY w.label,w.id`,[use,days])
-  return {channels,entries:rows.map(({liff_id,...row})=>({
+  return {channels,entries:rows.map(row=>({
     ...row,
-    // LIFFがあるチャネルは従来どおり LIFF URL を入口にする。LIFFがないチャネルでは、
-    // リッチメニューの postback データにこの文字列を設定し、トークン発行時に紐づける。
-    url:liff_id?sourceLink(row.id,liff_id,use):null,
+    // 入口はリッチメニューの postback データにこの文字列を設定する（トークン発行時に紐づける）。
     postback:'action='+(use==='recruitment'?'interview_link':'customer_link')+'&source='+row.id,
   }))}
-}
-
-export async function sourceQr(db:DB,store:string,use:WorkflowSubject['purpose'],id:string){
-  await requireFeature(db,store,'sources_enabled')
-  const {rows:[entry]}=await db.query<{liff_id:string}>(`SELECT c.liff_id FROM workflow_source s JOIN channel c ON c.id=s.channel_id
-    WHERE s.id=$1 AND s.purpose=$2 AND c.liff_id IS NOT NULL`,[id,use])
-  if(!entry)throw missing()
-  return {image:await QRCode.toDataURL(sourceLink(id,entry.liff_id,use),{width:420,errorCorrectionLevel:'M'})}
 }
 
 export async function saveSource(db:DB,actor:Actor,store:string,use:WorkflowSubject['purpose'],data:z.infer<typeof sourceInput>) {

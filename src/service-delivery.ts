@@ -8,6 +8,7 @@ import { lockDispatch } from './dispatch-lock.js'
 import { storeFeatures } from './store-features.js'
 import type { WorkflowSubject } from './forms.js'
 import { contactAddress } from './rich-menus.js'
+import { issueInterviewLinkToken } from './interview-link.js'
 
 type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'|'interview_link'|'customer_link'
 type Scheduled={kind:Kind;object:string;revision:number;due:Date;expiry:Date;body?:string;actor?:string}
@@ -43,7 +44,6 @@ async function testRecipient(db:DB,connection:Channel,userKey:string) {
 }
 
 async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connection:Channel,verificationOnly:boolean){
-  const liffId=connection.liff_id
   if(job.kind==='chat_reply'){
     const {rows:[thread]}=await db.query<{address_box:string;user_key:string}>(`
       SELECT t.address_box,t.user_key FROM inbox_thread t JOIN staff f ON f.id=t.assigned_to
@@ -80,9 +80,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
     if(!job.body_box)return
     return {userKey:contact.user_key,to,body:unseal(cfg,'service:'+job.id,job.body_box)}
   }
-  const link=liffId?'https://liff.line.me/'+liffId+'?use=recruitment':''
   if(job.kind==='interview_waitlist'){
-    if(!link)return
     const slot=unseal(cfg,'service:'+job.id,job.body_box!)
     const {rowCount}=await db.query(`SELECT 1 FROM interview_waitlist w JOIN interview_slot s ON s.id=$3 AND s.channel_id=w.channel_id
       WHERE w.channel_id=$1 AND w.applicant_key=$2 AND w.until_at>=s.starts_at AND s.starts_at>now() AND w.method=s.method
@@ -90,7 +88,11 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
         AND (b.slot_id=s.id OR (b.applicant_key=w.applicant_key AND EXISTS (SELECT 1 FROM interview_slot f WHERE f.id=b.slot_id AND f.starts_at>now()))))`,
     [job.channel_id,job.subject,slot])
     if(!rowCount)return
-    return {userKey:contact.user_key,to,body:'面談の受付枠に変更がありました。LINE内の面談予約画面で最新の空き状況をご確認ください。\n'+link}
+    // 空き案内のURLは、送信時点で面談予約リンク（トークン）を発行して同梱する。
+    const features=await storeFeatures(db,job.store_id)
+    if(!features.token_interviews_enabled)return
+    const link=await issueInterviewLinkToken(db,cfg,connection,to)
+    return {userKey:contact.user_key,to,body:'面談の受付枠に変更がありました。下記のURLから最新の空き状況をご確認ください。\n'+link.url}
   }
   const {rows:[booking]}=await db.query<{starts_at:Date;method:string;instructions:string}>(`SELECT s.starts_at,s.method,s.instructions
     FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id
@@ -99,9 +101,9 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   if(!booking)return
   const at=new Intl.DateTimeFormat('ja-JP',{dateStyle:'long',timeStyle:'short',timeZone:timezone}).format(booking.starts_at)
   const prefix=job.kind==='interview_reminder'?'面談のリマインドです。':'面談予約が確定しました。'
-  // D4: トークン経路の確定通知には、変更・取消用トークンURL（body_box）を同梱する。
+  // D4: 確定通知には、変更・取消用トークンURL（body_box）を同梱する。
   const manage=job.kind==='interview_confirm'&&job.body_box?unseal(cfg,'service:'+job.id,job.body_box):null
-  return {userKey:contact.user_key,to,body:[prefix,at+'（'+(booking.method==='onsite'?'対面':'オンライン')+'）',booking.instructions,link,
+  return {userKey:contact.user_key,to,body:[prefix,at+'（'+(booking.method==='onsite'?'対面':'オンライン')+'）',booking.instructions,
     ...(manage?['予約の確認・変更・取消はこちら',manage]:[])].filter(line=>line!=='').join('\n')}
 }
 
@@ -154,7 +156,7 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
       job.kind==='interview_waitlist'?features.waitlist_enabled&&features.interviews_enabled:features.reminders_enabled
     const belongs=connection.purpose==='shared'||connection.purpose===job.purpose
     const connected=job.kind==='chat_reply'||job.kind==='interview_link'||job.kind==='customer_link'?messagingReady(connection):channelReady(connection)
-    const verificationOnly=!connected&&job.kind==='interview_confirm'&&!!connection.liff_id&&testDeliveryConfirmed(connection)
+    const verificationOnly=!connected&&job.kind==='interview_confirm'&&testDeliveryConfirmed(connection)
     const ready=enabled&&belongs&&(connected||verificationOnly)&&job.generation===connection.generation&&
       !connection.stopped&&!location.stopped&&!location.tenant_stopped&&location.contract_active&&!!location.eligible_at
     if(fresh.next_at===Infinity||+job.expires_at<=Date.now()||!ready||job.scope_version!==await deliveryScope(db,r.id)){
