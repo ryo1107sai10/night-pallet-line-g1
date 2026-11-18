@@ -46,6 +46,9 @@ import { serviceHistory } from './service-delivery.js'
 import { changeThread, classifyThread, handoffInput, changeHandoff, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
 import { hostInput, queueGoogleSync, saveHost } from './interview-hosts.js'
 import { redeemInterviewLink } from './interview-link.js'
+import { completeStoreSetup, confirmStoreSetup, createRegistration, designateRegistrationMaster,
+  registrationInput, registrationProgress, reopenStoreSetup, setupConfirmInput, setupRevisionInput,
+  storeSetupState } from './registration.js'
 import { CUSTOMER_LINK_SESSION_TTL_SECONDS, redeemCustomerLink } from './customer-link.js'
 import { workflowChecks } from './workflow-checks.js'
 
@@ -254,6 +257,19 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.get('/platform/tenants',async(req,res)=>{
     res.json(await tx(pool,db=>platformTenants(db,platformCredential(req))))
+  })
+  api.post('/platform/registrations',async(req,res)=>{
+    const data=registrationInput.parse(req.body)
+    const principal=await tx(pool,db=>platformPrincipal(db,platformCredential(req)))
+    res.status(201).json(await tx(pool,db=>createRegistration(db,cfg,principal,data,keyOf(req))))
+  })
+  api.get('/platform/registrations/progress',async(req,res)=>{
+    res.json(await tx(pool,async db=>registrationProgress(db,await platformPrincipal(db,platformCredential(req)))))
+  })
+  api.post('/platform/registrations/:tenant/master',async(req,res)=>{
+    const {address}=z.strictObject({address:email}).parse(req.body)
+    res.json(await tx(pool,async db=>designateRegistrationMaster(db,
+      await platformPrincipal(db,platformCredential(req)),idOf(req,'tenant'),address)))
   })
   api.post('/platform/tenants/:tenant/enter',async(req,res)=>{
     z.strictObject({}).parse(req.body)
@@ -663,6 +679,13 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       ORDER BY f.email LIMIT 150`)
     return rows
   }))
+  api.get('/stores/:store/setup',inStore((db,_actor,req)=>storeSetupState(db,cfg,idOf(req,'store')),false))
+  api.post('/stores/:store/setup/confirm',inStore((db,actor,req)=>
+    confirmStoreSetup(db,cfg,actor,idOf(req,'store'),setupConfirmInput.parse(req.body))))
+  api.post('/stores/:store/setup/complete',inStore((db,actor,req)=>
+    completeStoreSetup(db,cfg,actor,idOf(req,'store'),setupRevisionInput.parse(req.body))))
+  api.post('/stores/:store/setup/reopen',inStore((db,actor,req)=>
+    reopenStoreSetup(db,actor,idOf(req,'store'),setupRevisionInput.parse(req.body))))
   api.get('/stores/:store/features',inStore((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
   api.patch('/stores/:store/features',inStore((db,actor,req)=>{
     requireAdmin(actor)

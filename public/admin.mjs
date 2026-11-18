@@ -24,6 +24,26 @@ const featureNames = {
   inbox_enabled:'LINE受信箱',
   interviewers_enabled:'担当者別の面談枠', google_write_enabled:'Googleカレンダーへの面談登録',
 }
+const featureGuides = {
+  tags_enabled:'友だちを条件で分類します。絞り込み配信や流入分析の土台になります。',
+  visits_enabled:'お客様がLINEから来店予約を入れられるようにします。',
+  interviews_enabled:'応募者が公開された面談枠を選んで予約できるようにします。',
+  google_calendar_enabled:'面談枠の空き判定に、Googleカレンダーの予定を照合します。',
+  forms_enabled:'応募・来店の前後で必要な情報をフォームで集めます。',
+  recruitment_enabled:'応募者の選考状況を店舗で管理します。',
+  sources_enabled:'どの経路から友だち追加や応募があったかを記録します。',
+  campaigns_enabled:'タグなどの条件で対象を絞って配信します。',
+  rich_menus_enabled:'予約の有無などに応じてリッチメニューを切り替えます。',
+  reminders_enabled:'面談の前日・当日にLINEでリマインドを送ります。',
+  waitlist_enabled:'満員の面談枠にキャンセル待ちを登録できるようにします。',
+  inbox_enabled:'お客様とのトークを管理画面で確認し、返信します。',
+  interviewers_enabled:'担当者ごとに面談枠を分けて管理します。',
+  google_write_enabled:'確定した面談をGoogleカレンダーへ登録します。',
+  guest_interviews_enabled:'ログイン不要の対面面談予約を受け付けます。',
+  token_interviews_enabled:'LIFFを使わず、LINEトークで送る専用URLから面談予約を受け付けます。',
+  token_customers_enabled:'LIFFを使わず、LINEトークで送る専用URLから来店予約と通知設定を受け付けます。',
+}
+const featureBilling = new Set(['campaigns_enabled','reminders_enabled','token_interviews_enabled','token_customers_enabled'])
 const sendStatus = { queued:'待機中',submitting:'LINEへ提出中',accepted:'LINE受付済',failed:'送信失敗',unknown:'結果不明',cancelled:'取消' }
 const checks = {
   ownership_verified:'法人が所有する公式アカウントと管理権限を確認した',
@@ -651,6 +671,131 @@ function revealLineAnchor() {
 
 window.addEventListener('hashchange',revealLineAnchor)
 
+const minuteLabel = value => String(Math.floor(value/60)).padStart(2,'0')+':'+String(value%60).padStart(2,'0')
+const setupStepNames = { profile:'店舗情報', features:'使う機能', hours:'面談の受付時間', line:'LINE接続' }
+const setupAutoChecks = {
+  token_verified:'トークンとボットの照合', webhook_verified:'Webhookの疎通',
+  tester_verified:'テスター本人確認', receive_verified:'テスト利用者から受信', send_accepted:'LINEへのテスト送信受付',
+}
+
+function setupPanel(setup, store, base) {
+  const wrap = panel('店舗セットアップ')
+  wrap.id = 'store-setup'
+  const done = Object.values(setup.steps).filter(Boolean).length
+  if (setup.completed_at) {
+    wrap.append(status('セットアップ完了',true),
+      el('p','設定を変えると、そのステップは再確定が必要になります。変更の履歴は「操作履歴」で確認できます。','muted'))
+  } else {
+    wrap.append(el('p','この店舗の登録を4つのステップで進めます。各ステップで内容を自分で決めて「確定」してください。'+
+      '管理会社の承認は不要で、進み具合は自動で保存されるため、途中まで決めて後から再開できます。（'+done+'/4ステップ確定済み）'))
+  }
+  const confirmStep = async step => {
+    await api(base+'/setup/confirm','POST',{ step, revision:setup.revision })
+  }
+  const stepBox = (key, title, confirmedAt) => {
+    const box = el('section',null,'line-step')
+    const head = el('div',null,'actions')
+    head.append(el('strong',title), setup.steps[key]
+      ? status('確定済'+(confirmedAt ? ' · '+date(confirmedAt) : ''),true)
+      : status('未確定',false))
+    box.append(head)
+    return box
+  }
+
+  const profileBox = stepBox('profile','ステップ1 店舗情報',setup.profile.confirmed_at)
+  profileBox.append(el('p','店舗の基本情報です。後から「店舗設定を編集」でも変更できます。変更すると再確定が必要になります。','muted'))
+  if (!setup.profile.complete) profileBox.append(el('p','未設定の項目があります。入力して保存してください。','status bad'))
+  profileBox.append(formOf([template('store-fields',store)],'保存して確定',async data=>{
+    await api(base,'PATCH',{...data,revision:store.revision})
+    await confirmStep('profile')
+    await refresh()
+    feedback('店舗情報を確定しました。')
+  }))
+  wrap.append(profileBox)
+
+  const featuresBox = stepBox('features','ステップ2 使う機能',setup.features.confirmed_at)
+  featuresBox.append(el('p','この店舗で使う機能を選びます。迷うものはオフのままにし、必要になってからオンにできます。すべて後から変更できます。','muted'))
+  const featureFields = []
+  for (const [key,label] of Object.entries(featureNames)) {
+    featureFields.push(field(label,key,{type:'checkbox',value:setup.features[key]}))
+    const guide = featureGuides[key] + (featureBilling.has(key)
+      ? ' LINEのメッセージ送信を使うため、公式アカウントの料金プランの通数に数えられます。' : '')
+    featureFields.push(el('p',guide,'muted'))
+  }
+  featuresBox.append(formOf(featureFields,'保存して確定',async data=>{
+    const settings = Object.fromEntries(Object.keys(featureNames).map(key=>[key,data[key]==='on']))
+    await api(base+'/features','PATCH',{...settings,revision:setup.features.revision})
+    await confirmStep('features')
+    await refresh()
+    feedback('使う機能を確定しました。')
+  }))
+  wrap.append(featuresBox)
+
+  const hoursBox = stepBox('hours','ステップ3 面談の受付時間',setup.hours.confirmed_at)
+  hoursBox.append(el('p','面談を受け付ける時間帯です。公開できる面談枠はこの範囲内だけになります。後から変更できます。','muted'))
+  const minuteChoices = Object.fromEntries(
+    Array.from({length:49},(_,i)=>i*30).map(value=>[value,minuteLabel(value)]))
+  hoursBox.append(formOf([
+    field('開始','start',{choices:minuteChoices,value:String(setup.hours.start)}),
+    field('終了','end',{choices:minuteChoices,value:String(setup.hours.end)}),
+  ],'保存して確定',async data=>{
+    await api(base+'/interviews/hours','PATCH',
+      { start:Number(data.start), end:Number(data.end), revision:setup.hours.revision })
+    await confirmStep('hours')
+    await refresh()
+    feedback('面談の受付時間を確定しました。')
+  }))
+  wrap.append(hoursBox)
+
+  const lineBox = stepBox('line','ステップ4 LINE接続',null)
+  lineBox.append(el('p','自動で判定できる項目は自動で確認します。公式管理画面でしか分からない項目は、'+
+    '下のLINE接続パネルの「公式管理画面で確認した項目」で、自分で確認したものにチェックを入れてください。','muted'))
+  if (!setup.line.connections.length) {
+    lineBox.append(el('p','まだ公式アカウントが登録されていません。下の「公式LINEの接続情報を登録」から登録してください。'))
+  }
+  for (const connection of setup.line.connections) {
+    lineBox.append(el('strong',connection.label),
+      status(connection.status==='connected' ? '接続済' : '設定中',connection.status==='connected'))
+    const autoList = el('ul',null,'onboarding-list')
+    for (const [key,label] of Object.entries(setupAutoChecks)) {
+      const row = el('li',null,'record')
+      row.append(el('span',label),status(connection.auto[key] ? '確認済' : '未確認',!!connection.auto[key]))
+      autoList.append(row)
+    }
+    lineBox.append(autoList)
+    const manual = Object.entries(checks)
+      .filter(([key])=>connection.has_liff || key!=='login_published')
+      .map(([key,label])=>label+'：'+(connection.manual[key] ? '確認済' : '未確認'))
+    lineBox.append(el('p','公式管理画面で確認する項目（LINE接続パネルで保存）　'+manual.join(' / '),'muted'))
+  }
+  wrap.append(lineBox)
+
+  const summaryBox = el('section',null,'line-step')
+  summaryBox.append(el('strong','内容の確認'))
+  const enabled = Object.entries(featureNames).filter(([key])=>setup.features[key]).map(([,label])=>label)
+  summaryBox.append(
+    el('p','店舗　'+setup.profile.name+' · '+setup.profile.address),
+    el('p','使う機能　'+(enabled.length ? enabled.join('、') : 'なし')),
+    el('p','面談の受付時間　'+minuteLabel(setup.hours.start)+'〜'+minuteLabel(setup.hours.end)),
+    el('p','LINE接続　'+(setup.steps.line ? '接続済' : '未完了')),
+  )
+  if (setup.completed_at) {
+    summaryBox.append(button('再編集する',async ()=>{
+      await api(base+'/setup/reopen','POST',{revision:setup.revision})
+      await refresh()
+      feedback('セットアップを再編集できる状態にしました。')
+    }))
+  } else {
+    summaryBox.append(button('内容を確認してセットアップを完了する',async ()=>{
+      await api(base+'/setup/complete','POST',{revision:setup.revision})
+      await refresh()
+      feedback('セットアップを完了しました。')
+    }))
+  }
+  wrap.append(summaryBox)
+  return wrap
+}
+
 async function render() {
   const generation = ++view
   const admin = session.actor.role==='admin'
@@ -664,8 +809,9 @@ async function render() {
   const modulePromise = session.actor.platform && store ? api(base+'/line-module') : Promise.resolve(null)
   const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
   const masterPromise = session.actor.platform ? api('/agency-master') : Promise.resolve(null)
-  const [staff,connections,features,module,onboarding,detail,agencyMaster] = await Promise.all([
-    staffPromise,connectionPromise,featurePromise,modulePromise,onboardingList,onboardingItem,masterPromise,
+  const setupPromise = admin && store ? api(base+'/setup') : Promise.resolve(null)
+  const [staff,connections,features,module,onboarding,detail,agencyMaster,setup] = await Promise.all([
+    staffPromise,connectionPromise,featurePromise,modulePromise,onboardingList,onboardingItem,masterPromise,setupPromise,
   ])
   if (generation!==view) return
   const url = new URL(location.href)
@@ -744,6 +890,7 @@ async function render() {
       await refresh()
       feedback('店舗を登録しました。')
     })))
+  if (setup) main.append(setupPanel(setup,store,base))
   main.append(storePanel)
   if (manage && store) {
     const line = panel('LINE接続')

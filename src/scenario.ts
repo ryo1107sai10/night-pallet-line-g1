@@ -6,6 +6,7 @@ import { audit, conflict, Fault, missing, keyed, newId, once, purpose, revision,
 import { channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { INTERVIEW_LINK_MARKER } from './interview-link.js'
+import { CUSTOMER_LINK_MARKER } from './customer-link.js'
 
 const nodeId = z.string().regex(/^[a-zA-Z0-9_-]{1,50}$/)
 const base = { id:nodeId, name:z.string().max(100) }
@@ -34,7 +35,7 @@ const fixture = z.strictObject({
   budgetAvailable:z.boolean().optional(),bookingCurrent:z.boolean().optional(),tags:z.array(z.string().max(80)).max(50),
   values:z.strictObject({ name:z.string().max(100),store:z.string().max(120),staff:z.string().max(100),
     booking:z.string().max(120),price:z.string().max(400),booking_url:z.string().max(1000),
-    interview_link:z.string().max(1000).optional() }),
+    interview_link:z.string().max(1000).optional(),customer_link:z.string().max(1000).optional() }),
 })
 export type Graph = z.infer<typeof graph>
 const customerTriggers = new Set(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'])
@@ -204,9 +205,12 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
     const result=await preview(db,store,current.graph,data.fixture)
     const message=result.events.find(event=>event.id===data.node)?.message
     if (!message) throw new Fault(422,'MESSAGE_NOT_SCHEDULED','配信予定があるメッセージを選んでください。')
-    // 面談予約URLはシミュレーション用のダミー値をマーカーに戻して封緘し、送信直前に受信者ごとの実URLへ差し替える。
-    const dummy=current.graph.purpose==='recruitment'?data.fixture.values.interview_link:undefined
-    const body=dummy?message.split(dummy).join(INTERVIEW_LINK_MARKER):message
+    // 面談予約URL・来店予約・設定URLはシミュレーション用のダミー値をマーカーに戻して封緘し、送信直前に受信者ごとの実URLへ差し替える。
+    const dummyInterview=current.graph.purpose==='recruitment'?data.fixture.values.interview_link:undefined
+    const dummyCustomer=current.graph.purpose==='customer'?data.fixture.values.customer_link:undefined
+    let body=message
+    if (dummyInterview) body=body.split(dummyInterview).join(INTERVIEW_LINK_MARKER)
+    if (dummyCustomer) body=body.split(dummyCustomer).join(CUSTOMER_LINK_MARKER)
     const marked='【接続テスト】\n'+body
     if (marked.length>5000) throw new Fault(422,'MESSAGE_TOO_LONG','テストの表示を含めて5000文字以内にしてください。')
     const job=newId()
