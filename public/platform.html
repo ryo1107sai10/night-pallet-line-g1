@@ -25,6 +25,23 @@
       <h2>管理会社</h2>
       <ul class="onboarding-list" id="tenants"></ul>
     </section>
+    <section class="panel">
+      <h2>新規登録</h2>
+      <p class="muted">法人名・店舗名・エール担当者のメールアドレスだけで登録を始められます。法人と店舗の作成、担当者への招待、初期設定（基本機能と面談受付時間 18:00〜24:00）の適用までを一括で行います。店舗の詳しい設定は、招待を受け取ったエール担当者が管理画面のセットアップ手順で決めます。</p>
+      <form id="registration-form">
+        <label>法人名<input name="legal_name" maxlength="120" required></label>
+        <label>店舗名<input name="store_name" maxlength="100" required></label>
+        <label>エール担当者のメールアドレス<input name="email" type="email" maxlength="254" required></label>
+        <button type="submit">登録して招待を発行</button>
+      </form>
+      <pre id="registration-result" hidden></pre>
+    </section>
+    <section class="panel">
+      <h2>登録の進捗</h2>
+      <p class="muted">どの店舗の登録がどこで止まっているかを確認できます。承認のための画面ではありません。</p>
+      <ul class="onboarding-list" id="registration-progress"></ul>
+      <button type="button" class="secondary" id="progress-refresh">進捗を更新</button>
+    </section>
   </main>
 </body>
 </html>
