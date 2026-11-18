@@ -6,7 +6,8 @@ import {
 } from './core.js'
 import { channel, userKey, type Channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
-import { requireFeature } from './store-features.js'
+import { requireFeature, storeFeatures } from './store-features.js'
+import { locationOf } from './automation.js'
 import type { WorkflowSubject } from './forms.js'
 import { rememberContact } from './rich-menus.js'
 import { queueService } from './service-delivery.js'
@@ -14,6 +15,10 @@ import { queueService } from './service-delivery.js'
 // D2: トークン有効期限は3時間。D3: 引換後のセッション有効期限は2時間。
 export const LINK_TOKEN_TTL_SECONDS = 3 * 3600
 export const LINK_SESSION_TTL_SECONDS = 2 * 3600
+
+// シナリオ本文の差し込み変数。テスト送信では本文にこのマーカーを残して封緘し、
+// 送信直前に受信者ごとの実URLへ置き換える（発行は送信時点＝期限は送信から3時間）。
+export const INTERVIEW_LINK_MARKER = '{{interview_link}}'
 
 export const redeemInput = z.strictObject({ token: opaque })
 
@@ -51,12 +56,38 @@ async function createLinkToken(db: DB, cfg: Config, c: Channel, identity: {
   return { id, raw, url: interviewLinkUrl(cfg, c.id, raw), expires }
 }
 
+// 発行ガード: postback 経路（フローA）とシナリオ経路（フローD）で共通。
+// 採用専用OA・友だち状態・機能フラグ・停止状態・世代一致をすべて満たす場合のみ true。
+export async function interviewLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string) {
+  if (c.purpose !== 'recruitment' || c.stopped || generation !== c.generation) return false
+  const features = await storeFeatures(db, c.store_id)
+  if (!features.interviews_enabled || !features.token_interviews_enabled) return false
+  const { rows: [rel] } = await db.query<{ following: boolean }>(
+    'SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2', [c.id, userKeyValue])
+  if (!rel?.following) return false
+  const { rows: [latest] } = await db.query<{ kind: string }>(`SELECT kind FROM webhook_event
+    WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow','unfollow')
+    ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`, [c.id, userKeyValue])
+  if (latest?.kind === 'unfollow') return false
+  const location = await locationOf(db, c.store_id)
+  if (location.stopped || location.tenant_stopped) return false
+  return true
+}
+
+// 発行の共通部品: 宛先を登録し、未使用の旧リンクを失効させて新しいトークンを1本作る。
+// 送信（Pushのキュー投入や本文への差し込み）と監査は呼び出し側が行う。
+export async function issueInterviewLinkToken(db: DB, cfg: Config, c: Channel, user: string) {
+  const applicantKey = keyed(cfg, 'interview:' + c.id + ':' + user)
+  const subject = subjectFor(c, applicantKey)
+  await rememberContact(db, cfg, c, user, subject)
+  return createLinkToken(db, cfg, c, { user_key: userKey(cfg, c, user), applicant_key: applicantKey })
+}
+
 // フローA: リッチメニューの postback を受けたワーカーから呼ぶ。呼び出し側のトランザクション内で実行する。
 export async function issueInterviewLink(db: DB, cfg: Config, c: Channel, user: string) {
   const applicantKey = keyed(cfg, 'interview:' + c.id + ':' + user)
   const subject = subjectFor(c, applicantKey)
-  await rememberContact(db, cfg, c, user, subject)
-  const link = await createLinkToken(db, cfg, c, { user_key: userKey(cfg, c, user), applicant_key: applicantKey })
+  const link = await issueInterviewLinkToken(db, cfg, c, user)
   const body = '面談予約のご案内です。下記のURLからご希望の日時をお選びください（有効期限: 発行から3時間）。\n' + link.url
   await queueService(db, cfg, subject, {
     kind: 'interview_link', object: link.id, revision: 1, due: new Date(), expiry: link.expires, body,
