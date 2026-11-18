@@ -122,8 +122,8 @@ export async function updateProfile(db:DB,actor:Actor,id:string,p:z.infer<typeof
   return result.rows[0]
 }
 
-export const customerSessionCookie=(cfg:Config,value:string)=>`night_customer=${value}; Path=/api/v1/customer/;
-  HttpOnly; SameSite=Strict; Max-Age=1800`.replace(/\s+/g,' ')+(cfg.external?'; Secure':'')
+export const customerSessionCookie=(cfg:Config,value:string,maxAge=1800)=>`night_customer=${value}; Path=/api/v1/customer/;
+  HttpOnly; SameSite=Strict; Max-Age=${maxAge}`.replace(/\s+/g,' ')+(cfg.external?'; Secure':'')
 
 export async function openCustomerSession(pool:pg.Pool,cfg:Config,line:LineAPI,input:unknown) {
   if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境でLINE本人確認を行ってください。')

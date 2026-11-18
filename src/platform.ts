@@ -5,7 +5,7 @@ import { lockDispatch } from './dispatch-lock.js'
 
 export const platformWorkspace = '/platform/tenants'
 
-async function supervisedAgency(db:DB,principal:Actor) {
+export async function supervisedAgency(db:DB,principal:Actor) {
   const {rows:[assignment]}=await db.query<{agency_id:string;display_name:string;organization:string}>(`
     SELECT m.agency_id,m.display_name,t.legal_name AS organization
     FROM platform_master m JOIN tenant t ON t.id=m.tenant_id

@@ -9,7 +9,7 @@ import { storeFeatures } from './store-features.js'
 import type { WorkflowSubject } from './forms.js'
 import { contactAddress } from './rich-menus.js'
 
-type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'|'interview_link'
+type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'|'interview_link'|'customer_link'
 type Scheduled={kind:Kind;object:string;revision:number;due:Date;expiry:Date;body?:string;actor?:string}
 type ServiceJob=WorkflowSubject & {id:string;kind:Kind;object_id:string;object_revision:number;body_box:string|null;
   actor_id:string|null;generation:number;scope_version:string;status:string;attempt:number;next_at:Date|number;expires_at:Date;
@@ -63,9 +63,9 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
     SELECT user_key,recipient_box,notices FROM workflow_contact WHERE channel_id=$1 AND purpose=$2 AND subject=$3`,
   [job.channel_id,job.purpose,job.subject])
   if(!contact)return
-  // interview_link は本人がメニューをタップして依頼した送信なので、通知オプトインは要求しない。
-  if(job.kind!=='interview_link'&&!contact.notices)return
-  if(verificationOnly&&job.kind!=='interview_link'&&!await testRecipient(db,connection,contact.user_key))return
+  // interview_link / customer_link は本人がメニューをタップして依頼した送信なので、通知オプトインは要求しない。
+  if(job.kind!=='interview_link'&&job.kind!=='customer_link'&&!contact.notices)return
+  if(verificationOnly&&job.kind!=='interview_link'&&job.kind!=='customer_link'&&!await testRecipient(db,connection,contact.user_key))return
   const {rows:[activity]}=await db.query<{kind:string|null;stop:boolean;recent_message:boolean}>(`SELECT
     EXISTS (SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$4
       AND kind='message' AND occurred_at BETWEEN now()-interval '7 days' AND now()) AS recent_message,
@@ -76,7 +76,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   [job.channel_id,contact.user_key,job.subject,connection.generation])
   if(activity.stop||activity.kind==='unfollow'||!activity.kind&&!(verificationOnly&&activity.recent_message))return
   const to=contactAddress(cfg,{...job,recipient_box:contact.recipient_box})
-  if(job.kind==='interview_link'){
+  if(job.kind==='interview_link'||job.kind==='customer_link'){
     if(!job.body_box)return
     return {userKey:contact.user_key,to,body:unseal(cfg,'service:'+job.id,job.body_box)}
   }
@@ -150,9 +150,10 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     const features=await storeFeatures(db,r.store_id)
     const enabled=job.kind==='chat_reply'?features.inbox_enabled:
       job.kind==='interview_link'?features.interviews_enabled&&features.token_interviews_enabled:
+      job.kind==='customer_link'?features.token_customers_enabled:
       job.kind==='interview_waitlist'?features.waitlist_enabled&&features.interviews_enabled:features.reminders_enabled
     const belongs=connection.purpose==='shared'||connection.purpose===job.purpose
-    const connected=job.kind==='chat_reply'||job.kind==='interview_link'?messagingReady(connection):channelReady(connection)
+    const connected=job.kind==='chat_reply'||job.kind==='interview_link'||job.kind==='customer_link'?messagingReady(connection):channelReady(connection)
     const verificationOnly=!connected&&job.kind==='interview_confirm'&&!!connection.liff_id&&testDeliveryConfirmed(connection)
     const ready=enabled&&belongs&&(connected||verificationOnly)&&job.generation===connection.generation&&
       !connection.stopped&&!location.stopped&&!location.tenant_stopped&&location.contract_active&&!!location.eligible_at
