@@ -6,7 +6,7 @@ export const triggers = {
 export const kinds = { message:'メッセージ',wait:'待機',branch:'条件分岐',tag:'タグ更新',task:'担当タスク',end:'終了' }
 export const conditions = { booked:'予約がある',consent:'目的別の同意がある',adult:'20歳以上の確認済み',
   responded:'返信がある',tag:'タグを持つ',assigned:'担当がいる' }
-export const variables = { name:'お名前',store:'店舗名',staff:'担当者',booking:'予約日時',price:'公開料金',booking_url:'予約変更 URL' }
+export const variables = { name:'お名前',store:'店舗名',staff:'担当者',booking:'予約日時',price:'公開料金',booking_url:'予約変更 URL',interview_link:'面談予約 URL' }
 const valuePattern = /\{\{\s*([a-z_]+)\s*\}\}/g
 const days = 86400000
 const maxWait = 365*24*60
@@ -75,6 +75,7 @@ export function validate(flow, publish=false) {
       })
       if (remaining.includes('{{') || remaining.includes('}}')) add('差し込み項目の形式を確認してください。',node.id)
       if (flow.purpose==='recruitment' && node.category==='marketing') add('採用シナリオに顧客向け販促は追加できません。',node.id)
+      if (flow.purpose!=='recruitment' && /\{\{\s*interview_link\s*\}\}/.test(node.body)) add('面談予約 URLの差し込みは採用シナリオでのみ使えます。',node.id)
     }
   }
   const visiting = new Set()
@@ -142,8 +143,10 @@ export function nextWindow(at, flow, zone) {
 export function renderMessage(body,person) {
   const missing=[]
   let usesBookingUrl=false
+  let usesInterviewLink=false
   const message=body.replace(valuePattern,(_match,key)=>{
     if (key==='booking_url') usesBookingUrl=true
+    if (key==='interview_link') usesInterviewLink=true
     const value=Object.hasOwn(person.values,key)?person.values[key]:undefined
     if (typeof value==='string' && value.trim()) return value
     missing.push(variables[key]??key)
@@ -154,6 +157,11 @@ export function renderMessage(body,person) {
     let url
     try { url = new URL(person.values.booking_url) } catch { return {reason:'予約変更URLが無効です。'} }
     if (url.protocol!=='https:' || !person.bookingLinkValid) return {reason:'予約変更URLの有効性を確認できません。'}
+  }
+  if (usesInterviewLink) {
+    let url
+    try { url = new URL(person.values.interview_link) } catch { return {reason:'面談予約URLが無効です。'} }
+    if (url.protocol!=='https:') return {reason:'面談予約URLが無効です。'}
   }
   if (message.length>5000) return {reason:'差し込み後に5000文字を超えています。'}
   return {message}

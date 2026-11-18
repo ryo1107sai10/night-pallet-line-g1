@@ -1,11 +1,10 @@
 import type pg from 'pg'
 import { type Actor, type Config, type DB, type Route, audit, conflict, scope, tx, unseal } from './core.js'
-import { channel, channelCredentials, channelTestReady, LineAPI } from './line.js'
+import { channel, channelCredentials, channelTestReady, LineAPI, userKey } from './line.js'
 
 import { lockDispatch } from './dispatch-lock.js'
-import { endScope, locationOf, processCustomerWebhook, runAutomation } from './automation.js'
-import { storeFeatures } from './store-features.js'
-import { issueInterviewLink } from './interview-link.js'
+import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
+import { INTERVIEW_LINK_MARKER, interviewLinkEligible, issueInterviewLink, issueInterviewLinkToken } from './interview-link.js'
 import { deliverCampaign } from './campaigns.js'
 import { updateRichMenu } from './rich-menus.js'
 import { deliverService } from './service-delivery.js'
@@ -84,24 +83,30 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
 }
 
 // LIFFなし面談予約: リッチメニューの postback から予約リンクを発行する。
-// 発行条件（採用専用OA・友だち状態・機能フラグ・停止状態）をすべて満たす場合のみ発行する。
+// 発行条件（採用専用OA・友だち状態・機能フラグ・停止状態）は interviewLinkEligible で共通判定する。
 async function tryIssueInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,event:{
   event_id:string;generation:number;user_key:string|null;recipient_box:string|null
 }) {
-  if (c.purpose!=='recruitment'||c.stopped||event.generation!==c.generation) return
-  const features=await storeFeatures(db,c.store_id)
-  if (!features.interviews_enabled||!features.token_interviews_enabled) return
-  const {rows:[rel]}=await db.query<{following:boolean}>(
-    'SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2',[c.id,event.user_key])
-  if (!rel?.following) return
-  const {rows:[latest]}=await db.query<{kind:string}>(`SELECT kind FROM webhook_event
-    WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow','unfollow')
-    ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,event.user_key])
-  if (latest?.kind==='unfollow') return
-  const location=await locationOf(db,c.store_id)
-  if (location.stopped||location.tenant_stopped) return
+  if (!event.user_key) return
+  if (!await interviewLinkEligible(db,c,event.generation,event.user_key)) return
   const user=unseal(cfg,'webhook:'+c.id+':'+event.event_id,event.recipient_box!)
   await issueInterviewLink(db,cfg,c,user)
+}
+
+// フローD: シナリオのテスト送信に含まれる面談予約URLマーカーを、送信直前に受信者ごとの実URLへ置き換える。
+// 発行はこの送信トランザクション内で行うため、トークンの3時間期限は送信時点から数えられる。
+// ガードを満たさない場合は null を返し、呼び出し側は送信自体を取りやめる（マーカーやダミーURLは送らない）。
+async function resolveScenarioInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,
+  job:{scenario_id:string|null;generation:number},message:string,user:string) {
+  if (!job.scenario_id) return null
+  const {rows:[sc]}=await db.query<{graph:{purpose?:string}}>('SELECT graph FROM scenario WHERE id=$1',[job.scenario_id])
+  if (sc?.graph?.purpose!=='recruitment') return null
+  if (!await interviewLinkEligible(db,c,job.generation,userKey(cfg,c,user))) return null
+  const link=await issueInterviewLinkToken(db,cfg,c,user)
+  await audit(db,c.tenant_id,c.store_id,null,'interview_link.issue',link.id,null,
+    {channel_id:c.id,source:'scenario_test',scenario_id:job.scenario_id})
+  const resolved=message.split(INTERVIEW_LINK_MARKER).join(link.url)
+  return resolved.length<=5000?resolved:null
 }
 
 async function sendCandidate(db: DB, r: Route, id?: string) {
@@ -182,7 +187,18 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
         return
       }
       const to = unseal(cfg,'tester:' + current.code_hash,current.recipient)
-      const message = current.test_body ? unseal(cfg,'test-body:' + job.id,current.test_body) : undefined
+      let message = current.test_body ? unseal(cfg,'test-body:' + job.id,current.test_body) : undefined
+      if (message?.includes(INTERVIEW_LINK_MARKER)) {
+        // 面談予約URLは送信直前に受信者ごとに発行する。条件を満たさない場合はURLを送らず送信を取りやめる。
+        const resolved = await resolveScenarioInterviewLink(db,cfg,fresh,current,message,to)
+        if (!resolved) {
+          await db.query(`UPDATE test_send SET status=$2,next_at='infinity' WHERE id=$1`,
+            [job.id,attempt===1?'cancelled':'unknown'])
+          await audit(db,r.tenant_id,r.store_id,null,'interview_link.scenario_held',job.id,null,{channel_id:r.id})
+          return
+        }
+        message = resolved
+      }
       return { promise: api.push(channelCredentials(cfg,fresh),to,job.id,message)
         .catch(()=>({ status:'unknown',requestId:null,authError:false })) }
     })
