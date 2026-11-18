@@ -57,7 +57,7 @@ export async function startGuestInterviewSession(db:DB,cfg:Config,connection:str
   const c=await recruitmentConnection(db,target.id)
   await requireFeature(db,c.store_id,'guest_interviews_enabled')
   const raw=token()
-  const maxAge=120*86400
+  const maxAge=30*86400
   await db.query(`INSERT INTO interview_session
     (token_hash,tenant_id,store_id,channel_id,generation,applicant_key,expires_at,audience)
     VALUES($1,$2,$3,$4,$5,$6,now()+$7*interval '1 second','guest')`,

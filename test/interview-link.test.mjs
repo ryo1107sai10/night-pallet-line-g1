@@ -293,7 +293,36 @@ test('ゲスト経路（audience=guest）の既存挙動は変わらない', asy
   const session = await post('/guest-interview/' + connection + '/session', null, {})
   expect(session, 201)
   assert.ok(session.cookie?.startsWith('night_guest_interview='))
+  assert.match(session.setCookie, /Max-Age=2592000(?:;|$)/, 'ゲストセッションのCookie有効期限は30日であること')
+  const guestSessions = await read(
+    "SELECT expires_at FROM interview_session WHERE channel_id=$1 AND audience='guest' ORDER BY expires_at DESC LIMIT 1",
+    [connection])
+  const ttlDays = (+guestSessions.rows[0].expires_at - Date.now()) / 86400000
+  assert.ok(ttlDays > 29 && ttlDays <= 30, 'DB側のゲストセッション有効期限も30日に揃っていること')
   const calendar = expect(await request('/guest-interview/' + connection + '/calendar?start=' + slotDate,
     { cookie: session.cookie }), 200)
   assert.ok(calendar.slots.some(slot => slot.id === slotId))
+})
+
+test('同じトークンを2回引換すると、1回目のセッションは失効し2回目のセッションでのみ操作できる', async () => {
+  await inbound([postback('link-postback-redeem-twice', user)])
+  await worker()
+  await worker()
+  const linkPush = pushesLog.filter(item => item.to === user && item.messages[0].text.includes('/reserve/')).at(-1)
+  assert.ok(linkPush, '予約URLのPushが届くこと')
+  const raw = linkPush.messages[0].text.match(/\?t=([A-Za-z0-9_-]{43})/)[1]
+
+  const first = await post('/interview-link/' + connection + '/redeem', null, { token: raw })
+  expect(first, 200)
+  const second = await post('/interview-link/' + connection + '/redeem', null, { token: raw })
+  expect(second, 200)
+  assert.notEqual(first.cookie, second.cookie)
+
+  const stale = await request('/interview/calendar?start=' + slotDate, { cookie: first.cookie })
+  assert.equal(stale.status, 401, '1回目のセッションでは予約照会ができないこと')
+  expect(await request('/interview/calendar?start=' + slotDate, { cookie: second.cookie }), 200)
+
+  const sessions = await read('SELECT token_hash FROM interview_session WHERE channel_id=$1 AND link_token_hash=$2',
+    [connection, digest(raw)])
+  assert.equal(sessions.rowCount, 1, '同一リンク由来の有効セッションは1本だけであること')
 })

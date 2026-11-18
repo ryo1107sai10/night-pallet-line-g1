@@ -141,6 +141,9 @@ export async function redeemInterviewLink(pool: pg.Pool, cfg: Config, connection
     if (row.generation !== c.generation) throw linkInvalid()
     // 流入元の帰属は、本人確認が成立した時点で記録する（項目4）。
     await recordSource(db, subjectFor(c, row.applicant_key), row.source_id ?? undefined)
+    // 同一リンクから有効なセッションは常に1本だけにする（再引換で旧セッションを失効させる）。
+    await db.query('DELETE FROM interview_session WHERE channel_id=$1 AND link_token_hash=$2',
+      [c.id, digest(raw)])
     const session = token()
     await db.query(`INSERT INTO interview_session
       (token_hash,tenant_id,store_id,channel_id,generation,applicant_key,expires_at,audience,link_token_hash)
