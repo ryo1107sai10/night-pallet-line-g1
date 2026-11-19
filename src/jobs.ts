@@ -74,6 +74,20 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
           (excluded.event_at=channel_relationship.event_at AND excluded.following=false)`,
       [event.tenant_id,event.store_id,event.channel_id,event.user_key,event.occurred_at,event.kind!=='unfollow'])
     }
+    // 接続前から友だちだった人には follow イベントが届かず、channel_relationship に行ができない。
+    // user_key は source.type='user'（1対1）のイベントにだけ付くため、1対1のメッセージ・
+    // postback・接続テスト文が届いた時点で、その人が友だちであることは確定する。
+    // 行が無い場合に限って補完し、既存行は決して上書きしない（遅れて届いた古いメッセージで
+    // ブロック済みの人を復活させない）。裏返しとして、unfollow 行があるのに再追加イベントを
+    // 取りこぼした場合は自動では回復しない（既知の限界として許容する）。
+    if (event.user_key && ['message','postback','test_link'].includes(event.kind)) {
+      const inferred = await db.query(`INSERT INTO channel_relationship VALUES($1,$2,$3,$4,$5,true)
+        ON CONFLICT(channel_id,user_key) DO NOTHING`,
+      [event.tenant_id,event.store_id,event.channel_id,event.user_key,event.occurred_at])
+      if (inferred.rowCount) await audit(db,event.tenant_id,event.store_id,null,
+        'relationship.inferred',event.channel_id,null,
+        {channel_id:event.channel_id,kind:event.kind,event_id:event.event_id})
+    }
     if (event.kind==='postback'&&event.action==='interview_link'&&event.user_key&&event.recipient_box) {
       await tryIssueInterviewLink(db,cfg,c,event)
     }

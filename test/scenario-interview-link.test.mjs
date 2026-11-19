@@ -27,6 +27,9 @@ const user2 = 'U' + '3'.repeat(32)
 const user3 = 'U' + '4'.repeat(32)
 const user4 = 'U' + '5'.repeat(32)
 const user5 = 'U' + '6'.repeat(32)
+const user6 = 'U' + '7'.repeat(32)
+const user7 = 'U' + '8'.repeat(32)
+const user8 = 'U' + '67'.repeat(16)
 const channelSecret = 'a'.repeat(32)
 const accessToken = 'test-channel-token'
 const accessToken2 = 'test-channel-token-2'
@@ -92,6 +95,25 @@ await worker()
 await worker()
 return invite.id
 }
+
+// 接続前から友だちだった人の再現: 本人確認メッセージと通常メッセージだけで、followイベントは送らない。
+async function preparePreconnectedTester(conn, who) {
+const prefix = '/stores/' + storeId + '/connections/' + conn
+const invite = expect(await post(prefix + '/tests', admin, { purpose: 'recruitment'}, idempotency()), 201)
+const destination = conn === connection? bot: bot2
+await inbound(conn, destination, [eventFor('code-' + who, 'message', who, {
+message: { type: 'text', text: '接続テスト ' + invite.code },
+})])
+await inbound(conn, destination, [eventFor('hello-' + who, 'message', who, {
+message: { type: 'text', text: 'こんにちは' },
+})])
+await worker()
+await worker()
+return invite.id
+}
+const relOf = async (conn, who) => (await read(
+'SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2',
+[conn, keyed(cfg, 'line-user:' + conn + ':' + who)])).rows
 
 const fixture = {
 start: '2026-11-14T12:00', bookingAt: '', dayCount: 0, weekCount: 0, booked: false, consent: true,
@@ -334,6 +356,57 @@ const tokens = await tokensFor(shared, user5)
 assert.equal(tokens.rowCount, 1, 'トークンが発行されること')
 assert.equal(digest(raw), tokens.rows[0].token_hash, 'DBにはハッシュのみが保存されること')
 assert.equal((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
+})
+
+test('接続前からの友だち（followイベントなし）でも関係行が補完され、テスト送信が届く', async () => {
+const tester = await preparePreconnectedTester(connection, user6)
+const rel = await relOf(connection, user6)
+assert.equal(rel.length, 1, 'メッセージ受信で関係行が補完されること')
+assert.equal(rel[0].following, true)
+const audits = await read(
+"SELECT details->>'event_id' AS event_id FROM audit WHERE operation=$1 AND object_id=$2",
+['relationship.inferred', connection])
+assert.ok(audits.rows.some(row => row.event_id === 'code-' + user6 || row.event_id === 'hello-' + user6),
+'補完が監査に記録されること')
+const job = await queueScenarioSend(scenarioId, scenarioRevision, tester)
+await worker()
+await worker()
+const sent = pushesTo(user6)
+assert.equal(sent.length, 1, 'テスト送信が1通届くこと')
+const raw = linkRawOf(sent[0].messages[0].text)
+assert.ok(raw, '専用URLが差し込まれること: ' + sent[0].messages[0].text)
+assert.equal((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
+})
+
+test('ブロック後の遅延メッセージでは関係行は復活しない', async () => {
+const tester = await prepareTester(connection, user7)
+const t0 = Date.now()
+await inbound(connection, bot, [
+eventFor('unfollow-user7', 'unfollow', user7, { timestamp: t0 + 60000}),
+])
+await worker()
+await inbound(connection, bot, [
+eventFor('stale-msg-user7', 'message', user7, { timestamp: t0 - 60000,
+message: { type: 'text', text: 'ブロック前に送ったメッセージ' }}),
+])
+await worker()
+const rel = await relOf(connection, user7)
+assert.equal(rel.length, 1)
+assert.equal(rel[0].following, false, '既存のunfollow行は上書きされないこと')
+const job = await queueScenarioSend(scenarioId, scenarioRevision, tester)
+await worker()
+await worker()
+assert.equal(pushesTo(user7).length, 0, 'Pushは届かないこと')
+assert.notEqual((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
+})
+
+test('接続前からの友だちがリッチメニューを押すと面談リンクが発行される', async () => {
+await preparePreconnectedTester(connection, user8)
+await inbound(connection, bot, [eventFor('pb-user8', 'postback', user8, { postback: { data: 'action=interview_link'}})])
+await worker()
+await worker()
+const tokens = await tokensFor(connection, user8)
+assert.equal(tokens.rowCount, 1, 'postback時点の補完でリンクが発行されること')
 })
 
 test('面談予約URLの差し込みは採用シナリオでのみ検証を通る', () => {
