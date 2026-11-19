@@ -1,6 +1,7 @@
 export const triggers = {
   follow:'友だち追加', form:'フォーム送信', consent:'明示同意', booking_created:'予約作成',
   booking_changed:'予約変更', booking_cancelled:'予約取消', visit:'来店登録',
+  interview_booked:'面談予約', interview_changed:'面談変更', interview_cancelled:'面談取消',
   application:'応募状態変更', link:'リンク反応', manual:'手動登録',
 }
 export const kinds = { message:'メッセージ',wait:'待機',branch:'条件分岐',tag:'タグ更新',task:'担当タスク',end:'終了' }
@@ -39,7 +40,8 @@ export function validate(flow, publish=false) {
   if (!flow.name.trim()) add('シナリオ名を入力してください。')
   if (!flow.channel && publish) add('配信先の公式アカウントを選択してください。')
   if (!Object.hasOwn(triggers,flow.trigger) || (flow.trigger==='application' && flow.purpose!=='recruitment') ||
-    (['booking_created','booking_changed','booking_cancelled','visit'].includes(flow.trigger) && flow.purpose!=='customer')) {
+    (['booking_created','booking_changed','booking_cancelled','visit'].includes(flow.trigger) && flow.purpose!=='customer') ||
+    (['interview_booked','interview_changed','interview_cancelled'].includes(flow.trigger) && flow.purpose!=='recruitment')) {
     add('この開始イベントはシナリオの用途と一致しません。')
   }
   if (!timeFormat.test(flow.windowStart) || !timeFormat.test(flow.windowEnd) || flow.windowStart>=flow.windowEnd) {

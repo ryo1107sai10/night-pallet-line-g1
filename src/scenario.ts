@@ -39,8 +39,12 @@ const fixture = z.strictObject({
 })
 export type Graph = z.infer<typeof graph>
 const customerTriggers = new Set(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'])
+// 採用シナリオの実配信（026）: 友だち追加と面談の予約・変更・取消を開始イベントとして公開できる。
+const recruitmentTriggers = new Set(['follow','interview_booked','interview_changed','interview_cancelled'])
 function canPublish(graph:Graph) {
-  if (graph.purpose!=='customer' || !customerTriggers.has(graph.trigger)) {
+  const available = graph.purpose==='customer' ? customerTriggers.has(graph.trigger)
+    : graph.purpose==='recruitment' ? recruitmentTriggers.has(graph.trigger) : false
+  if (!available) {
     throw new Fault(422,'TRIGGER_UNAVAILABLE','この用途・開始イベントの実配信は未対応です。下書きと配信前テストを利用できます。')
   }
 }
@@ -137,6 +141,11 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
           WHERE scenario_id=$1 AND ended_at IS NULL`,[id])
         await db.query(`UPDATE automatic_send SET next_at='infinity',reason='シナリオ停止' WHERE
           enrollment_id IN (SELECT id FROM enrollment WHERE scenario_id=$1)
+          AND status IN ('submitting','unknown')`,[id])
+        await db.query(`UPDATE applicant_enrollment SET ended_at=now(),end_reason='シナリオ停止'
+          WHERE scenario_id=$1 AND ended_at IS NULL`,[id])
+        await db.query(`UPDATE applicant_send SET next_at='infinity',reason='シナリオ停止' WHERE
+          enrollment_id IN (SELECT id FROM applicant_enrollment WHERE scenario_id=$1)
           AND status IN ('submitting','unknown')`,[id])
       }
       break
