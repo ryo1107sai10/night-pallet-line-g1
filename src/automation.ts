@@ -8,6 +8,7 @@ import { lockDispatch } from './dispatch-lock.js'
 import type { Graph } from './scenario.js'
 import { messageBudget } from './delivery-budget.js'
 import { CUSTOMER_LINK_MARKER, customerLinkEligible, issueCustomerLinkToken } from './customer-link.js'
+import { endApplicantScope } from './recruitment-automation.js'
 
 // {{customer_link}} と {{booking_url}} は送信直前に受信者ごと発行するため、step 時点では送信ジョブIDを含む
 // プレースホルダURLで描画して封緘し、submit 直前に実URLへ差し替える（プレースホルダは決定的に再現できる）。
@@ -96,7 +97,8 @@ export async function updateAutomation(db:DB,cfg:Config,actor:Actor,id:string,in
     throw conflict()
   }
   if (input.enabled) {
-    const {rows}=await db.query('SELECT id FROM channel WHERE purpose<>\'recruitment\'')
+    // 採用専用OAだけの店舗でも自動配信を有効化できる（採用シナリオの実配信 026）。
+    const {rows}=await db.query('SELECT id FROM channel')
     let verified=false
     for (const row of rows) if ((await summary(db,cfg,await channel(db,row.id))).status==='connected') verified=true
     if (!verified) throw conflict()
@@ -107,7 +109,10 @@ export async function updateAutomation(db:DB,cfg:Config,actor:Actor,id:string,in
     revision=revision+1 WHERE id=$1 AND revision=$5 RETURNING revision`,
     [id,input.enabled,input.contract,input.monthly_limit,input.revision])
   if (!updated.rowCount) throw conflict()
-  if (!input.enabled || !input.contract) await endScope(db,'store_id=$1',[id],'店舗の自動配信を無効化')
+  if (!input.enabled || !input.contract) {
+    await endScope(db,'store_id=$1',[id],'店舗の自動配信を無効化')
+    await endApplicantScope(db,'store_id=$1',[id],'店舗の自動配信を無効化')
+  }
   await audit(db,actor.tenant_id,id,actor.id,'automation.settings',id,input.reason,
     {enabled:input.enabled,contract:input.contract,monthly_limit:input.monthly_limit})
   return updated.rows[0]

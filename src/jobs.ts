@@ -4,6 +4,7 @@ import { channel, channelCredentials, channelTestReady, LineAPI, userKey } from 
 
 import { lockDispatch } from './dispatch-lock.js'
 import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
+import { endApplicantScope, processRecruitmentWebhook, runRecruitmentAutomation } from './recruitment-automation.js'
 import { INTERVIEW_LINK_MARKER, interviewLinkEligible, issueInterviewLink, issueInterviewLinkToken } from './interview-link.js'
 import { CUSTOMER_LINK_MARKER, customerLinkEligible, issueCustomerLink, issueCustomerLinkToken } from './customer-link.js'
 import { deliverCampaign } from './campaigns.js'
@@ -31,12 +32,13 @@ export async function setStop(db: DB, actor: Actor, level: keyof typeof targets,
   if (stopped) {
     const args = level === 'tenant' ? [] : [id]
     const automatic = await endScope(db,target.constraint,args,'緊急停止')
+    const applicant = await endApplicantScope(db,target.constraint,args,'緊急停止')
     const active = await db.query(`SELECT count(*)::int AS count FROM test_send
       WHERE status='submitting' AND ${target.constraint}`,args)
-    inFlight = active.rows[0].count + automatic.inFlight
+    inFlight = active.rows[0].count + automatic.inFlight + applicant.inFlight
     const pending = await db.query(`UPDATE test_send SET status='cancelled'
       WHERE status='queued' AND ${target.constraint}`,args)
-    cancelled = (pending.rowCount ?? 0) + automatic.ended
+    cancelled = (pending.rowCount ?? 0) + automatic.ended + applicant.ended
     // Ambiguous prior attempts stay visible as unknown and are never resumed after this stop.
     await db.query(`UPDATE test_send SET next_at='infinity'
       WHERE status IN ('unknown','submitting') AND ${target.constraint}`,args)
@@ -79,6 +81,7 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
       await tryIssueCustomerLink(db,cfg,c,event)
     }
     await processCustomerWebhook(db,cfg,c,event)
+    await processRecruitmentWebhook(db,cfg,c,event)
     if(event.user_key&&event.stop_signal==='all')await db.query(`UPDATE workflow_contact SET notices=false
       WHERE channel_id=$1 AND user_key=$2 AND notices_changed_at<=$3`,[c.id,event.user_key,event.occurred_at])
     await db.query('UPDATE webhook_event SET processed_at=now(),recipient_box=NULL WHERE channel_id=$1 AND event_id=$2',
@@ -194,6 +197,7 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
     if (r.module_channel_id && (!cfg.external || r.module_channel_id!==cfg.lineModule?.id)) continue
     await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,cfg,r) })
     await runAutomation(pool,cfg,api,r)
+    await runRecruitmentAutomation(pool,cfg,api,r)
     await deliverCampaign(pool,cfg,api,r)
     await updateRichMenu(pool,cfg,api,r)
     await runGoogleSync(pool,google,r)

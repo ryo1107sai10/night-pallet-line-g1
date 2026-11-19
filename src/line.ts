@@ -356,7 +356,9 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
       if (rowCount) sourceId=sourceParam
     }
     // 兼用OAでは action が用途の振り分けそのものになるため、どちらのリンク postback でも宛先を封緘する（フェーズ4）。
-    const recipient=key&&user&&((c.purpose==='customer'&&['follow','refollow'].includes(kind))||
+    // 採用OAの友だち追加でも宛先を封緘する: 採用シナリオの実配信（026）が follow を起点に
+    // workflow_contact を登録し、応募者を特定するために必要（従来は postback 時のみ封緘していた）。
+    const recipient=key&&user&&((['customer','recruitment'].includes(c.purpose)&&['follow','refollow'].includes(kind))||
       (c.purpose==='recruitment'&&action==='interview_link')||
       (c.purpose==='customer'&&action==='customer_link')||
       (c.purpose==='shared'&&(action==='interview_link'||action==='customer_link')))
