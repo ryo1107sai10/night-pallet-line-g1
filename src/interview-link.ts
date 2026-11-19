@@ -59,8 +59,10 @@ async function createLinkToken(db: DB, cfg: Config, c: Channel, identity: {
 
 // 発行ガード: postback 経路（フローA）とシナリオ経路（フローD）で共通。
 // 採用専用OA・友だち状態・機能フラグ・停止状態・世代一致をすべて満たす場合のみ true。
-// 兼用OAでの発行は postback 経路だけが allowShared=true を渡す（action=interview_link が用途の振り分けになる）。
-// シナリオ経路は従来どおり採用専用OAのみ（フェーズ2で固定した挙動を変えない）。
+// 兼用OAでの発行も全経路で allowShared=true を渡す（用途の振り分けは、postback では
+// action=interview_link、シナリオではシナリオ自体の purpose='recruitment' が担う）。
+// 2026-11-19 の実LINE検収で、兼用OAのシナリオ経路だけが発行できず送信が取り消される
+// 問題が判明したため、顧客リンク側のシナリオ経路（allowShared=true）と揃えた。
 export async function interviewLinkEligible(db: DB, c: Channel, generation: number, userKeyValue: string,
   allowShared = false) {
   const purposeOk = c.purpose === 'recruitment' || (allowShared && c.purpose === 'shared')

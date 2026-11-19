@@ -263,7 +263,7 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
   // 発行条件を満たさない場合は、このメッセージを保留してURLを送らない（テスト送信と同じ挙動）。
   let linkHeld:string|null=null
   if (node.body.includes(INTERVIEW_LINK_MARKER)) {
-    if (contact && await interviewLinkEligible(db,c,c.generation,contact.user_key)) {
+    if (contact && await interviewLinkEligible(db,c,c.generation,contact.user_key,true)) {
       person.values.interview_link=interviewLinkPlaceholder(id)
     } else linkHeld='面談予約URLの発行条件を満たしていません'
   }
@@ -366,7 +366,7 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
         await end(db,run,why)
         return null
       }
-      if (!await interviewLinkEligible(db,c,c.generation,contact!.user_key)) {
+      if (!await interviewLinkEligible(db,c,c.generation,contact!.user_key,true)) {
         return abort('面談予約URLの発行条件を満たしません')
       }
       const link=await issueInterviewLinkToken(db,cfg,c,to)
