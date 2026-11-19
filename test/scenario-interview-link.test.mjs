@@ -308,7 +308,7 @@ assert.equal((await tokensFor(connection, user4)).rowCount, 0, 'トークンは�
 assert.notEqual((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
 })
 
-test('兼用OA（shared）では発行されず、URLも送られない', async () => {
+test('兼用OA（shared）でも発行され、専用URLが届く', async () => {
 const tester = await prepareTester(shared, user5)
 const graph = {
 name: '兼用OAの面談案内', purpose: 'recruitment', trigger: 'form', channel: shared,
@@ -324,9 +324,16 @@ const created = expect(await post('/stores/' + storeId + '/scenarios', admin, gr
 const job = await queueScenarioSend(created.id, created.revision, tester)
 await worker()
 await worker()
-assert.equal(pushesTo(user5).length, 0, 'Pushは届かないこと')
-assert.equal((await tokensFor(shared, user5)).rowCount, 0, 'トークンは発行されないこと')
-assert.equal((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'cancelled')
+const sent = pushesTo(user5)
+assert.equal(sent.length, 1, '兼用OAでもテスト送信が1通届くこと')
+const text = sent[0].messages[0].text
+const raw = linkRawOf(text)
+assert.ok(raw, '専用URLが差し込まれること: ' + text)
+assert.ok(text.includes('/reserve/' + shared + '?t=' + raw))
+const tokens = await tokensFor(shared, user5)
+assert.equal(tokens.rowCount, 1, 'トークンが発行されること')
+assert.equal(digest(raw), tokens.rows[0].token_hash, 'DBにはハッシュのみが保存されること')
+assert.equal((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
 })
 
 test('面談予約URLの差し込みは採用シナリオでのみ検証を通る', () => {

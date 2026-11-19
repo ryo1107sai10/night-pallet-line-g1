@@ -35,15 +35,17 @@ const userE = 'U' + '6'.repeat(32)
 const userF = 'U' + '7'.repeat(32)
 const userG = 'U' + '8'.repeat(32)
 const userH = 'U' + '9'.repeat(32)
-const bots = { 'access-token-recruit': botR}
-const clients = { 'access-token-recruit': '1234567893'}
+const botS = 'U' + 'b'.repeat(32)
+const userS = 'U' + 'c'.repeat(32)
+const bots = { 'access-token-recruit': botR, 'access-token-shared': botS}
+const clients = { 'access-token-recruit': '1234567893', 'access-token-shared': '1234567894'}
 const consoleChecks = {
   ownership_verified: true, provider_verified: true, redelivery_enabled: true, auto_reply_checked: true,
   non_developer: true, delivery_confirmed: true,
   token_verified: true, webhook_verified: true,
 }
 let pg, owner, pool, server, dir, base, tenant, storeId, admin, line, google
-let recruitCh
+let recruitCh, sharedCh
 const pushes = []
 const signed = raw => createHmac('sha256', channelSecret).update(raw).digest('base64')
 const send = (url, options = {}) => fetch(base + url, { redirect: 'error',...options})
@@ -427,4 +429,66 @@ test('採用: 実配信に対応しない開始イベントは公開できず、
     '採用 × booking_created は検証で拒否されること')
   assert.equal(validate(bookedGraph, true).length, 0, '採用 × interview_booked は検証を通ること')
   assert.equal(validate(followLinkGraph, true).length, 0, '採用 × follow は検証を通ること')
+})
+
+test('採用: 兼用OAでも interview_booked シナリオで面談URLが発行されて届く', async () => {
+  sharedCh = expect(await post('/stores/' + storeId + '/connections', admin, {
+    label: '兼用OA', purpose: 'shared', owner_name: '検証法人', provider_id: 'provider',
+    messaging_id: '1234567894',
+    account_type: 'unverified', management_authority: '検証用', channel_secret: channelSecret,
+    token_type: 'console', access_token: 'access-token-shared',
+  }, idempotency()), 201).id
+  await tx(pool, async db => {
+    await scope(db, tenant, storeId)
+    await db.query('UPDATE channel SET checks=$2 WHERE id=$1', [sharedCh, consoleChecks])
+  })
+  const sharedBookedGraph = {
+    name: '兼用OA・確定のお知らせ', purpose: 'recruitment', trigger: 'interview_booked', channel: sharedCh,
+    windowStart: '00:00', windowEnd: '23:59', daily: 5, weekly: 10, cooldownDays: 30, rejoin: false,
+    missingAssignee: 'manager', holidays: [], entry: 'notice',
+    nodes: [
+      { id: 'notice', type: 'message', name: '確定のお知らせ', category: 'service',
+        body: '{{name}}さん、面談予約が確定しました。変更・取消はこちら: {{interview_link}}', next: 'end'},
+      { id: 'end', type: 'end', name: '完了'},
+    ],
+  }
+  await publishScenario(sharedBookedGraph)
+  const keyS = keyed(cfg, 'interview:' + sharedCh + ':' + userS)
+  // 兼用OAで応募者を用意する（友だち追加→postbackでリンク受取→引換→通知ON）。
+  await inbound(sharedCh, botS, [eventFor('t8-follow', 'follow', userS)])
+  await worker()
+  await inbound(sharedCh, botS, [
+    eventFor('t8-postback', 'postback', userS, { postback: { data: 'action=interview_link'}}),
+  ])
+  await flush(2)
+  const linkPush = pushesTo(userS).find(item => item.text.includes('/reserve/'))
+  assert.ok(linkPush, '兼用OAでも面談リンクのPushが届くこと')
+  const redeemed = await post('/interview-link/' + sharedCh + '/redeem', null,
+    { token: rawOf(linkPush.text)})
+  expect(redeemed, 200)
+  expect(await request('/interview/notices', { method: 'PUT', cookie: redeemed.cookie, data: { enabled: true}}), 200)
+  const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(Date.now() + 3 * 86400000))
+  const slotId = expect(await post('/stores/' + storeId + '/interviews/slots', admin, {
+    channel: sharedCh, starts_at: date + 'T19:00:00+09:00', ends_at: date + 'T19:30:00+09:00',
+    instructions: '会場案内', published: true,
+  }, idempotency()), 201).id
+  const booking = expect(await post('/interview/bookings', redeemed.cookie, { slot: slotId, name: '応募者S' }), 201)
+  await flush(3)
+  const event = await read(`SELECT * FROM applicant_event WHERE channel_id=$1 AND applicant_key=$2 AND kind='interview_booked'`,
+    [sharedCh, keyS])
+  assert.equal(event.rowCount, 1, '兼用OAでも面談予約イベントが発行されること')
+  assert.equal(event.rows[0].booking_id, booking.id)
+  const sends = await read("SELECT * FROM applicant_send WHERE channel_id=$1 AND applicant_key=$2 AND status='accepted'",
+    [sharedCh, keyS])
+  assert.equal(sends.rowCount, 1, '兼用OAでもシナリオ実配信がLINEに受付されること')
+  const notice = pushesTo(userS).filter(item => item.text.startsWith('応募者Sさん、面談予約が確定しました'))
+  assert.equal(notice.length, 1, '兼用OAでも確定メッセージが届くこと（業務通知とは別に）')
+  assert.ok(!notice[0].text.includes('link.invalid'), 'プレースホルダのまま送らないこと')
+  const raw = rawOf(notice[0].text)
+  assert.ok(raw, '確定メッセージに実URLが含まれること')
+  const tokenRow = (await read('SELECT * FROM interview_link_token WHERE token_hash=$1', [digest(raw)])).rows[0]
+  assert.ok(tokenRow, 'PushのURLのハッシュが発行記録と一致すること')
+  assert.equal(tokenRow.channel_id, sharedCh)
+  assert.equal(tokenRow.applicant_key, keyS)
 })

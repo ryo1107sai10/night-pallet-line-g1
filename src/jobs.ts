@@ -121,7 +121,7 @@ async function resolveScenarioInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnTy
   if (!job.scenario_id) return null
   const {rows:[sc]}=await db.query<{graph:{purpose?:string}}>('SELECT graph FROM scenario WHERE id=$1',[job.scenario_id])
   if (sc?.graph?.purpose!=='recruitment') return null
-  if (!await interviewLinkEligible(db,c,job.generation,userKey(cfg,c,user))) return null
+  if (!await interviewLinkEligible(db,c,job.generation,userKey(cfg,c,user),true)) return null
   const link=await issueInterviewLinkToken(db,cfg,c,user)
   await audit(db,c.tenant_id,c.store_id,null,'interview_link.issue',link.id,null,
     {channel_id:c.id,source:'scenario_test',scenario_id:job.scenario_id})
