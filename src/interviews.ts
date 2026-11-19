@@ -11,6 +11,7 @@ import { ensureRecruitmentCase, type WorkflowSubject } from './forms.js'
 import { refreshMenu } from './rich-menus.js'
 import { onInterviewReleased, scheduleInterviewNotices, setWaitlist } from './interview-notices.js'
 import { issueManageInterviewLink } from './interview-link.js'
+import { emitApplicantEvent } from './recruitment-automation.js'
 import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
@@ -297,6 +298,9 @@ export async function confirmInterview(db:DB,cfg:Config,a:Applicant,input:z.infe
     // D4: トークン経路では変更・取消用の新しいリンクを発行し、確定通知に同梱する。
     const manageUrl=a.link_token_hash?await issueManageInterviewLink(db,cfg,subject,id):undefined
     await scheduleInterviewNotices(db,cfg,subject,manageUrl)
+    // 採用シナリオの実配信（026）: 面談予約を開始イベントとして発行する。
+    await emitApplicantEvent(db,{tenant_id:a.tenant_id,store_id:a.store_id,channel_id:a.channel_id,
+      applicant_key:a.applicant_key},'interview:'+id+':1:booked','interview_booked',new Date(),{id,revision:1})
   }
   await queueGoogleSync(db,a.store_id,id)
   await audit(db,a.tenant_id,a.store_id,null,'interview.confirm',id,null,{slot:input.slot})
@@ -317,6 +321,15 @@ export async function updateInterview(db:DB,cfg:Config,a:Applicant,id:string,inp
   if(!a.guest)await refreshMenu(db,subject)
   await onInterviewReleased(db,cfg,subject,existing)
   if(!a.guest&&input.action==='reschedule')await scheduleInterviewNotices(db,cfg,subject)
+  if(!a.guest){
+    // 採用シナリオの実配信（026）: 面談の変更・取消を開始イベントとして発行する。
+    const nextRevision=existing.revision+1
+    const cancelled=input.action==='cancel'
+    await emitApplicantEvent(db,{tenant_id:a.tenant_id,store_id:a.store_id,channel_id:a.channel_id,
+      applicant_key:a.applicant_key},
+      'interview:'+id+':'+nextRevision+':'+(cancelled?'cancelled':'changed'),
+      cancelled?'interview_cancelled':'interview_changed',new Date(),{id,revision:nextRevision})
+  }
   await queueGoogleSync(db,a.store_id,id)
   return visibleBooking(await ownBooking(db,a,id))
 }
