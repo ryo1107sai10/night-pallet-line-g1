@@ -1704,7 +1704,10 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await post('/stores/'+storeId+'/line-module',admin,{purpose:'recruitment'}),403)
   expect(await post('/stores/'+storeId+'/line-module/complete',admin,{state:'a'.repeat(96),code:'unused'}),403)
   expect(await post('/stores/'+storeId+'/connections',admin,{},idempotency()),403)
-  expect(await request('/agency-master',{cookie:admin}),403)
+  // 代理店本人の現マスターは、自法人のマスター管理を閲覧できる（セルフサービス化で仕様変更）。
+  const ownMaster=expect(await request('/agency-master',{cookie:admin}),200)
+  assert.equal(ownMaster.current_email,agency.actor.email)
+  assert.equal(ownMaster.pending_id,null)
 
   const foreignStore=gamma.stores[0].id
   cfg.lineModule=moduleConfig
