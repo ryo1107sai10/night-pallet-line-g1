@@ -70,8 +70,24 @@ export function requireSupervisor(actor:Actor) {
   if(!actor.platform)throw forbidden()
 }
 
-export async function agencyMasterDetails(db:DB,actor:Actor) {
-  requireSupervisor(actor)
+// マスター交代の実施権限: 監督者（プラットフォーム）は従来どおり。セルフサービスでは
+// 代理店本人の現マスターだけが自法人分を実施できる。対象は常に actor.tenant_id に固定し、
+// 他法人の tenant_master には触れない。現マスターであることは、tenant_master の staff_id が
+// actor 本人の有効な管理者 staff 行（platform_actor でない）と一致することで確認する。
+async function requireAgencyMasterAccess(db:DB,actor:Actor) {
+  if(actor.platform)return
+  if(!actor.agency)throw forbidden()
+  const {rows:[binding]}=await db.query(`SELECT 1 FROM tenant_master m
+    JOIN staff f ON (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
+    WHERE m.tenant_id=$1 AND m.staff_id=$2
+      AND f.role='admin' AND NOT f.platform_actor AND f.disabled_at IS NULL`,
+    [actor.tenant_id,actor.id])
+  if(!binding)throw forbidden()
+  // RLS (027): 自法人の tenant_master 行の更新は、この照合を通ったセッションだけに許可する。
+  await db.query("SELECT set_config('night.agency_master',$1,true)",[actor.id])
+}
+
+async function readAgencyMaster(db:DB,actor:Actor) {
   await scope(db,actor.tenant_id,undefined,true)
   const {rows:[state]}=await db.query(`SELECT current.email AS current_email, next.id AS pending_id,
     next.email AS pending_email,next.password_hash IS NOT NULL AS pending_active,i.expires_at
@@ -83,8 +99,13 @@ export async function agencyMasterDetails(db:DB,actor:Actor) {
   return state
 }
 
+export async function agencyMasterDetails(db:DB,actor:Actor) {
+  await requireAgencyMasterAccess(db,actor)
+  return readAgencyMaster(db,actor)
+}
+
 export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:string,key:string) {
-  requireSupervisor(actor)
+  await requireAgencyMasterAccess(db,actor)
   await scope(db,actor.tenant_id,undefined,true)
   return once(db,cfg,actor,'agency.master_invite',key,{email:address},async()=>{
     await lockDispatch(db,actor.tenant_id)
@@ -99,7 +120,7 @@ export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:st
 }
 
 export async function promoteAgencyMaster(db:DB,actor:Actor,pending:string) {
-  requireSupervisor(actor)
+  await requireAgencyMasterAccess(db,actor)
   await scope(db,actor.tenant_id,undefined,true)
   await lockDispatch(db,actor.tenant_id)
   const {rows:[state]}=await db.query<{staff_id:string;pending_staff_id:string|null}>(
@@ -112,5 +133,7 @@ export async function promoteAgencyMaster(db:DB,actor:Actor,pending:string) {
   if(!changed.rowCount)throw forbidden()
   await db.query("DELETE FROM staff_session WHERE staff_id=$1 AND session_kind='staff'",[state.staff_id])
   await audit(db,actor.tenant_id,null,actor.id,'agency.master_promote',pending,null,{previous_staff_id:state.staff_id})
-  return agencyMasterDetails(db,actor)
+  // セルフサービスでは切り替え直後の actor は既にマスターではないため、権限判定を
+  // 介さない読み取りで結果を返す（監督者経由の応答内容とは同一）。
+  return readAgencyMaster(db,actor)
 }
