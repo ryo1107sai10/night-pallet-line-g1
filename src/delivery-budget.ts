@@ -21,6 +21,9 @@ export async function messageBudget(db:DB,location:Location,customer:string|null
       SELECT id,NULL::uuid,'service',coalesce(accepted_at,first_attempt_at) FROM service_delivery
       WHERE store_id=$1 AND status IN ('accepted','submitting','unknown')
       UNION ALL
+      SELECT id,NULL::uuid,'service',coalesce(accepted_at,first_attempt_at) FROM applicant_send
+      WHERE store_id=$1 AND status IN ('accepted','submitting','unknown')
+      UNION ALL
       SELECT id,NULL::uuid,'test',attempted_at FROM test_send
       WHERE store_id=$1 AND status IN ('accepted','submitting','unknown')
     )
