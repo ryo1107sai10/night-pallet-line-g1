@@ -1,3 +1,4 @@
+import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -47,7 +48,7 @@ const patch = (path, cookie, data) => request(path, { method: 'PATCH', cookie, d
 
 async function activate(invite, email, tenant, loginPath = '/auth/login') {
   expect(await post('/auth/activate', null,
-    { invite: invite.invite_code, password: pass, code: code(invite.setup_key, -1) }), 200)
+    { invite: invite.invite_code, password: pass, code: await previousCode(invite.setup_key) }), 200)
   const auth = await post(loginPath, null, { tenant, email, password: pass, code: code(invite.setup_key) })
   expect(auth, 200)
   assert.ok(auth.cookie)
@@ -93,7 +94,7 @@ before(async () => {
   const supervisorInvite = await inviteSupervisor(owner, cfg,
     { slug: 'lilu', name: 'リルコーポレーション', displayName: '北村さん', email: 'kitamura@example.test', agency: 'alpha' })
   expect(await post('/auth/activate', null,
-    { invite: supervisorInvite.invite_code, password: pass, code: code(supervisorInvite.setup_key, -1) }), 200)
+    { invite: supervisorInvite.invite_code, password: pass, code: await previousCode(supervisorInvite.setup_key) }), 200)
   const login = await post('/auth/platform/login', null,
     { tenant: 'lilu', email: 'kitamura@example.test', password: pass, code: code(supervisorInvite.setup_key) })
   expect(login, 200)
