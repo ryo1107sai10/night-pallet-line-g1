@@ -17,6 +17,57 @@ export const handoffInput=z.strictObject({
   revision, minutes:z.union([z.literal(15),z.literal(30),z.literal(60),z.literal(120)]).nullable(),
 })
 export const inboxClassify=z.strictObject({revision,purpose:z.enum(['customer','recruitment']),reason:text(200)})
+export const inboxTemplateInput=z.strictObject({label:text(60),body:text(3500)})
+export const inboxTemplateEdit=inboxTemplateInput.extend({revision})
+
+// 受付保留も含め、最後に届いたメッセージへの返信をLINEが受け付けるまで対応に残す。
+export const needsInboxReply = `t.state<>'resolved' AND t.last_received_at>=now()-interval '12 months'
+  AND NOT EXISTS (
+    SELECT 1 FROM line_handoff h WHERE h.channel_id=t.channel_id AND h.user_key=t.user_key AND h.until_at>now()
+  ) AND EXISTS (
+    SELECT 1 FROM inbox_message incoming WHERE incoming.thread_id=t.id AND incoming.direction='incoming'
+    AND NOT incoming.withdrawn AND incoming.happened_at>=now()-interval '12 months'
+    AND NOT EXISTS (
+      SELECT 1 FROM inbox_message m JOIN service_delivery d ON d.id=m.service_id
+      WHERE m.thread_id=t.id AND m.direction='outgoing' AND m.happened_at>=incoming.happened_at AND d.status='accepted'
+    )
+  )`
+
+export async function inboxTemplates(db:DB,cfg:Config,store:string,use:Exclude<Use,'unclassified'>){
+  await requireFeature(db,store,'inbox_enabled')
+  const {rows}=await db.query<{id:string;label:string;body_box:string;revision:number}>(`
+    SELECT id,label,body_box,revision FROM inbox_template WHERE store_id=$1 AND purpose=$2 AND NOT archived ORDER BY label,id`,
+  [store,use])
+  return rows.map(({body_box,...entry})=>({...entry,body:unseal(cfg,'inbox-template:'+entry.id,body_box)}))
+}
+
+export async function createInboxTemplate(db:DB,cfg:Config,actor:Actor,store:string,use:Exclude<Use,'unclassified'>,
+  key:string,input:z.infer<typeof inboxTemplateInput>){
+  await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'inbox_enabled')
+  return once(db,cfg,actor,'inbox.template.create',key,{store,use,input},async()=>{
+    const {rows:[count]}=await db.query(`SELECT count(*)::int AS total FROM inbox_template
+      WHERE store_id=$1 AND purpose=$2 AND NOT archived`,[store,use])
+    if(count.total>=40)throw new Fault(422,'INBOX_TEMPLATE_LIMIT','定型文は用途ごとに40件まで保存できます。')
+    const id=newId()
+    await db.query(`INSERT INTO inbox_template(id,tenant_id,store_id,purpose,label,body_box)
+      VALUES($1,$2,$3,$4,$5,$6)`,[id,actor.tenant_id,store,use,input.label,seal(cfg,'inbox-template:'+id,input.body)])
+    await audit(db,actor.tenant_id,store,actor.id,'inbox.template.create',id)
+    return {id}
+  })
+}
+
+export async function updateInboxTemplate(db:DB,cfg:Config,actor:Actor,store:string,use:Exclude<Use,'unclassified'>,
+  id:string,version:number,input?:z.infer<typeof inboxTemplateInput>){
+  await requireFeature(db,store,'inbox_enabled')
+  const {rowCount}=await db.query(`UPDATE inbox_template SET revision=revision+1,archived=$5,
+    label=coalesce($6,label),body_box=coalesce($7,body_box)
+    WHERE id=$1 AND store_id=$2 AND purpose=$3 AND revision=$4 AND NOT archived`,
+  [id,store,use,version,!input,input?.label??null,input?seal(cfg,'inbox-template:'+id,input.body):null])
+  if(!rowCount)throw conflict()
+  await audit(db,actor.tenant_id,store,actor.id,input?'inbox.template.update':'inbox.template.archive',id)
+  return {saved:true}
+}
 
 export async function recordInboxEvent(db:DB,cfg:Config,c:Channel,key:string,user:string,event:Incoming,enabled:boolean){
   if(event.unsent){
@@ -55,12 +106,13 @@ async function getThread(db:DB,id:string,use:Use){
 export async function inboxOverview(db:DB,store:string,use:Use,platformActor?:string){
   await requireFeature(db,store,'inbox_enabled')
   const {rows:threads}=await db.query(`SELECT t.id,t.state,t.unread,t.assigned_to,t.last_received_at,t.revision,ch.label,
-    CASE WHEN $1='customer' THEN c.display_name END AS name,h.until_at AS handoff_until
+    CASE WHEN $1='customer' THEN c.display_name END AS name,h.until_at AS handoff_until,
+    (${needsInboxReply}) AS needs_reply
     FROM inbox_thread t JOIN channel ch ON ch.id=t.channel_id
     LEFT JOIN customer c ON $1='customer' AND c.channel_id=t.channel_id AND c.user_key=t.user_key
     LEFT JOIN line_handoff h ON h.channel_id=t.channel_id AND h.user_key=t.user_key AND h.until_at>now()
     WHERE t.purpose=$1 AND t.last_received_at>=now()-interval '12 months'
-    ORDER BY t.unread DESC,t.last_received_at DESC,t.id LIMIT 150`,[use])
+    ORDER BY needs_reply DESC,t.unread DESC,t.last_received_at DESC,t.id LIMIT 150`,[use])
   const {rows:staff}=await db.query(`SELECT f.id,CASE WHEN f.platform_actor THEN '全体管理者' ELSE f.email END AS email
     FROM staff f WHERE f.disabled_at IS NULL AND (f.password_hash IS NOT NULL OR f.platform_actor AND f.id=$3)
     AND (f.role='admin' OR (f.agency_staff AND f.role IN ('manager',CASE WHEN $1='recruitment' THEN 'recruiter' ELSE 'manager' END)

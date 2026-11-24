@@ -79,7 +79,11 @@ const blankField=()=>({key:crypto.randomUUID(),kind:'text',label:'',required:fal
 const stages={applied:'応募',interviewed:'面談実施',trial_scheduled:'体入予定',trial_done:'体入実施',hired:'入店',withdrawn:'辞退・終了'}
 const allowed={applied:['interviewed','withdrawn'],interviewed:['trial_scheduled','hired','withdrawn'],
   trial_scheduled:['trial_scheduled','trial_done','interviewed','withdrawn'],trial_done:['hired','withdrawn'],hired:[],withdrawn:[]}
-let stores,current,openThread,refreshOpenChat,agency=false,view=0
+const initialQuery=new URLSearchParams(location.search)
+let stores,current=initialQuery.get('tab'),openThread,refreshOpenChat,refreshInboxList,agency=false,view=0
+let onlyFailures=initialQuery.get('failures')==='1'
+let onlyUnanswered=initialQuery.get('unanswered')==='1'
+const replyDrafts=new Map()
 let actor
 
 function formEditor(root,data,path,refresh,use){
@@ -299,15 +303,53 @@ function richMenus(root,entries,path,refresh,use){
   if(!entries.length)root.append(el('p','対象の公式LINEを先に登録してください。'))
 }
 const results={queued:'待機中',submitting:'送信中',accepted:'LINE受付済み',cancelled:'停止・対象外',failed:'失敗',unknown:'結果不明'}
-function deliveries(root,entries,store){
-  const kinds={interview_confirm:'面談確定',interview_reminder:'面談前日',interview_waitlist:'空き枠案内',chat_reply:'個別返信'}
+function deliveries(root,entries,store,path,refresh){
+  const kinds={interview_confirm:'面談確定',interview_reminder:'面談前日',interview_waitlist:'空き枠案内',chat_reply:'個別返信',
+    interview_link:'面談予約リンク',customer_link:'来店予約リンク'}
   root.append(el('h2','LINE送信履歴'))
+  const failed=field('過去7日間のエラーだけ表示','failures','checkbox',onlyFailures)
+  failed.querySelector('input').onchange=event=>{
+    onlyFailures=event.target.checked
+    void render().catch(error=>notice(error.message,true))
+  }
+  root.append(failed)
   for(const entry of entries){
     const date=entry.accepted_at??entry.first_attempt_at??entry.next_at
     const when=Number.isFinite(Date.parse(date))?dateLabel(date,store.timezone):''
-    root.append(el('p',[kinds[entry.kind],results[entry.status],when,entry.reason].filter(Boolean).join(' · '),'record'))
+    const row=el('article',null,'record')
+    row.append(el('strong',[kinds[entry.kind],results[entry.status]].filter(Boolean).join(' · ')),
+      el('p',[entry.label,when,entry.reason].filter(Boolean).join(' · ')))
+    if(entry.status==='unknown')row.append(el('p','LINEのトークで届いているか確認してください。二重送信を防ぐため、結果不明のメッセージはこの画面から再送できません。'))
+    if(entry.reason==='LINE認証に失敗しました')row.append(el('p','管理者に公式LINEの接続確認を依頼してください。'))
+    if(entry.reason==='LINEが宛先または内容を受け付けませんでした')row.append(el('p','相手の利用状況と本文を確認してください。'))
+    if(entry.retryable)row.append(button('再送する',async()=>{
+      await api(path+'/delivery/'+entry.id+'/retry','POST',{})
+      await refresh('再送を受け付けました。送信履歴で結果を確認できます。')
+    }))
+    root.append(row)
   }
-  if(!entries.length)root.append(el('p','送信の記録はまだありません。'))
+  if(!entries.length)root.append(el('p',onlyFailures?'該当する送信エラーはありません。':'送信の記録はまだありません。'))
+}
+
+function templateEditor(root,templates,path,refresh){
+  const templateFields=(entry={})=>[field('名前','label','text',entry.label),field('本文','body','textarea',entry.body)]
+  const pane=el('div')
+  pane.append(form(templateFields(),'定型文を追加',async(data,key)=>{
+    await api(path,'POST',data,key)
+    await refresh('定型文を追加しました。')
+  }))
+  for(const entry of templates){
+    const item=el('div')
+    item.append(form(templateFields(entry),'変更を保存',async data=>{
+      await api(path+'/'+entry.id,'PATCH',{...data,revision:entry.revision})
+      await refresh('定型文を更新しました。')
+    }),button('この定型文の使用を終了する',async()=>{
+      await api(path+'/'+entry.id,'DELETE',{revision:entry.revision})
+      await refresh('定型文の使用を終了しました。')
+    }))
+    pane.append(details(entry.label,item))
+  }
+  root.append(details('この店舗の定型文を管理',pane))
 }
 function checks(root,entries){
   root.append(el('h2','運用チェック'))
@@ -329,19 +371,27 @@ function inbox(root,data,store,path,refresh,intake=false){
   const states={open:'未対応',handling:'対応中',resolved:'対応済み'}
   const state=field('対応状態','state','','',[['','すべて'],...Object.entries(states)])
   const unread=field('未確認だけ表示','unread','checkbox')
-  const selector=state.querySelector('select'),onlyUnread=unread.querySelector('input')
+  const unanswered=field('未返信だけ表示','unanswered','checkbox',onlyUnanswered)
+  const selector=state.querySelector('select'),onlyUnread=unread.querySelector('input'),needsReply=unanswered.querySelector('input')
   const rows=el('div')
-  function renderThreads(){
-    rows.replaceChildren()
-    for(const thread of data.threads){
-      if(selector.value&&thread.state!==selector.value||onlyUnread.checked&&!thread.unread)continue
+  const empty=el('p','該当する会話はありません。')
+  const records=new Map()
+  let loadingList=false
+  if(!intake)templateEditor(root,data.templates,path+'/templates',refresh)
+
+  function threadTitle(thread){
+      const sender=thread.name??('会話 '+thread.id.slice(0,8))
+      const handoff=thread.handoff_until && Date.parse(thread.handoff_until)>Date.now()
+      return [thread.unread?'新着':null,sender,handoff?'店長対応中':states[thread.state],
+        dateLabel(thread.last_received_at,store.timezone)].filter(Boolean).join(' · ')
+  }
+  function threadRow(thread){
       const sender=thread.name??('会話 '+thread.id.slice(0,8))
       const panel=el('div')
       panel.append(el('p',store.name+' · '+thread.label+' · '+sender))
       const chat=el('div')
       const threadPath=path+'/'+thread.id
       const handoff=thread.handoff_until && Date.parse(thread.handoff_until)>Date.now()
-      const title=[thread.unread?'未確認':null,sender,handoff?'店長対応中':states[thread.state],dateLabel(thread.last_received_at,store.timezone)].filter(Boolean).join(' · ')
       panel.append(chat)
       if(['admin','manager'].includes(actor.role)){
         const box=el('section',null,'record')
@@ -384,14 +434,41 @@ function inbox(root,data,store,path,refresh,intake=false){
         })
         panel.append(details('担当者と状態を変更',process))
         if(thread.assigned_to===actor.id&&thread.state==='handling'){
-          const reply=internal=>form([field(internal?'内部メモ':'返信する本文','body','textarea')],internal?'内部メモを保存':'公式LINEから送信',async (values,key)=>{
+          const reply=(internal,draft='')=>form([field(internal?'内部メモ':'返信する本文','body','textarea',draft)],
+            internal?'内部メモを保存':thread.label+'から送信',async (values,key)=>{
             await api(threadPath,'POST',{revision:thread.revision,body:values.body,internal},key)
+            if(!internal)replyDrafts.delete(threadPath)
             await refresh(internal?'内部メモを保存しました。':'返信を送信待ちに登録しました。')
           })
-          panel.append(reply(false),details('内部メモ',reply(true)))
+          const composer=reply(false,replyDrafts.get(threadPath))
+          const body=composer.elements.body
+          body.maxLength=3500
+          body.required=true
+          body.oninput=()=>{
+            if(body.value)replyDrafts.set(threadPath,body.value)
+            else replyDrafts.delete(threadPath)
+          }
+          const recipient=el('p','送信先 '+store.name+' · '+thread.label+' · '+sender,'wrap')
+          if(data.templates.length){
+            const picker=field('定型文','template','','',[['','定型文を選択'],...data.templates.map(entry=>[entry.id,entry.label])])
+            const input=picker.querySelector('select')
+            input.removeAttribute('name')
+            const insert=button('本文に挿入',async()=>{
+              const selected=data.templates.find(entry=>entry.id===input.value)
+              if(!selected)return
+              const next=[body.value,selected.body].filter(Boolean).join('\n\n')
+              if(next.length>body.maxLength)throw new Error('返信の本文は3500文字までです。')
+              body.value=next
+              body.oninput()
+              body.focus()
+            })
+            composer.prepend(controls(picker,insert))
+          }
+          composer.prepend(recipient)
+          panel.append(composer,details('内部メモ',reply(true)))
         }
       }
-      const row=details(title,panel)
+      const row=details(threadTitle(thread),panel)
       row.classList.add('record')
       let loading=false,previous
       const loadMessages=async()=>{
@@ -420,31 +497,83 @@ function inbox(root,data,store,path,refresh,intake=false){
           if(refreshOpenChat===loadMessages){openThread=undefined;refreshOpenChat=undefined}
           return
         }
+        for(const entry of records.values()){
+          if(entry.row!==row)entry.row.open=false
+        }
         openThread=threadPath
         refreshOpenChat=loadMessages
         if(previous===undefined)chat.replaceChildren(el('p','読み込み中…'))
         void loadMessages()
       }
-      row.open=openThread===threadPath
-      rows.append(row)
+      return {row,thread}
+  }
+  const rowState=thread=>JSON.stringify([thread.name,thread.label,thread.state,thread.assigned_to,thread.handoff_until])
+  function renderThreads(){
+    const visible=data.threads.filter(thread=>
+      (!selector.value||thread.state===selector.value)&&(!onlyUnread.checked||thread.unread)&&(!needsReply.checked||thread.needs_reply))
+    const keep=new Set(visible.map(thread=>thread.id))
+    for(const [id,entry] of records){
+      if(!keep.has(id)){entry.row.remove();records.delete(id)}
     }
-    if(!rows.childElementCount)rows.append(el('p','該当する会話はありません。'))
+    let position=rows.firstElementChild
+    for(const thread of visible){
+      let entry=records.get(thread.id)
+      if(!entry||rowState(entry.thread)!==rowState(thread)){
+        const reopened=entry?.row.open||openThread===path+'/'+thread.id
+        const replacement=threadRow({...thread})
+        if(entry){
+          if(position===entry.row)position=entry.row.nextElementSibling
+          entry.row.remove()
+        }
+        entry=replacement
+        records.set(thread.id,entry)
+        entry.row.open=reopened
+      }else{
+        Object.assign(entry.thread,thread)
+        const summary=entry.row.firstElementChild
+        const label=threadTitle(thread)
+        if(summary.textContent!==label)summary.textContent=label
+      }
+      if(entry.row!==position)rows.insertBefore(entry.row,position)
+      position=entry.row.nextElementSibling
+    }
+    empty.hidden=visible.length>0
   }
   selector.onchange=renderThreads
   onlyUnread.onchange=renderThreads
-  root.append(controls(state,unread),rows)
+  needsReply.onchange=()=>{
+    onlyUnanswered=needsReply.checked
+    renderThreads()
+  }
+  root.append(controls(state,unread,unanswered),rows,empty)
   renderThreads()
+  refreshInboxList=async()=>{
+    if(loadingList||!root.isConnected)return
+    loadingList=true
+    try{
+      const latest=await api(path)
+      if(!root.isConnected)return
+      data.threads=latest.threads
+      data.staff=latest.staff
+      renderThreads()
+    }catch{/* Keep the visible list if a background refresh fails. */}
+    finally{loadingList=false}
+  }
 }
 
 async function render(){
   const marker=++view
   refreshOpenChat=undefined
+  refreshInboxList=undefined
   const store=stores.find(entry=>entry.id===$('#store').value)
   if(!store)throw new Error('利用できる店舗がありません。')
   const use=$('#use').value
   const base='/stores/'+store.id
   const path=base+'/workflows/'+use
   const query=new URLSearchParams({store:store.id,use})
+  if(current)query.set('tab',current)
+  if(onlyUnanswered)query.set('unanswered','1')
+  if(onlyFailures)query.set('failures','1')
   history.replaceState(null,'','?'+query)
   $('#back').href=workspacePath('/staff/?store='+store.id)
   $('#interviews').href=workspacePath('/interview/staff.html?store='+store.id)
@@ -475,7 +604,9 @@ async function render(){
     tabs.append(tab)
   }
   const key=current
-  const data=await api(['recruitment','campaigns','intake'].includes(key)?base+'/'+key:path+'/'+key)
+  const endpoint=['recruitment','campaigns','intake'].includes(key)?base+'/'+key:path+'/'+key
+  const data=await api(endpoint+(key==='delivery'&&onlyFailures?'?failures=1':''))
+  if(key==='inbox')data.templates=await api(endpoint+'/templates')
   if(marker!==view)return
   const panel=el('div')
   const refresh=async message=>{if(marker===view){await render();notice(message)}}
@@ -486,13 +617,16 @@ async function render(){
   if(key==='campaigns')campaigns(panel,data,store,base+'/campaigns',refresh)
   if(key==='rich-menus')richMenus(panel,data,path,refresh,use)
   if(key==='inbox'||key==='intake')inbox(panel,data,store,key==='inbox'?path+'/inbox':base+'/intake',refresh,key==='intake')
-  if(key==='delivery')deliveries(panel,data,store)
+  if(key==='delivery')deliveries(panel,data,store,path,refresh)
   if(key==='checks')checks(panel,data)
   content.replaceChildren(panel)
 }
 
 setInterval(()=>{
-  if(!document.hidden)void refreshOpenChat?.()
+  if(!document.hidden){
+    void refreshOpenChat?.()
+    void refreshInboxList?.()
+  }
 },3000)
 
 async function start(){

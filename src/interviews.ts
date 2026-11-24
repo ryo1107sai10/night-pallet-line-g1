@@ -14,7 +14,8 @@ import { issueManageInterviewLink } from './interview-link.js'
 import { emitApplicantEvent } from './recruitment-automation.js'
 import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
-import { googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
+import { localInstant } from '../public/studio/engine.mjs'
+import { calendarRecord, googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
 
 export const interviewSlotInput=z.strictObject({
   channel:uuid,starts_at:z.iso.datetime({offset:true}),ends_at:z.iso.datetime({offset:true}),
@@ -26,6 +27,17 @@ export const interviewHours=z.strictObject({start:gridMinute,end:gridMinute,revi
   .refine(value=>value.start<value.end,{path:['end'],message:'受付終了は受付開始より後にしてください。'})
 export const interviewVisibility=z.strictObject({revision,published:z.boolean()})
 const dateInput=z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+export const interviewBatchInput=z.strictObject({
+  channel:uuid,first_day:dateInput,last_day:dateInput,
+  weekdays:z.array(z.int().min(0).max(6)).min(1).max(7).transform(days=>[...new Set(days)].sort()),
+  start:gridMinute,end:gridMinute,minutes:z.int().min(30).max(180).refine(value=>value%interval===0),
+  instructions:text(800),host_id:uuid.nullable().default(null),
+}).refine(input=>input.end-input.start>=input.minutes,{
+  path:['end'],message:'終了時刻までに面談1枠分の時間を確保してください。',
+})
+export const interviewBatchPublish=z.strictObject({
+  selection:interviewBatchInput,preview:z.string().regex(/^[a-f0-9]{64}$/),
+})
 export const interviewDates=z.strictObject({start:dateInput.optional()})
 export const interviewCreate=z.strictObject({slot:uuid,name:text(80)})
 export const guestInterviewCreate=interviewCreate.extend({email:email})
@@ -41,6 +53,9 @@ type Booking = {id:string;slot_id:string;status:'confirmed'|'cancelled'|'complet
 type Hours={start:number;end:number;revision:number}
 type Location={name:string;timezone:string;today:string;hours:Hours}
 type Range = {starts_at:Date;ends_at:Date;method:'onsite'|'online';published:boolean;id:string;revision:number;host_id:string|null}
+type SlotInterval = Pick<Range,'starts_at'|'ends_at'>
+type BatchInput = z.infer<typeof interviewBatchInput>
+const day=86400000
 
 const taken=()=>new Fault(409,'INTERVIEW_SLOT_TAKEN','この枠は予約できなくなりました。空き枠を選び直してください。')
 const unauthorized=()=>new Fault(401,'INTERVIEW_SESSION','LINEで本人確認を行ってください。')
@@ -120,7 +135,7 @@ function assertSlotHours(location:Location,start:Date,end:Date) {
   }
 }
 
-export async function staffInterviewOverview(db:DB,store:string,cfg:Config) {
+export async function staffInterviewOverview(db:DB,store:string,cfg:Config,google?:InterviewGoogle) {
   const location=await locationFor(db,store)
   const features=await storeFeatures(db,store)
   const hosts=features.interviewers_enabled?await hostsFor(db,store):[]
@@ -132,11 +147,132 @@ export async function staffInterviewOverview(db:DB,store:string,cfg:Config) {
     LEFT JOIN interview_host h ON h.id=f.host_id LEFT JOIN interview_google_sync g ON g.booking_id=b.id
     WHERE f.store_id=$1 AND f.ends_at>now()-interval '1 day' AND (f.method='onsite' OR b.id IS NOT NULL)
     ORDER BY f.starts_at LIMIT 200`,[store])
+  const candidates=slots.filter(slot=>!slot.booking_id&&slot.published&&+slot.ends_at>Date.now())
+  const calendar=google&&features.google_calendar_enabled?await busyForSchedule(db,google,store,candidates.map(slot=>({
+    starts_at:slot.starts_at,ends_at:slot.ends_at,host_calendar:hosts.find(host=>host.id===slot.host_id)?.calendar_id,
+  }))):new Map<string|null,SlotInterval[]|null>()
   return {channels,hosts,interviewers_enabled:features.interviewers_enabled,hours:location.hours,today:location.today,
     timezone:location.timezone,interviews_enabled:features.interviews_enabled,
     slots:slots.map(({guest_email_box,...slot})=>({...slot,
       ...(guest_email_box?{guest_email:unseal(cfg,'guest-interview-email:'+slot.booking_id,guest_email_box)}:{}),
-      in_hours:fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours)}))}
+      in_hours:fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours),
+      google_status:candidates.includes(slot)?calendarSlotStatus(calendar,slot,hosts.find(host=>host.id===slot.host_id)?.calendar_id):null}))}
+}
+
+async function busyForSchedule(db:DB,google:InterviewGoogle,store:string,
+  slots:(SlotInterval & {host_calendar?:string|null})[]){
+  const result=new Map<string|null,SlotInterval[]|null>()
+  if(!slots.length)return result
+  const range={starts_at:slots[0].starts_at,ends_at:new Date(Math.max(...slots.map(slot=>+slot.ends_at)))}
+  const calendars=[...new Set<string|null>([null,...slots.map(slot=>slot.host_calendar??null)])]
+  // The store-wide calendar always applies, even when an individual interviewer has a calendar.
+  await Promise.all(calendars.map(async id=>{
+    try{result.set(id,await googleBusy(db,google,store,range,id??undefined,true))}
+    catch(error){
+      if(!(error instanceof Fault)||error.code!=='GOOGLE_UNAVAILABLE')throw error
+      result.set(id,null)
+    }
+  }))
+  return result
+}
+
+function calendarSlotStatus(busy:Map<string|null,SlotInterval[]|null>,slot:SlotInterval,hostCalendar?:string|null){
+  const ranges=[busy.get(null),hostCalendar?busy.get(hostCalendar):undefined]
+  if(ranges.some(range=>range?.some(entry=>overlaps(slot,entry))))return 'google_busy'
+  return ranges.includes(null)?'google_unavailable':null
+}
+
+function expandInterviewBatch(location:Location,input:BatchInput){
+  const first=new Date(input.first_day+'T00:00:00Z'),last=new Date(input.last_day+'T00:00:00Z')
+  const dateOK=(date:Date,value:string)=>Number.isFinite(+date)&&date.toISOString().slice(0,10)===value
+  if(!dateOK(first,input.first_day)||!dateOK(last,input.last_day)||input.first_day<location.today||
+    +last<+first||+last-+first>=14*day||+last>Date.parse(location.today+'T00:00:00Z')+90*day){
+    throw new Fault(422,'INTERVIEW_BATCH_DATE','本日から90日以内で、14日間までの範囲を指定してください。')
+  }
+  if(input.start<location.hours.start||input.end>location.hours.end){
+    throw new Fault(422,'INTERVIEW_HOURS','店舗の面談受付時間内で指定してください。')
+  }
+  const slots:SlotInterval[]=[]
+  for(let date=+first;date<=+last;date+=day){
+    const selected=new Date(date)
+    if(!input.weekdays.includes(selected.getUTCDay()))continue
+    const civil=selected.toISOString().slice(0,10)
+    for(let start=input.start;start+input.minutes<=input.end;start+=input.minutes){
+      const at=localInstant(civil+'T'+clockLabel(start),location.timezone)
+      if(at===null)continue
+      const slot={starts_at:new Date(at),ends_at:new Date(at+input.minutes*60000)}
+      if((!slots.length||slot.starts_at>=slots[slots.length-1].ends_at)&&
+        fitsHours(slot.starts_at,slot.ends_at,location.timezone,location.hours))slots.push(slot)
+    }
+  }
+  if(!slots.length||slots.length>200)throw new Fault(422,'INTERVIEW_BATCH_COUNT','対象の曜日と時間を調整し、1〜200枠を選んでください。')
+  return slots
+}
+
+async function batchConfiguration(db:DB,store:string,input:BatchInput){
+  const features=await storeFeatures(db,store)
+  if(!features.interviews_enabled)await requireFeature(db,store,'interviews_enabled')
+  await recruitmentConnection(db,input.channel)
+  const host=input.host_id?await requireHost(db,store,input.host_id):null
+  return {location:await locationFor(db,store),hostCalendar:host?.calendar_id??null,
+    googleEnabled:features.google_calendar_enabled,
+    calendarRevision:features.google_calendar_enabled?(await calendarRecord(db,store))?.refresh_box:null}
+}
+
+async function checkBatchSlots(db:DB,store:string,cfg:Config,input:BatchInput,slots:SlotInterval[],
+  busy:Map<string|null,SlotInterval[]|null>,hostCalendar:string|null){
+  const range={starts_at:slots[0].starts_at,ends_at:slots[slots.length-1].ends_at}
+  const blocked=await localBlocks(db,store,range)
+  const {rows:existing}=await db.query<SlotInterval & {reserved:boolean}>(`
+    SELECT f.starts_at,f.ends_at,b.id IS NOT NULL AS reserved FROM interview_slot f
+    LEFT JOIN interview_booking b ON b.slot_id=f.id AND b.status='confirmed'
+    WHERE f.store_id=$1 AND f.starts_at<$3 AND f.ends_at>$2
+    AND ($4::uuid IS NULL OR f.host_id IS NULL OR f.host_id=$4)
+    AND (f.published AND f.method='onsite' OR b.id IS NOT NULL)`,
+  [store,range.starts_at,range.ends_at,input.host_id])
+  const evaluated=slots.map(slot=>{
+    const matches=existing.filter(entry=>overlaps(slot,entry))
+    const reason=+slot.starts_at<=Date.now()?'past':matches.some(entry=>entry.reserved)?'reserved':
+      matches.length?'published':blocked.some(entry=>overlaps(slot,entry))?'blocked':calendarSlotStatus(busy,slot,hostCalendar)
+    return {...slot,reason}
+  })
+  return {slots:evaluated,preview:keyed(cfg,JSON.stringify([store,input,evaluated]))}
+}
+
+export async function checkInterviewBatch(db:DB,cfg:Config,store:string,input:BatchInput,google:InterviewGoogle){
+  const settings=await batchConfiguration(db,store,input)
+  const slots=expandInterviewBatch(settings.location,input)
+  const busy=settings.googleEnabled?await busyForSchedule(db,google,store,slots.map(slot=>({...slot,host_calendar:settings.hostCalendar}))):
+    new Map<string|null,SlotInterval[]|null>()
+  return checkBatchSlots(db,store,cfg,input,slots,busy,settings.hostCalendar)
+}
+
+export async function publishInterviewBatch(db:DB,cfg:Config,actor:Actor,store:string,key:string,
+  request:z.infer<typeof interviewBatchPublish>,google:InterviewGoogle){
+  const input=request.selection
+  return once(db,cfg,actor,'interview.slot.batch',key,{store,request},async()=>{
+    const settings=await batchConfiguration(db,store,input)
+    const slots=expandInterviewBatch(settings.location,input)
+    const busy=settings.googleEnabled?await busyForSchedule(db,google,store,slots.map(slot=>({...slot,host_calendar:settings.hostCalendar}))):
+      new Map<string|null,SlotInterval[]|null>()
+    await lockDispatch(db,actor.tenant_id)
+    const latest=await batchConfiguration(db,store,input)
+    if(latest.googleEnabled!==settings.googleEnabled||latest.hostCalendar!==settings.hostCalendar||
+      latest.calendarRevision!==settings.calendarRevision||
+      latest.location.timezone!==settings.location.timezone||latest.location.hours.revision!==settings.location.hours.revision)throw conflict()
+    const plan=await checkBatchSlots(db,store,cfg,input,slots,busy,settings.hostCalendar)
+    if(plan.preview!==request.preview)throw new Fault(409,'INTERVIEW_BATCH_CHANGED','空き状況が変わりました。公開前の確認をやり直してください。')
+    const available=plan.slots.filter(slot=>slot.reason===null)
+    if(!available.length)throw new Fault(409,'INTERVIEW_BATCH_EMPTY','公開できる面談枠がありません。')
+    const ids=available.map(()=>newId())
+    await db.query(`INSERT INTO interview_slot(id,tenant_id,store_id,channel_id,starts_at,ends_at,method,instructions,published,host_id)
+      SELECT item.id,$1,$2,$3,item.starts_at,item.ends_at,'onsite',$7,true,$8 FROM
+      unnest($4::uuid[],$5::timestamptz[],$6::timestamptz[]) AS item(id,starts_at,ends_at)`,
+    [actor.tenant_id,store,input.channel,ids,available.map(slot=>slot.starts_at),available.map(slot=>slot.ends_at),input.instructions,input.host_id])
+    await audit(db,actor.tenant_id,store,actor.id,'interview.slot.batch',input.channel,null,
+      {first_day:input.first_day,last_day:input.last_day,published:ids.length,skipped:slots.length-ids.length})
+    return {published:ids.length,skipped:slots.length-ids.length}
+  })
 }
 
 export async function publishInterviewSlot(db:DB,cfg:Config,actor:Actor,store:string,key:string,input:z.infer<typeof interviewSlotInput>) {

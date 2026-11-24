@@ -43,6 +43,8 @@ let pg, owner, pool, server, dir, base, line, google
 let platform, master, tenant, storeId, created
 let recruit, customer
 const pushes = []
+const retryKeys = []
+let rejectNextReply = false
 const dispatches = []
 const signed = raw => createHmac('sha256', channelSecret).update(raw).digest('base64')
 const send = (url, options = {}) => fetch(base + url, { redirect: 'error', ...options })
@@ -154,6 +156,13 @@ before(async () => {
       case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0 })
       case '/v2/bot/message/push': {
         const body = JSON.parse(options.body)
+        if (body.messages[0].text === '再送確認用の返信') {
+          retryKeys.push(options.headers['X-Line-Retry-Key'])
+          if (rejectNextReply) {
+            rejectNextReply = false
+            return new Response('{}', { status: 429 })
+          }
+        }
         pushes.push({ to: body.to, text: body.messages[0].text ?? '' })
         return new Response('{}', { status: 200, headers: { 'x-line-request-id': 'line-id' } })
       }
@@ -630,4 +639,73 @@ test('段落7: ステップ配信でリンク変数が発行済みの実URLに�
     '差し替えられたURLが実際に発行されたトークンであること')
   assert.equal((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
   expect(await post('/interview-link/' + recruit + '/redeem', null, { token: sentRaw }), 200)
+})
+
+test('店舗の今日の対応と定型文は権限内で利用でき、安全な失敗だけを同じキーで再送する', async()=>{
+  const path='/stores/'+storeId+'/workflows/customer'
+  const template={label:'営業時間',body:'18時からご案内します。'}
+  const created=expect(await post(path+'/inbox/templates',master,template,idempotency()),201)
+  const entries=expect(await request(path+'/inbox/templates',{cookie:master}),200)
+  assert.deepEqual(entries,[{id:created.id,...template,revision:1}])
+  assert.deepEqual(expect(await request('/stores/'+storeId+'/workflows/recruitment/inbox/templates',{cookie:master}),200),[])
+  expect(await patch(path+'/inbox/templates/'+created.id,master,{...template,label:'ご案内',revision:1}),200)
+  expect(await patch(path+'/inbox/templates/'+created.id,master,{...template,revision:1}),409)
+  expect(await request(path+'/inbox/templates/'+created.id,{method:'DELETE',data:{revision:2},cookie:master}),200)
+  assert.deepEqual(expect(await request(path+'/inbox/templates',{cookie:master}),200),[])
+
+  await inbound(customer,botC,[eventFor('e2e-retry-inbound','message',userC,{
+    message:{id:'e2e-retry-inbound',type:'text',text:'ご確認お願いします。'},
+  })])
+  const overview=expect(await request(path+'/inbox',{cookie:master}),200)
+  const thread=overview.threads.find(t=>t.needs_reply)
+  assert.ok(thread,'新着は個別画面を開く前から未返信として扱うこと')
+  const dashboard=expect(await request('/dashboard',{cookie:master}),200)
+  assert.deepEqual(dashboard.map(store=>store.id),[storeId])
+  assert.equal(dashboard[0].inbox.customer,1)
+  expect(await request('/dashboard'),401)
+
+  rejectNextReply=true
+  const body='再送確認用の返信'
+  expect(await post(path+'/inbox/'+thread.id,master,{revision:thread.revision,body,internal:false},idempotency()),201)
+  await processTask('service',customer)
+  const failed=expect(await request(path+'/delivery?failures=1',{cookie:master}),200)
+  const retry=failed.find(item=>item.reason==='LINEの送信制限に達しました')
+  assert.ok(retry?.retryable)
+  const attention=expect(await request('/dashboard',{cookie:master}),200)
+  assert.equal(attention[0].failed.customer,1)
+  expect(await post(path+'/delivery/'+retry.id+'/retry',master,{}),200)
+  expect(await post(path+'/delivery/'+retry.id+'/retry',master,{}),409)
+  await processTask('service',customer)
+  expect(await post(path+'/delivery/'+retry.id+'/retry',master,{}),409)
+  assert.deepEqual(retryKeys,[retry.id,retry.id])
+  assert.equal(pushesTo(userC).filter(item=>item.text===body).length,1)
+  assert.deepEqual(expect(await request(path+'/delivery?failures=1',{cookie:master}),200),[])
+})
+
+test('面談枠はGoogle予定と受付停止を除外し、確認後に予定が変わったらまとめて止める',async()=>{
+  const interviews='/stores/'+storeId+'/interviews'
+  const features=expect(await request('/stores/'+storeId+'/features',{cookie:master}),200)
+  expect(await patch('/stores/'+storeId+'/features',master,
+    {...features,google_calendar_enabled:true},undefined),200)
+  const date=jstDate(12),weekDay=new Date(date+'T00:00:00Z').getUTCDay()
+  const calendar='batch@example.test'
+  google.sharedCalendar=id=>id===storeId?calendar:undefined
+  let periods=[{starts_at:new Date(date+'T19:30:00+09:00'),ends_at:new Date(date+'T20:00:00+09:00')}]
+  google.sharedBusy=async()=>periods
+  const selection={channel:recruit,first_day:date,last_day:date,weekdays:[weekDay],start:1140,end:1260,
+    minutes:30,instructions:'実機確認用の文言です。'}
+  expect(await post(interviews+'/availability/blocks',master,{
+    starts_at:date+'T20:00:00+09:00',ends_at:date+'T20:30:00+09:00',note:'都合により停止',
+  },idempotency()),201)
+  const path=interviews+'/slots/batch'
+  let plan=expect(await post(path+'/preview',master,selection),200)
+  assert.deepEqual(plan.slots.map(slot=>slot.reason),[null,'google_busy','blocked',null])
+  periods=[...periods,{starts_at:new Date(date+'T20:30:00+09:00'),ends_at:new Date(date+'T21:00:00+09:00')}]
+  expect(await post(path,master,{selection,preview:plan.preview},idempotency()),409)
+  plan=expect(await post(path+'/preview',master,selection),200)
+  const key=idempotency(),input={selection,preview:plan.preview}
+  assert.deepEqual(expect(await post(path,master,input,key),201),{published:1,skipped:3})
+  assert.deepEqual(expect(await post(path,master,input,key),201),{published:1,skipped:3})
+  assert.equal((await read("SELECT id FROM interview_slot WHERE starts_at >= $1 AND starts_at < $2 AND published",
+    [date+'T19:00:00+09:00',date+'T21:00:00+09:00'])).rowCount,1)
 })

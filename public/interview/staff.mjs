@@ -1,15 +1,20 @@
 import {workspacePath,scopeWorkspaceLinks,rememberReturnWorkspace} from '/static/workspace-path.mjs'
 import {formatAppointment} from './calendar.mjs'
-import {localInstant} from '../studio/engine.mjs'
+import {localInstant,localPart} from '../studio/engine.mjs'
 import {clockLabel, timeOptions, interval} from './hours.mjs'
 import {configureHours} from './hours-form.mjs'
 import {drawAvailability} from './availability.mjs'
+import {configureBatch,slotReasons} from './batch.mjs'
 scopeWorkspaceLinks()
 
 const $=value=>document.querySelector(value)
 let stores,selected,requestNumber=0
 const form=$('#new-slot')
 const hoursForm=$('#interview-hours')
+const batchForm=$('#batch-form')
+const initialQuery=new URLSearchParams(location.search)
+let focusSlot=initialQuery.get('slot')
+$('#interviews-today').checked=initialQuery.get('today')==='1'
 function notice(text){$('#notice').textContent=text;$('#notice').hidden=!text}
 function el(tag,text){const node=document.createElement(tag);node.textContent=text;return node}
 async function api(path,method='GET',body,key){
@@ -66,6 +71,7 @@ async function show(){
   selected=stores.find(store=>store.id===$('#stores').value)
   if(!selected)throw new Error('採用を管理できる店舗がありません。')
   form.hidden=true
+  $('#slot-batch').hidden=true
   hoursForm.hidden=true
   $('#slots').replaceChildren()
   $('#slot-help').textContent=''
@@ -142,15 +148,26 @@ async function show(){
   updateTimes()
   form.elements.channel.replaceChildren(...channels.map(channel=>new Option(channel.label,channel.id)))
   form.hidden=!interviews_enabled||!channels.length
+  $('#slot-batch').hidden=form.hidden
+  if(!form.hidden)configureBatch(batchForm,$('#batch-preview'),store,{today,channels,hosts,hours,interviewers_enabled},{
+    request:(endpoint,body,key)=>api(path(store)+endpoint,'POST',body,key),
+    active:()=>current===requestNumber,report:notice,refresh,
+  })
   $('#slot-help').textContent=!interviews_enabled?'この店舗では面談予約の新規受付を停止しています。':
     channels.length?'':'先に採用用または兼用の公式アカウントを登録してください。'
-  $('#slots').replaceChildren(...slots.map(slot=>{
+  const todayOnly=$('#interviews-today').checked
+  const visible=todayOnly?slots.filter(slot=>slot.booking_id&&localPart(Date.parse(slot.starts_at),store.timezone).date===today):slots
+  $('#slots').replaceChildren(...visible.map(slot=>{
     const section=el('article','');section.className='record stack'
+    section.id='slot-'+slot.id
+    section.tabIndex=-1
     const stopped=availability.blocks.some(block=>Date.parse(slot.starts_at)<Date.parse(block.ends_at)&&
       Date.parse(slot.ends_at)>Date.parse(block.starts_at))
     section.append(el('strong',formatAppointment(slot,store.timezone)),
       el('p',(slot.method==='online'?'オンライン':'対面')+' · '+slot.channel_label+' · '+
-      (stopped?'受付停止中':slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+(slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')))
+      (stopped?'受付停止中':slot.in_hours?(slot.published?'公開中':'非公開'):'受付時間外')+
+      (slot.applicant_name?' · 予約済み '+slot.applicant_name+' さん':'')+
+      (slot.google_status?' · '+slotReasons[slot.google_status]:'')))
     if(slot.guest_email)section.append(el('p','連絡先 '+slot.guest_email))
     if(slot.host_name)section.append(el('p','担当 '+slot.host_name))
     if(slot.calendar_status)section.append(el('p','Googleカレンダー '+({queued:'反映待ち',synced:'反映済み',failed:'反映できませんでした'}[slot.calendar_status])+
@@ -169,7 +186,9 @@ async function show(){
     }
     return section
   }))
-  if(!slots.length)$('#slots').append(el('p','面談枠はまだありません。'))
+  if(!visible.length)$('#slots').append(el('p',todayOnly?'今日の予約はありません。':'面談枠はまだありません。'))
+  if(focusSlot)document.getElementById('slot-'+focusSlot)?.focus()
+  focusSlot=null
 }
 let pendingKey,pendingInput
 form.onsubmit=async event=>{
@@ -217,10 +236,12 @@ try{
     history.replaceState(null,'',url)
   }
   storeNavigation()
+  $('#interviews-today').onchange=()=>show().catch(error=>notice(error.message))
   $('#stores').onchange=async()=>{
     storeNavigation()
     const store=$('#stores').value
     form.reset()
+    batchForm.reset()
     pendingInput=null
     notice('')
     try{await show()}catch(error){if($('#stores').value===store)notice(error.message)}

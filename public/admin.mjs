@@ -1,5 +1,6 @@
 import {workspace,workspacePath,scopeWorkspaceLinks,rememberReturnWorkspace} from '/static/workspace-path.mjs'
 import {lineSetupLinks} from './line-setup.mjs'
+import {mountDashboard} from '/static/dashboard.mjs'
 
 const $ = selector => document.querySelector(selector)
 const masterEntry = /^\/master\/?$/i.test(location.pathname)
@@ -231,6 +232,7 @@ function signedOut() {
   channelId = undefined
   view++
   content.replaceChildren()
+  $('#operations-dashboard')?.replaceChildren()
   $('#workspace').hidden = true
   $('#auth').hidden = false
   $('#account').textContent = ''
@@ -244,6 +246,8 @@ async function refresh() {
   $('#back-to-platform').hidden = !session.actor.platform
   $('#account').textContent = (session.actor.platform?'監督者':roles[session.actor.role]) + ' · ' + session.actor.email
   $('#tenant-name').textContent = session.tenant.legal_name
+  const dashboard=$('#operations-dashboard')
+  if(dashboard&&['admin','manager','recruiter'].includes(session.actor.role))mountDashboard(dashboard,()=>api('/dashboard'))
   if (!session.stores.some(store=>store.id===storeId)) storeId = session.stores[0]?.id
   await render()
   if(session?.actor.platform)(await import('/static/tour.mjs')).mountTour('master')

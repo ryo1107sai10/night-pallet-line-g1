@@ -1,3 +1,5 @@
+import {mountDashboard} from '/static/dashboard.mjs'
+
 const $=id=>document.getElementById(id)
 const status=$('agency-status')
 async function request(path,method='GET'){
@@ -22,6 +24,9 @@ try{
   const options=session.stores.map(item=>new Option(item.name,item.id))
   $('agency-name').textContent=session.tenant.legal_name+'の店舗運用'
   $('agency-account').textContent=session.actor.email
+  if(['admin','manager','recruiter'].includes(session.actor.role)){
+    mountDashboard($('operations-dashboard'),()=>request('/dashboard'))
+  }
   if(options.length){
     store.replaceChildren(...options)
     const selected=new URLSearchParams(location.search).get('store')
