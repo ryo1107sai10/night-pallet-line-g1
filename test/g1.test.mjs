@@ -135,6 +135,7 @@ async function customerSession(connectionId,userId,store,sourceId){
 
 test('共有カレンダーの空き時間照合は店舗を限定し、短期のサーバー権限を使う',async()=>{
   const store=randomUUID(),calendar='shared@example.test',account='calendar-reader@project.iam.gserviceaccount.com'
+  const secondStore=randomUUID(),secondCalendar='other-shared@example.test'
   const range={starts_at:new Date('2030-04-05T09:00:00Z'),ends_at:new Date('2030-04-05T10:00:00Z')}
   const calls=[]
   let aclError=false
@@ -157,8 +158,10 @@ test('共有カレンダーの空き時間照合は店舗を限定し、短期�
     return Response.json({calendars:{[calendar]:aclError?{errors:[{reason:'notFound'}]}:{busy:[{
       start:range.starts_at.toISOString(),end:range.ends_at.toISOString(),
     }]}}})
-  },{store,calendar,account})
+  },[{store,calendar,account},{store:secondStore,calendar:secondCalendar,account}])
   assert.equal(shared.sharedCalendar(store),calendar)
+  assert.equal(shared.sharedCalendar(secondStore),secondCalendar)
+  await assert.rejects(shared.sharedBusy(store,range,secondCalendar),{code:'GOOGLE_UNAVAILABLE'})
   await assert.rejects(shared.sharedBusy(randomUUID(),range,calendar),{code:'GOOGLE_UNAVAILABLE'})
   assert.deepEqual(await shared.sharedBusy(store,range,calendar),[range])
   aclError=true

@@ -421,3 +421,31 @@ recruitment.channel = 'account'
 recruitment.nodes.find(node => node.id === 'welcome').body = '面談予約はこちら: {{interview_link}}'
 assert.deepEqual(validate(recruitment, true), [])
 })
+
+test('兼用公式LINEの「面談予約」は有効な店舗だけで専用リンクを1回発行する', async () => {
+  const requester='U'+'ab'.repeat(16)
+  const event=id=>eventFor(id,'message',requester,{message:{id,type:'text',text:'面談予約'}})
+  await inbound(shared,bot2,[event('keyword-disabled')])
+  await workOnce(pool,{...cfg,automationStore:randomUUID()},line,google)
+  assert.equal((await tokensFor(shared,requester)).rowCount,0)
+  const valid=event('keyword-enabled')
+  await inbound(shared,bot2,[valid,valid])
+  await worker()
+  const tokens=await tokensFor(shared,requester)
+  assert.equal(tokens.rowCount,1)
+  assert.equal(pushesTo(requester).length,1)
+  const message=pushesTo(requester)[0].messages[0].text
+  assert.ok(message.includes('/reserve/'+shared+'?t='))
+  const redemption=await post('/interview-link/'+shared+'/redeem',null,{token:linkRawOf(message)})
+  expect(redemption,200)
+  expect(await request('/interview/notices',{method:'PUT',cookie:redemption.cookie,data:{enabled:true}}),200)
+  const date=jstDate(1)
+  const slot=expect(await post('/stores/'+storeId+'/interviews/slots',admin,{
+    channel:shared,starts_at:date+'T19:00:00+09:00',ends_at:date+'T19:30:00+09:00',
+    instructions:'対面の検証枠',published:true,
+  },idempotency()),201)
+  const booking=expect(await post('/interview/bookings',redemption.cookie,{slot:slot.id,name:'確認用の応募者'}),201)
+  await worker()
+  assert.equal((await read("SELECT status FROM service_delivery WHERE object_id=$1 AND kind='interview_confirm'",[booking.id])).rows[0].status,'accepted')
+  assert.match(pushesTo(requester)[1].messages[0].text,/面談予約が確定しました。/)
+})

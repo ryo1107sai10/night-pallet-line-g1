@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 
 // Preserve the service's runtime configuration when publishing both web and jobs.
 // Secret values are never read or written; only Secret Manager references are copied.
-export function runtimeConfig(service, origin, automationOverride, defaults = '') {
+export function runtimeConfig(service, origin, automationOverride, defaults = '', overrides = {}) {
   const environment = {}
   const secrets = Object.fromEntries(defaults.split(',').filter(Boolean).map(item => item.split('=')))
   const source = service?.spec?.template?.spec?.containers?.[0]?.env ?? []
@@ -20,6 +20,9 @@ export function runtimeConfig(service, origin, automationOverride, defaults = ''
   }
   environment.PUBLIC_ORIGIN = new URL(origin).origin
   environment.AUTO_SEND_ENABLED = automationOverride ?? environment.AUTO_SEND_ENABLED ?? 'false'
+  for (const name of ['AUTO_SEND_STORE','GOOGLE_SHARED_CALENDARS']) {
+    if (overrides[name] !== undefined) environment[name] = overrides[name]
+  }
   if (!['true','false'].includes(environment.AUTO_SEND_ENABLED)) throw new Error('AUTO_SEND_ENABLED must be true or false.')
   const shared = ['GOOGLE_SHARED_CALENDAR_STORE','GOOGLE_SHARED_CALENDAR_ID','GOOGLE_SHARED_CALENDAR_ACCOUNT']
   const configured = shared.filter(key => environment[key])
@@ -40,7 +43,7 @@ if (import.meta.main) {
   const service = JSON.parse(readFileSync(input,'utf8'))
   if (mode === 'prepare') {
     const [output,origin,defaults] = args
-    const config = runtimeConfig(service,origin,process.env.AUTO_SEND_ENABLED,defaults)
+    const config = runtimeConfig(service,origin,process.env.AUTO_SEND_ENABLED,defaults,process.env)
     writeFileSync(output + '/environment.json',JSON.stringify(config.environment),{mode:0o600})
     writeFileSync(output + '/bindings',config.bindings,{mode:0o600})
   } else if (mode === 'verify') {

@@ -1,9 +1,9 @@
 import type pg from 'pg'
-import { type Actor, type Config, type DB, type Route, audit, conflict, scope, tx, unseal } from './core.js'
+import { type Actor, type Config, type DB, type Route, audit, automationForStore, conflict, scope, tx, unseal } from './core.js'
 import { channel, channelCredentials, channelTestReady, LineAPI, userKey } from './line.js'
 
 import { lockDispatch } from './dispatch-lock.js'
-import { endScope, processCustomerWebhook, runAutomation } from './automation.js'
+import { endScope, locationOf, processCustomerWebhook, runAutomation } from './automation.js'
 import { endApplicantScope, processRecruitmentWebhook, runRecruitmentAutomation } from './recruitment-automation.js'
 import { INTERVIEW_LINK_MARKER, interviewLinkEligible, issueInterviewLink, issueInterviewLinkToken } from './interview-link.js'
 import { CUSTOMER_LINK_MARKER, customerLinkEligible, issueCustomerLink, issueCustomerLinkToken } from './customer-link.js'
@@ -90,6 +90,12 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
     }
     if (event.kind==='postback'&&event.action==='interview_link'&&event.user_key&&event.recipient_box) {
       await tryIssueInterviewLink(db,cfg,c,event)
+    }
+    if (event.kind==='message'&&event.action==='interview_link'&&event.user_key&&event.recipient_box&&
+        automationForStore(cfg,c.store_id)&&Date.now()-+event.occurred_at<10*60000) {
+      const store=await locationOf(db,c.store_id)
+      if(store.auto_enabled&&store.auto_enabled_at&&+event.occurred_at>=+store.auto_enabled_at&&
+        store.contract_active&&store.eligible_at&&channelTestReady(c))await tryIssueInterviewLink(db,cfg,c,event)
     }
     if (event.kind==='postback'&&event.action==='customer_link'&&event.user_key&&event.recipient_box) {
       await tryIssueCustomerLink(db,cfg,c,event)
@@ -208,14 +214,15 @@ async function claim(db: DB, r: Route) {
 export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=googleFromEnvironment(cfg)) {
   const { rows } = await pool.query<Route>('SELECT * FROM channel_route ORDER BY id')
   for (const r of rows) {
+    const storeCfg={...cfg,automation:automationForStore(cfg,r.store_id)}
     if (r.module_channel_id && (!cfg.external || r.module_channel_id!==cfg.lineModule?.id)) continue
     await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,cfg,r) })
-    await runAutomation(pool,cfg,api,r)
-    await runRecruitmentAutomation(pool,cfg,api,r)
-    await deliverCampaign(pool,cfg,api,r)
-    await updateRichMenu(pool,cfg,api,r)
+    await runAutomation(pool,storeCfg,api,r)
+    await runRecruitmentAutomation(pool,storeCfg,api,r)
+    await deliverCampaign(pool,storeCfg,api,r)
+    await updateRichMenu(pool,storeCfg,api,r)
     await runGoogleSync(pool,google,r)
-    await deliverService(pool,cfg,api,r)
+    await deliverService(pool,storeCfg,api,r)
     if (!cfg.external) continue
     const pending = await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); return claim(db,r) })
     if (!pending) continue
