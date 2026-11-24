@@ -1,5 +1,5 @@
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
-import {starter,kinds,conditions,triggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
+import {starter,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
 
 scopeWorkspaceLinks()
 
@@ -477,7 +477,12 @@ function settings() {
     }),{items:purposes}),
     field('配信先の公式アカウント',graph.channel,set('channel'),{items:opts}))
   if (Object.keys(opts).length<2) wrap.append(node('p','対象店舗に対応する公式アカウントを登録してください。','field-hint'))
-  wrap.append(field('開始イベント',graph.trigger,set('trigger'),{items:triggers}),
+  const available={...liveTriggers[graph.purpose]}
+  if(!Object.hasOwn(available,graph.trigger)){
+    available[graph.trigger]=(triggers[graph.trigger]??graph.trigger)+'（下書き・テスト専用）'
+    wrap.append(node('p','現在の開始イベントは実配信に対応していません。公開するには、開始イベントを対応する項目へ変更してください。','field-hint'))
+  }
+  wrap.append(field('開始イベント',graph.trigger,set('trigger'),{items:available}),
     field('開始ステップ',graph.entry,set('entry'),
       {items:Object.fromEntries(graph.nodes.map(item=>[item.id,item.name]))}))
   const window=node('div',null,'row')

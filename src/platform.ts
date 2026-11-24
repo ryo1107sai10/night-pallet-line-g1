@@ -29,17 +29,30 @@ export async function platformPrincipal(db:DB,credential:string|undefined) {
 
 export async function platformTenants(db:DB,credential:string|undefined) {
   const principal=await authenticate(db,credential,'platform')
+  const targets=await supervisedTenantIds(db,principal)
+  const result=[]
+  for(const id of targets){
+    await scope(db,id,undefined,true)
+    const {rows:[tenant]}=await db.query(`SELECT id,slug,legal_name,stopped,
+      (SELECT count(*)::int FROM store WHERE tenant_id=tenant.id) AS stores
+      FROM tenant WHERE id=$1 AND NOT supervisor_only`,[id])
+    if(tenant)result.push(tenant)
+  }
+  await scope(db,principal.tenant_id,undefined,true)
+  return result
+}
+
+export async function supervisedTenantIds(db:DB,principal:Actor) {
+  await scope(db,principal.tenant_id,undefined,true)
   const {agency_id}=await supervisedAgency(db,principal)
-  await scope(db,agency_id,undefined,true)
-  const {rows}=await db.query(`SELECT id,slug,legal_name,stopped,
-    (SELECT count(*)::int FROM store WHERE tenant_id=tenant.id) AS stores
-    FROM tenant WHERE id=$1 AND NOT supervisor_only`,[agency_id])
-  return rows
+  const {rows}=await db.query<{tenant_id:string}>(`SELECT tenant_id FROM platform_registration
+    WHERE supervisor_tenant_id=$1 ORDER BY created_at,tenant_id`,[principal.tenant_id])
+  return [...new Set([agency_id,...rows.map(row=>row.tenant_id)])]
 }
 
 async function enterAgencyScope(db:DB,credential:string|undefined,tenant:string) {
   const principal=await authenticate(db,credential,'platform')
-  if ((await supervisedAgency(db,principal)).agency_id!==tenant) throw missing()
+  if (!(await supervisedTenantIds(db,principal)).includes(tenant)) throw missing()
   await scope(db,tenant,undefined,true)
   return principal
 }

@@ -1,3 +1,5 @@
+export const liveTriggers: Readonly<Record<string,Readonly<Record<string,string>>>>
+
 export function validate(flow: {
   name: string; purpose: string; trigger: string; channel: string; windowStart: string; windowEnd: string
   daily: number; weekly: number; cooldownDays: number; entry: string; nodes: Array<{ id: string; type: string; name: string }>

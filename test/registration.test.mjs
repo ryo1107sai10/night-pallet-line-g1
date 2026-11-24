@@ -181,6 +181,29 @@ test('マスター指定の画面化は、対象法人の有効な管理者だ�
     { address: 'chief@example.test' }), 404)
 })
 
+test('監督者は登録した法人を開いてマスターを管理でき、未登録法人と代理店には権限を広げない', async () => {
+  const tenants = expect(await request('/platform/tenants', { cookie: platform }), 200)
+  assert.equal(tenants.length, 2)
+  assert.ok(tenants.some(item => item.id === created.tenant.id && item.stores === 1))
+  const entry = expect(await post('/platform/tenants/' + created.tenant.id + '/enter', platform, {}), 200)
+  assert.equal(entry.url, '/platform/tenants/' + created.tenant.id + '/master/')
+  const workspace = '/platform/tenants/' + created.tenant.id + '/api/v1'
+  const call = async (path, cookie, data) => {
+    const result = await send(workspace + path, { method: data ? 'POST' : 'GET',
+      headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/json', ...idempotency() },
+      body: data ? JSON.stringify(data) : undefined })
+    return { status: result.status, data: await result.json() }
+  }
+  assert.deepEqual(expect(await call('/session', platform), 200).stores.map(item => item.id), [storeId])
+  assert.equal(expect(await call('/agency-master', platform), 200).current_email, 'ops@example.test')
+  const invite = expect(await call('/agency-master/invite', platform, { address: 'successor@example.test' }), 201)
+  assert.equal(expect(await call('/agency-master', platform), 200).pending_id, invite.id)
+  expect(await call('/session', agencyAdmin), 401)
+  const { rows: [gamma] } = await owner.query('SELECT id FROM tenant WHERE slug=$1', ['gamma'])
+  expect(await post('/platform/tenants/' + gamma.id + '/enter', platform, {}), 404)
+  assert.ok(!tenants.some(item => item.id === gamma.id))
+})
+
 test('エール側セットアップはステップ確定制で、設定を変えると再確定が要る', async () => {
   const base = '/stores/' + storeId
   const setup = () => request(base + '/setup', { cookie: master })
