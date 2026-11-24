@@ -305,14 +305,14 @@ function richMenus(root,entries,path,refresh,use){
 const results={queued:'待機中',submitting:'送信中',accepted:'LINE受付済み',cancelled:'停止・対象外',failed:'失敗',unknown:'結果不明'}
 function deliveries(root,entries,store,path,refresh){
   const kinds={interview_confirm:'面談確定',interview_reminder:'面談前日',interview_waitlist:'空き枠案内',chat_reply:'個別返信',
-    interview_link:'面談予約リンク',customer_link:'来店予約リンク'}
+    interview_link:'面談予約リンク',customer_link:'来店予約リンク',step:'ステップ配信',campaign:'絞り込み配信'}
   root.append(el('h2','LINE送信履歴'))
   const failed=field('過去7日間のエラーだけ表示','failures','checkbox',onlyFailures)
   failed.querySelector('input').onchange=event=>{
     onlyFailures=event.target.checked
     void render().catch(error=>notice(error.message,true))
   }
-  root.append(failed)
+  root.append(controls(failed,button('履歴を更新',()=>refresh('最新の送信履歴を表示しました。'))))
   for(const entry of entries){
     const date=entry.accepted_at??entry.first_attempt_at??entry.next_at
     const when=Number.isFinite(Date.parse(date))?dateLabel(date,store.timezone):''
@@ -322,6 +322,11 @@ function deliveries(root,entries,store,path,refresh){
     if(entry.status==='unknown')row.append(el('p','LINEのトークで届いているか確認してください。二重送信を防ぐため、結果不明のメッセージはこの画面から再送できません。'))
     if(entry.reason==='LINE認証に失敗しました')row.append(el('p','管理者に公式LINEの接続確認を依頼してください。'))
     if(entry.reason==='LINEが宛先または内容を受け付けませんでした')row.append(el('p','相手の利用状況と本文を確認してください。'))
+    if(entry.status==='failed'&&entry.kind==='step'){
+      const link=el('a','ステップ配信の設定を開く')
+      link.href=workspacePath('/studio/?store='+store.id)
+      row.append(link)
+    }
     if(entry.retryable)row.append(button('再送する',async()=>{
       await api(path+'/delivery/'+entry.id+'/retry','POST',{})
       await refresh('再送を受け付けました。送信履歴で結果を確認できます。')
@@ -594,7 +599,7 @@ async function render(){
   }
   if(settings.inbox_enabled)sections.push(['inbox','LINE受信箱'])
   if(!agency&&use==='customer'&&settings.inbox_enabled)sections.push(['intake','受付保留'])
-  if(settings.inbox_enabled||use==='recruitment'&&(settings.reminders_enabled||settings.waitlist_enabled))sections.push(['delivery','LINE送信履歴'])
+  sections.push(['delivery','LINE送信履歴'])
   if(!sections.length){content.replaceChildren(el('p','この店舗で有効な機能はありません。法人管理者が「店舗で使う機能」から設定できます。'));return}
   if(!agency)sections.unshift(['checks','運用チェック'])
   if(!sections.some(([id])=>id===current))current=sections[0][0]

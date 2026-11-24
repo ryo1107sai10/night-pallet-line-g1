@@ -114,6 +114,15 @@ const quotaFailures = "'LINEの通数を確認できません','LINEの月間通
 const knownRejection = `(d.status='failed' AND d.reason='LINEの送信制限に達しました'
   OR d.status='cancelled' AND d.reason IN (${quotaFailures}))`
 export const deliveryNeedsAttention = `(d.status IN ('failed','unknown') OR ${knownRejection})`
+export const automatedLineDeliveries = `
+  SELECT id,store_id,channel_id,'customer' AS purpose,'step' AS kind,status,next_at,first_attempt_at,accepted_at,line_request_id,reason
+    FROM automatic_send WHERE store_id=$1 AND $2='customer'
+  UNION ALL
+  SELECT id,store_id,channel_id,'recruitment','step',status,next_at,first_attempt_at,accepted_at,line_request_id,reason
+    FROM applicant_send WHERE store_id=$1 AND $2='recruitment'
+  UNION ALL
+  SELECT id,store_id,channel_id,'customer','campaign',status,next_at,first_attempt_at,accepted_at,line_request_id,reason
+    FROM campaign_delivery WHERE store_id=$1 AND $2='customer'`
 const canRetryDelivery = `${knownRejection} AND d.kind IN ('chat_reply','interview_confirm')
   AND d.accepted_at IS NULL AND d.manual_retry_at IS NULL AND d.attempt<3
   AND d.first_attempt_at > now()-interval '30 minutes' AND d.expires_at > now()
@@ -123,12 +132,20 @@ const canRetryDelivery = `${knownRejection} AND d.kind IN ('chat_reply','intervi
   AND s.contract_active AND s.eligible_at IS NOT NULL`
 
 export async function serviceHistory(db:DB,cfg:Config,store:string,purpose:WorkflowSubject['purpose'],failures=false){
-  return (await db.query(`SELECT d.id,d.kind,d.status,d.next_at,d.first_attempt_at,d.accepted_at,d.line_request_id,d.reason,c.label,
-    (${deliveryNeedsAttention}) AS needs_attention, coalesce($3 AND ${canRetryDelivery},false) AS retryable
+  return (await db.query(`WITH history AS (
+    SELECT d.id,d.channel_id,d.kind,d.status,d.next_at,d.first_attempt_at,d.accepted_at,d.line_request_id,d.reason,
+      (${deliveryNeedsAttention}) AS needs_attention,coalesce($3 AND ${canRetryDelivery},false) AS retryable,
+      coalesce(d.first_attempt_at,least(d.next_at,d.expires_at)) AS sort_at
     FROM service_delivery d JOIN channel c ON c.id=d.channel_id JOIN store s ON s.id=d.store_id
-    JOIN tenant t ON t.id=d.tenant_id WHERE d.store_id=$1 AND d.purpose=$2
-    AND (NOT $4 OR (${deliveryNeedsAttention}) AND d.first_attempt_at>=now()-interval '7 days')
-    ORDER BY coalesce(d.first_attempt_at,least(d.next_at,d.expires_at)) DESC LIMIT 100`,
+      JOIN tenant t ON t.id=d.tenant_id WHERE d.store_id=$1 AND d.purpose=$2
+    UNION ALL
+    SELECT id,channel_id,kind,status,next_at,first_attempt_at,accepted_at,line_request_id,reason,
+      status IN ('failed','unknown'),false,coalesce(first_attempt_at,next_at) FROM (${automatedLineDeliveries}) automated
+  )
+  SELECT h.id,h.kind,h.status,h.next_at,h.first_attempt_at,h.accepted_at,h.line_request_id,h.reason,
+    h.needs_attention,h.retryable,c.label FROM history h JOIN channel c ON c.id=h.channel_id
+    WHERE NOT $4 OR needs_attention AND first_attempt_at>=now()-interval '7 days'
+    ORDER BY h.sort_at DESC NULLS LAST,h.id LIMIT 100`,
   [store,purpose,automationForStore(cfg,store),failures])).rows
 }
 

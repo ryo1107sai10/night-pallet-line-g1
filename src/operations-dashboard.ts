@@ -24,10 +24,16 @@ export async function operationsDashboard(db:DB,actor:Actor) {
         ORDER BY f.starts_at,f.id
       ) item),'[]') AS interviews,
       coalesce((SELECT jsonb_object_agg(purpose,total) FROM (
-        SELECT d.purpose,count(*)::int AS total FROM service_delivery d JOIN store s ON s.id=d.store_id
-        WHERE d.store_id=$1 AND d.purpose=ANY($2) AND d.first_attempt_at>=now()-interval '7 days'
-        AND (s.inbox_enabled OR d.purpose='recruitment' AND (s.reminders_enabled OR s.waitlist_enabled))
-        AND ${deliveryNeedsAttention} GROUP BY d.purpose
+        SELECT purpose,count(*)::int AS total FROM (
+          SELECT d.purpose FROM service_delivery d WHERE d.store_id=$1
+            AND d.first_attempt_at>=now()-interval '7 days' AND ${deliveryNeedsAttention}
+          UNION ALL SELECT 'customer' FROM automatic_send WHERE store_id=$1
+            AND first_attempt_at>=now()-interval '7 days' AND status IN ('failed','unknown')
+          UNION ALL SELECT 'recruitment' FROM applicant_send WHERE store_id=$1
+            AND first_attempt_at>=now()-interval '7 days' AND status IN ('failed','unknown')
+          UNION ALL SELECT 'customer' FROM campaign_delivery WHERE store_id=$1
+            AND first_attempt_at>=now()-interval '7 days' AND status IN ('failed','unknown')
+        ) events WHERE purpose=ANY($2) GROUP BY purpose
       ) deliveries),'{}') AS failed`,[id,uses,timezone])
     result.push({id,name,timezone,inbox,interviews,failed})
   }
