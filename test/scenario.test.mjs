@@ -1,9 +1,21 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {starter,validate,simulate,localInstant,renderMessage} from '../public/studio/engine.mjs'
+import {starter,liveTriggers,validate,simulate,localInstant,renderMessage} from '../public/studio/engine.mjs'
 
 const person = {start:'2026-11-14T22:00',zone:'Asia/Tokyo',cutoff:'06:00',adult:true,consent:true,
   assigned:true,booked:false,dayCount:0,weekCount:0,values:{name:'山田',store:'検証店'}}
+
+test('新しい採用シナリオは実配信できる面談予約を起点にし、用途別の開始項目を使う',()=>{
+  const graph=starter('recruitment')
+  graph.channel='account'
+  assert.equal(graph.trigger,'interview_booked')
+  assert.ok(Object.hasOwn(liveTriggers.recruitment,graph.trigger))
+  assert.ok(!Object.hasOwn(liveTriggers.recruitment,'form'))
+  assert.ok(!Object.hasOwn(liveTriggers.customer,'interview_booked'))
+  assert.deepEqual(validate(graph,true),[])
+  const result=simulate(graph,{...person,booked:true,bookingAt:'2026-11-20T19:00',values:{...person.values,booking:'11月20日19:00'}})
+  assert.ok(result.events.some(item=>item.message?.includes('11月20日19:00')))
+})
 
 test('AT24/27 循環・孤立・未接続・目的外の販促は公開検証で拒否する', () => {
   const graph=starter()

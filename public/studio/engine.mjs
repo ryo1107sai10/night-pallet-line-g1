@@ -4,6 +4,11 @@ export const triggers = {
   interview_booked:'面談予約', interview_changed:'面談変更', interview_cancelled:'面談取消',
   application:'応募状態変更', link:'リンク反応', manual:'手動登録',
 }
+// Keep the editor and server publication gate on the same supported events.
+export const liveTriggers = Object.freeze({
+  customer:Object.freeze(Object.fromEntries(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'].map(key=>[key,triggers[key]]))),
+  recruitment:Object.freeze(Object.fromEntries(['follow','interview_booked','interview_changed','interview_cancelled'].map(key=>[key,triggers[key]]))),
+})
 export const kinds = { message:'メッセージ',wait:'待機',branch:'条件分岐',tag:'タグ更新',task:'担当タスク',end:'終了' }
 export const conditions = { booked:'予約がある',consent:'目的別の同意がある',adult:'20歳以上の確認済み',
   responded:'返信がある',tag:'タグを持つ',assigned:'担当がいる' }
@@ -15,12 +20,12 @@ const timeFormat = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
 export function starter(purpose='customer') {
   return {
-    name:purpose==='customer'?'友だち追加 · 初回来店フォロー':'応募受付 · 面接フォロー',
-    purpose,trigger:purpose==='customer'?'follow':'form',channel:'',windowStart:'12:00',windowEnd:'21:00',
+    name:purpose==='customer'?'友だち追加 · 初回来店フォロー':'面談予約 · 予約後フォロー',
+    purpose,trigger:purpose==='customer'?'follow':'interview_booked',channel:'',windowStart:'12:00',windowEnd:'21:00',
     daily:1,weekly:3,cooldownDays:30,rejoin:false,missingAssignee:'manager',holidays:[],
     entry:'welcome', nodes:[
-      {id:'welcome',type:'message',name:purpose==='customer'?'ウェルカムメッセージ':'応募受付メッセージ',category:'service',
-        body:purpose==='customer'?'{{name}}さん、友だち追加ありがとうございます。\n{{store}}です。ご来店の相談はこのトークからお気軽にどうぞ。':'{{name}}さん、{{store}}へのご応募ありがとうございます。\n担当者から面接についてご案内します。',next:'wait'},
+      {id:'welcome',type:'message',name:purpose==='customer'?'ウェルカムメッセージ':'面談予約の受付メッセージ',category:'service',
+        body:purpose==='customer'?'{{name}}さん、友だち追加ありがとうございます。\n{{store}}です。ご来店の相談はこのトークからお気軽にどうぞ。':'{{name}}さん、{{store}}への面談予約を受け付けました。\n日時：{{booking}}\n当日のご案内はこのトークからお送りします。',next:'wait'},
       {id:'wait',type:'wait',name:'24時間待機',mode:'delay',minutes:1440,next:'branch'},
       {id:'branch',type:'branch',name:'予約の有無を確認',condition:'booked',tag:'',yes:'booked',no:'nudge'},
       {id:'booked',type:'end',name:'予約済みのため終了'},

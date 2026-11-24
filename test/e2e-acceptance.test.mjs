@@ -1,3 +1,4 @@
+import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -84,7 +85,7 @@ async function inbound(connection, destination, events) {
 }
 async function activate(invite, email, tenantSlug, loginPath = '/auth/login') {
   expect(await post('/auth/activate', null,
-    { invite: invite.invite_code, password: pass, code: code(invite.setup_key, -1) }), 200)
+    { invite: invite.invite_code, password: pass, code: await previousCode(invite.setup_key) }), 200)
   const auth = await post(loginPath, null,
     { tenant: tenantSlug, email, password: pass, code: code(invite.setup_key) })
   expect(auth, 200)

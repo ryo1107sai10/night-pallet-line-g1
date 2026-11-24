@@ -1,6 +1,6 @@
 import type { Request } from 'express'
 import { z } from 'zod'
-import { simulate, validate } from '../public/studio/engine.mjs'
+import { liveTriggers, simulate, validate } from '../public/studio/engine.mjs'
 import { audit, conflict, Fault, missing, keyed, newId, once, purpose, revision, seal, text, uuid, type Actor, type Config, type DB } from './core.js'
 
 import { channel } from './line.js'
@@ -38,12 +38,8 @@ const fixture = z.strictObject({
     interview_link:z.string().max(1000).optional(),customer_link:z.string().max(1000).optional() }),
 })
 export type Graph = z.infer<typeof graph>
-const customerTriggers = new Set(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'])
-// 採用シナリオの実配信（026）: 友だち追加と面談の予約・変更・取消を開始イベントとして公開できる。
-const recruitmentTriggers = new Set(['follow','interview_booked','interview_changed','interview_cancelled'])
 function canPublish(graph:Graph) {
-  const available = graph.purpose==='customer' ? customerTriggers.has(graph.trigger)
-    : graph.purpose==='recruitment' ? recruitmentTriggers.has(graph.trigger) : false
+  const available = Object.hasOwn(liveTriggers[graph.purpose]??{},graph.trigger)
   if (!available) {
     throw new Fault(422,'TRIGGER_UNAVAILABLE','この用途・開始イベントの実配信は未対応です。下書きと配信前テストを利用できます。')
   }

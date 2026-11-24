@@ -6,6 +6,7 @@ if [[ $# -ne 3 ]]; then
   exit 2
 fi
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 project=$1
 instance=$2
 local_image=$3
@@ -71,25 +72,45 @@ fi
 image_id=$(docker image inspect "$local_image" --format '{{.Id}}')
 image="$registry/$project/$repository/app:${image_id#sha256:}"
 docker_host=${DOCKER_HOST:-$(docker context inspect "$(docker context show)" --format '{{.Endpoints.docker.Host}}')}
-docker_config=$(mktemp -d)
-clear_docker_credentials() {
-  if [[ -f "$docker_config/config.json" ]]; then unlink "$docker_config/config.json"; fi
-  rmdir "$docker_config"
+deployment_dir=$(mktemp -d)
+docker_config="$deployment_dir/docker"
+mkdir "$docker_config"
+clear_deployment_files() {
+  node -e 'require("node:fs").rmSync(process.argv[1],{recursive:true,force:true})' "$deployment_dir"
 }
-trap clear_docker_credentials EXIT
+trap clear_deployment_files EXIT
+if [[ -n "$(gcloud run services list --project "$project" --region "$region" --filter="metadata.name=$service" --format='value(metadata.name)')" ]]; then
+  gcloud run services describe "$service" --project "$project" --region "$region" --format=json > "$deployment_dir/current.json"
+else
+  printf '{}\n' > "$deployment_dir/current.json"
+fi
+node "$script_dir/runtime-config.mjs" prepare "$deployment_dir/current.json" "$deployment_dir" "$origin" "$bindings"
+bindings=$(cat "$deployment_dir/bindings")
 gcloud auth print-access-token | docker --config "$docker_config" login "$registry" --username oauth2accesstoken --password-stdin
 docker tag "$local_image" "$image"
 docker --host "$docker_host" --config "$docker_config" push "$image"
 
-environment="PUBLIC_ORIGIN=$origin,AUTO_SEND_ENABLED=false"
-gcloud run deploy "$service" --image "$image" --project "$project" --region "$region" --port 3000 \
-  --service-account "$account" --set-cloudsql-instances "$database" --update-env-vars "$environment" --set-secrets "$bindings" \
+check_tag="verify-$(date -u +%s)"
+revision=$(gcloud run deploy "$service" --image "$image" --project "$project" --region "$region" --port 3000 \
+  --service-account "$account" --set-cloudsql-instances "$database" --env-vars-file "$deployment_dir/environment.json" --set-secrets "$bindings" \
   --execution-environment gen2 --cpu 1 --memory 512Mi --concurrency 16 --timeout 45s --min-instances 0 --max-instances 1 \
   --startup-probe 'httpGet.path=/api/health,httpGet.port=3000,periodSeconds=2,failureThreshold=10,timeoutSeconds=2' \
-  --no-invoker-iam-check --quiet
-gcloud run jobs deploy "$worker" --image "$image" --project "$project" --region "$region" \
-  --service-account "$account" --set-cloudsql-instances "$database" --set-env-vars "$environment" --set-secrets "$bindings" \
+  --no-invoker-iam-check --no-traffic --tag "$check_tag" --quiet --format='value(status.latestReadyRevisionName)')
+[[ -n "$revision" ]] || { printf 'No ready revision was returned.\n' >&2; exit 1; }
+gcloud run services describe "$service" --project "$project" --region "$region" --format=json > "$deployment_dir/staged.json"
+staged_url=$(node "$script_dir/runtime-config.mjs" staged-url "$deployment_dir/staged.json" "$revision" "$check_tag")
+curl --fail --silent --show-error --max-time 45 "$staged_url/api/health"
+# Resolve the digest so the web service and worker use exactly the same image.
+resolved_image=$(gcloud run revisions describe "$revision" --project "$project" --region "$region" --format='value(status.imageDigest)')
+[[ "$resolved_image" == *@sha256:* ]] || { printf 'The staged image digest could not be verified.\n' >&2; exit 1; }
+gcloud run jobs deploy "$worker" --image "$resolved_image" --project "$project" --region "$region" \
+  --service-account "$account" --set-cloudsql-instances "$database" --env-vars-file "$deployment_dir/environment.json" --set-secrets "$bindings" \
   --command=node --args=dist/worker.js,--once --tasks=1 --max-retries=0 --task-timeout=5m --quiet
 
+gcloud run services update-traffic "$service" --project "$project" --region "$region" \
+  --to-revisions "$revision=100" --remove-tags "$check_tag" --quiet
+gcloud run services describe "$service" --project "$project" --region "$region" --format=json > "$deployment_dir/live.json"
+node "$script_dir/runtime-config.mjs" verify "$deployment_dir/live.json" "$revision"
 curl --fail --silent --show-error --max-time 45 "$origin/api/health"
+printf '\nVerified revision: %s\n' "$revision"
 printf '\nManagement: %s/master/\nGoogle redirect: %s/interview/google-return.html\n' "$origin" "$origin"

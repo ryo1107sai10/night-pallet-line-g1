@@ -1,3 +1,4 @@
+import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { createHmac, randomBytes, randomUUID} from 'node:crypto'
 import { mkdtemp, rm} from 'node:fs/promises'
@@ -177,7 +178,7 @@ await new Promise(resolve => server.once('listening', resolve))
 base = 'http://127.0.0.1:' + server.address().port
 
 const invite = await bootstrap(owner, cfg, { slug: 'slink', name: 'シナリオ法人', email: 'chief@example.test'})
-expect(await post('/auth/activate', null, { invite: invite.invite_code, password: pass, code: code(invite.setup_key, -1)}), 200)
+expect(await post('/auth/activate', null, { invite: invite.invite_code, password: pass, code: await previousCode(invite.setup_key)}), 200)
 const auth = await post('/auth/login', null, { tenant: 'slink', email: 'chief@example.test', password: pass, code: code(invite.setup_key)})
 expect(auth, 200)
 admin = auth.cookie

@@ -1,3 +1,4 @@
+import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -65,7 +66,7 @@ function expect(result, status) {
 function post(path,cookie,data,headers) { return request(path,{method:'POST',cookie,data,headers}) }
 function patch(path,cookie,data) { return request(path,{method:'PATCH',cookie,data}) }
 async function activate(invite, email, tenant) {
-  expect(await post('/auth/activate',null,{ invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1) }),200)
+  expect(await post('/auth/activate',null,{ invite:invite.invite_code,password:pass,code:await previousCode(invite.setup_key) }),200)
   const auth = await post('/auth/login',null,{tenant,email,password:pass,code:code(invite.setup_key)})
   expect(auth,200)
   assert.ok(auth.cookie)
@@ -318,7 +319,7 @@ test('AT03 MFA, 招待失効・再利用・CSRF拒否',async ()=>{
   const expired = await bootstrap(owner,cfg,{slug:'beta',name:'乙法人',email:'chief@example.test'})
   await owner.query('UPDATE invite SET expires_at=now()-interval \'1 second\' WHERE token_hash=$1',[digest(expired.invite_code)])
   expect(await post('/auth/activate',null,{invite:expired.invite_code,password:pass,code:code(expired.setup_key)}),400)
-  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)},
+  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:await previousCode(invite.setup_key)},
     {Origin:'https://elsewhere.test'}),403)
   admin = await activate(invite,'chief@example.test','alpha')
   expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,1)}),400)
@@ -1378,7 +1379,7 @@ test('公開入口からマスターを分離し、指定した法人管理者�
   expect(await request('/line-onboarding'),401)
   expect(await request('/staff'),401)
 
-  expect(await post('/auth/activate',null,{invite:first.invite_code,password:pass,code:code(first.setup_key,-1)}),200)
+  expect(await post('/auth/activate',null,{invite:first.invite_code,password:pass,code:await previousCode(first.setup_key)}),200)
   expect(await post('/auth/master/login',null,{tenant,email,password:pass}),400)
   const master=await post('/auth/master/login',null,{tenant,email,password:pass,code:code(first.setup_key)})
   expect(master,200)
@@ -1394,7 +1395,7 @@ test('公開入口からマスターを分離し、指定した法人管理者�
   const store=expect(await post('/stores',master.cookie,storeData('権限試験店'),idempotency()),201).id
   const alternateEmail='alternate@example.test'
   const invite=expect(await post('/staff/invites',master.cookie,{email:alternateEmail,role:'manager',stores:[store]},idempotency()),201)
-  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)}),200)
+  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:await previousCode(invite.setup_key)}),200)
   const alternateLogin={tenant,email:alternateEmail,password:pass,code:code(invite.setup_key)}
   expect(await post('/auth/master/login',null,alternateLogin),401)
   const staff=await post('/auth/login',null,alternateLogin)
@@ -1607,7 +1608,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   await assert.rejects(inviteSupervisor(pool,cfg,input),{code:'42501'})
   const invite=await inviteSupervisor(owner,cfg,input)
   await assert.rejects(inviteSupervisor(owner,cfg,{...input,slug:'another-supervisor'}),/既に登録/)
-  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:code(invite.setup_key,-1)}),200)
+  expect(await post('/auth/activate',null,{invite:invite.invite_code,password:pass,code:await previousCode(invite.setup_key)}),200)
   const loginData={tenant:creator,email,password:pass,code:code(invite.setup_key)}
   expect(await post('/auth/master/login',null,loginData),401)
   expect(await post('/auth/login',null,loginData),401)
@@ -1740,7 +1741,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const replacement=expect(await scoped(alpha.tenant.id,'/agency-master/invite','POST',{address:successor}),201)
   expect(await scoped(alpha.tenant.id,'/agency-master/promote','POST',{pending:replacement.id}),409)
   expect(await request('/session',{cookie:admin}),200)
-  expect(await post('/auth/activate',null,{invite:replacement.invite_code,password:pass,code:code(replacement.setup_key,-1)}),200)
+  expect(await post('/auth/activate',null,{invite:replacement.invite_code,password:pass,code:await previousCode(replacement.setup_key)}),200)
   const candidateLogin={tenant:'alpha',email:successor,password:pass,code:code(replacement.setup_key)}
   expect(await post('/auth/master/login',null,candidateLogin),401)
   await tx(pool,async db=>{
@@ -1774,7 +1775,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await request('/platform/session',{cookie:secondSession.cookie}),200)
   expect(await post('/auth/platform/login',null,{...loginData,code:code(invite.setup_key,1)}),401)
   const newPassword='New password chosen in this test'
-  const enrollCode=code(enrollment.setup_key,-1)
+  const enrollCode=await previousCode(enrollment.setup_key)
   expect(await post(completionPath,null,{handoff,password:pass,code:enrollCode}),400)
   expect(await request('/platform/session',{cookie:platform.cookie}),200)
   const completion=await post(completionPath,platform.cookie,{handoff,password:newPassword,code:enrollCode})

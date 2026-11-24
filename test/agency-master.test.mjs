@@ -1,3 +1,4 @@
+import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -51,7 +52,7 @@ const post = (path, cookie, data, headers) => request(path, { method: 'POST', co
 
 async function activate(invite, email, tenant, loginPath = '/auth/login') {
   expect(await post('/auth/activate', null,
-    { invite: invite.invite_code, password: pass, code: code(invite.setup_key, -1) }), 200)
+    { invite: invite.invite_code, password: pass, code: await previousCode(invite.setup_key) }), 200)
   const auth = await post(loginPath, null, { tenant, email, password: pass, code: code(invite.setup_key) })
   expect(auth, 200)
   assert.ok(auth.cookie)
@@ -110,7 +111,7 @@ before(async () => {
   const supervisorInvite = await inviteSupervisor(owner, cfg,
     { slug: 'lilu', name: 'リルコーポレーション', displayName: '北村さん', email: 'kitamura@example.test', agency: 'alpha' })
   expect(await post('/auth/activate', null,
-    { invite: supervisorInvite.invite_code, password: pass, code: code(supervisorInvite.setup_key, -1) }), 200)
+    { invite: supervisorInvite.invite_code, password: pass, code: await previousCode(supervisorInvite.setup_key) }), 200)
   const login = await post('/auth/platform/login', null,
     { tenant: 'lilu', email: 'kitamura@example.test', password: pass, code: code(supervisorInvite.setup_key) })
   expect(login, 200)
@@ -160,7 +161,7 @@ test('代理店の現マスターは自法人で後任を招待し、切り替�
   expect(await post('/agency-master/promote', master, { pending: invite.id }), 409)
 
   expect(await post('/auth/activate', null,
-    { invite: invite.invite_code, password: pass, code: code(invite.setup_key, -1) }), 200)
+    { invite: invite.invite_code, password: pass, code: await previousCode(invite.setup_key) }), 200)
   const ready = expect(await request('/agency-master', { cookie: master }), 200)
   assert.equal(ready.pending_active, true)
 
@@ -193,7 +194,7 @@ test('監督者（北村さん）は従来どおりスコープ経由で代理�
     { address: 'final@example.test' }), 201)
   expect(await scoped(alphaTenant, '/agency-master/promote', 'POST', { pending: invite.id }), 409)
   expect(await post('/auth/activate', null,
-    { invite: invite.invite_code, password: pass, code: code(invite.setup_key, -1) }), 200)
+    { invite: invite.invite_code, password: pass, code: await previousCode(invite.setup_key) }), 200)
   const promoted = expect(await scoped(alphaTenant, '/agency-master/promote', 'POST',
     { pending: invite.id }), 200)
   assert.equal(promoted.current_email, 'final@example.test')
