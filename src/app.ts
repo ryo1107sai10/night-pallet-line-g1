@@ -51,6 +51,7 @@ import { completeStoreSetup, confirmStoreSetup, createRegistration, designateReg
   storeSetupState } from './registration.js'
 import { CUSTOMER_LINK_SESSION_TTL_SECONDS, redeemCustomerLink } from './customer-link.js'
 import { workflowChecks } from './workflow-checks.js'
+import { dispatchLineWork, lineDispatchFromEnvironment, lineDispatchInput, lineDispatchPath } from './line-dispatch.js'
 
 
 
@@ -84,10 +85,14 @@ const keyOf = (req: Request) => z.string().regex(/^[a-zA-Z0-9_-]{16,100}$/).pars
 const address = (req: Request) => req.socket.remoteAddress ?? 'unknown'
 const here = (path: string) => fileURLToPath(new URL(path,import.meta.url))
 
-export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), google = googleFromEnvironment(cfg)) {
+export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), google = googleFromEnvironment(cfg),
+  dispatch = lineDispatchFromEnvironment(cfg)) {
   const app = express()
   const api = express.Router({mergeParams:true})
   const workspace = express.Router({mergeParams:true})
+  const wakeLine = async (store: string, channel: string, source: 'webhook'|'service') => {
+    if (dispatch && automationForStore(cfg,store)) await dispatch.wake({channel,source})
+  }
   app.disable('x-powered-by')
   app.use((req,res,next) => {
     res.locals.correlation = newId()
@@ -209,18 +214,27 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     else next()
   })
   app.use('/assets',express.static(here('./assets'),{index:false}))
+  app.post(lineDispatchPath,express.json({limit:'1kb',strict:true}),async(req,res)=>{
+    if (!dispatch || !await dispatch.verify(req.get('Authorization') ?? '')) {
+      throw new Fault(403,'FORBIDDEN','この操作を実行できる権限がありません。')
+    }
+    await dispatchLineWork(pool,cfg,line,lineDispatchInput.parse(req.body))
+    res.status(204).end()
+  })
   workspace.use('/api/v1',api)
   app.use(platformWorkspace+'/:platformTenant',workspace)
   app.use(workspace)
 
   api.post('/webhooks/line/:connection',express.raw({ type:'application/json',limit:'1mb',inflate:false }),
     async (req,res)=>{
-      await receiveWebhook(pool,cfg,idOf(req,'connection'),
+      const received = await receiveWebhook(pool,cfg,idOf(req,'connection'),
         Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),req.get('X-Line-Signature') ?? '')
+      if (received) await wakeLine(received.store_id,received.id,'webhook')
       res.status(200).json({ received:true })
     })
   api.post('/webhooks/line-module',express.raw({type:'application/json',limit:'1mb',inflate:false}),async(req,res)=>{
-    await receiveModuleWebhook(pool,cfg,Buffer.isBuffer(req.body)?req.body:Buffer.alloc(0),req.get('X-Line-Signature')??'')
+    const received = await receiveModuleWebhook(pool,cfg,Buffer.isBuffer(req.body)?req.body:Buffer.alloc(0),req.get('X-Line-Signature')??'')
+    if (received) await wakeLine(received.store_id,received.id,'webhook')
     res.json({received:true})
   })
 
@@ -340,13 +354,22 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const {start}=interviewDates.parse(req.query)
     res.json(await tx(pool,async db=>interviewCalendar(db,await interviewApplicant(db,interviewCredential(req)),google,start)))
   })
+  async function changeApplicantInterview<T>(req: Request,
+    apply: (db: DB, applicant: Awaited<ReturnType<typeof interviewApplicant>>) => Promise<T>) {
+    const {applicant,result} = await tx(pool,async db=>{
+      const applicant = await interviewApplicant(db,interviewCredential(req),true)
+      return {applicant,result:await apply(db,applicant)}
+    })
+    await wakeLine(applicant.store_id,applicant.channel_id,'service')
+    return result
+  }
   api.post('/interview/bookings',async(req,res)=>{
     const input=interviewCreate.parse(req.body)
-    res.status(201).json(await tx(pool,async db=>confirmInterview(db,cfg,await interviewApplicant(db,interviewCredential(req),true),input,google)))
+    res.status(201).json(await changeApplicantInterview(req,(db,applicant)=>confirmInterview(db,cfg,applicant,input,google)))
   })
   api.patch('/interview/bookings/:booking',async(req,res)=>{
     const input=interviewChange.parse(req.body)
-    res.json(await tx(pool,async db=>updateInterview(db,cfg,await interviewApplicant(db,interviewCredential(req),true),idOf(req,'booking'),input,google)))
+    res.json(await changeApplicantInterview(req,(db,applicant)=>updateInterview(db,cfg,applicant,idOf(req,'booking'),input,google)))
   })
   api.post('/interview-link/:connection/redeem',async(req,res)=>{
     const connection=idOf(req,'connection')
@@ -394,7 +417,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.put('/interview/notices',async(req,res)=>{
     const {enabled}=noticeInput.parse(req.body)
-    res.json(await tx(pool,async db=>setInterviewNotices(db,cfg,await applicantSubject(db,req),enabled)))
+    const {subject,result} = await tx(pool,async db=>{
+      const subject = await applicantSubject(db,req)
+      return {subject,result:await setInterviewNotices(db,cfg,subject,enabled)}
+    })
+    if (enabled) await wakeLine(subject.store_id,subject.channel_id,'service')
+    res.json(result)
   })
   api.put('/interview/waitlist',async(req,res)=>{
     const data=waitlistInput.parse(req.body)
@@ -414,14 +442,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     })
   }
 
-  type Action = (db: DB,actor: Actor,req: Request) => Promise<unknown>
-  const staff = (action: Action, status=200) => async (req: Request,res: Response) => {
-    const data = await tx(pool,async db=>{
+  type Action<T=unknown> = (db: DB,actor: Actor,req: Request) => Promise<T>
+  const staffAction = <T>(req: Request,action: Action<T>) =>
+    tx(pool,async db=>{
       const actor=await requestActor(db,req)
       checkAgencyAccess(actor,req)
       return action(db,actor,req)
     })
-    res.status(status).json(data)
+  const staff = (action: Action,status=200) => async (req: Request,res: Response) => {
+    res.status(status).json(await staffAction(req,action))
   }
   const inStore = (action: Action,manage = true,status=200) => staff(async (db,actor,req)=>{
     await storeAccess(db,actor,idOf(req,'store'),manage)
@@ -451,8 +480,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     changeThread(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),inboxEdit.parse(req.body))))
   api.patch(workflow+'/inbox/:thread/handoff',workflowStaff((db,actor,req)=>
     changeHandoff(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),handoffInput.parse(req.body))))
-  api.post(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
-    writeInbox(db,cfg,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),keyOf(req),inboxText.parse(req.body)),201))
+  api.post(workflow+'/inbox/:thread',async(req,res)=>{
+    const store = idOf(req,'store'), usage = workPurpose(req)
+    const {channel,...message} = await staffAction(req,async(db,actor)=>{
+      await workflowAccess(db,actor,store,usage)
+      return writeInbox(db,cfg,actor,store,usage,idOf(req,'thread'),keyOf(req),inboxText.parse(req.body))
+    })
+    if (channel) await wakeLine(store,channel,'service')
+    res.status(201).json(message)
+  })
   const intake='/stores/:store/intake'
   api.get(intake,inStore((db,actor,req)=>inboxOverview(db,idOf(req,'store'),'unclassified',actor.platform?actor.id:undefined)))
   api.get(intake+'/:thread',inStore((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),'unclassified',idOf(req,'thread'))))

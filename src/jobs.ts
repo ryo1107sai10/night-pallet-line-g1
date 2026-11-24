@@ -109,6 +109,13 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
   }
 }
 
+export async function processChannelEvents(pool:pg.Pool,cfg:Config,r:Route) {
+  await tx(pool,async db=>{
+    await scope(db,r.tenant_id,r.store_id)
+    await processEvents(db,cfg,r)
+  })
+}
+
 // 面談予約リンク: リッチメニューの postback から予約リンクを発行する。
 // 発行条件（友だち状態・機能フラグ・停止状態）は interviewLinkEligible で共通判定する。
 // 兼用OAでも action=interview_link の postback からは発行する（フェーズ4: allowShared=true）。
@@ -216,7 +223,7 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
   for (const r of rows) {
     const storeCfg={...cfg,automation:automationForStore(cfg,r.store_id)}
     if (r.module_channel_id && (!cfg.external || r.module_channel_id!==cfg.lineModule?.id)) continue
-    await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); await processEvents(db,cfg,r) })
+    await processChannelEvents(pool,cfg,r)
     await runAutomation(pool,storeCfg,api,r)
     await runRecruitmentAutomation(pool,storeCfg,api,r)
     await deliverCampaign(pool,storeCfg,api,r)
