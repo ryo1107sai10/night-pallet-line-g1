@@ -63,18 +63,21 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
     SELECT user_key,recipient_box,notices FROM workflow_contact WHERE channel_id=$1 AND purpose=$2 AND subject=$3`,
   [job.channel_id,job.purpose,job.subject])
   if(!contact)return
-  // interview_link / customer_link は本人がメニューをタップして依頼した送信なので、通知オプトインは要求しない。
+  // 本人が依頼したリンクの返信には、面談通知のオプトインを要求しない。
   if(job.kind!=='interview_link'&&job.kind!=='customer_link'&&!contact.notices)return
   if(verificationOnly&&job.kind!=='interview_link'&&job.kind!=='customer_link'&&!await testRecipient(db,connection,contact.user_key))return
-  const {rows:[activity]}=await db.query<{kind:string|null;stop:boolean;recent_message:boolean}>(`SELECT
+  const {rows:[activity]}=await db.query<{kind:string|null;following:boolean|null;stop:boolean;recent_message:boolean}>(`SELECT
     EXISTS (SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$4
       AND kind='message' AND occurred_at BETWEEN now()-interval '7 days' AND now()) AS recent_message,
     (SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow','unfollow')
       ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1) AS kind,
+    (SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2) AS following,
     EXISTS (SELECT 1 FROM webhook_event e WHERE e.channel_id=$1 AND e.user_key=$2 AND e.stop_signal='all' AND e.processed_at IS NULL
       AND e.occurred_at>=coalesce((SELECT notices_changed_at FROM workflow_contact WHERE channel_id=$1 AND purpose='recruitment' AND subject=$3),'-infinity')) AS stop`,
   [job.channel_id,contact.user_key,job.subject,connection.generation])
-  if(activity.stop||activity.kind==='unfollow'||!activity.kind&&!(verificationOnly&&activity.recent_message))return
+  // 接続前からの友だちは follow の記録がない。LINEの1対1メッセージの送信許可は7日以内に限定する。
+  const recentContact=activity.recent_message&&(verificationOnly||activity.following===true)
+  if(activity.stop||activity.following===false||activity.kind==='unfollow'||(!activity.kind&&!recentContact))return
   const to=contactAddress(cfg,{...job,recipient_box:contact.recipient_box})
   if(job.kind==='interview_link'||job.kind==='customer_link'){
     if(!job.body_box)return

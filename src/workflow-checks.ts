@@ -1,4 +1,4 @@
-import type { Config, DB } from './core.js'
+import { automationForStore, type Config, type DB } from './core.js'
 import { channel, messagingReady } from './line.js'
 import { storeFeatures } from './store-features.js'
 import type { WorkflowSubject } from './forms.js'
@@ -16,7 +16,7 @@ export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowS
     (use==='customer'?flags.campaigns_enabled:flags.reminders_enabled||flags.waitlist_enabled)
   if(!channels.length)checks.push({section:'connection',text:'この用途の公式LINEが登録されていません。'})
   else if(maySend&&connected<channels.length)checks.push({section:'connection',text:(channels.length-connected)+'件の公式LINEが接続検収待ちです。'})
-  if(maySend&&(!cfg.external||!cfg.automation))checks.push({section:'connection',text:'LINE送信・メニュー切り替えには公開HTTPS環境と配信の有効化が必要です。'})
+  if(maySend&&!automationForStore(cfg,store))checks.push({section:'connection',text:'LINE送信・メニュー切り替えには公開HTTPS環境と配信の有効化が必要です。'})
   const {rows:[status]}=await db.query<{forms:number;intake:number;failures:number;google_errors:number;write_granted:boolean}>(`SELECT
     (SELECT count(*)::int FROM workflow_form WHERE purpose=$1 AND published) AS forms,
     (SELECT count(*)::int FROM inbox_thread WHERE purpose='unclassified' AND state<>'resolved') AS intake,

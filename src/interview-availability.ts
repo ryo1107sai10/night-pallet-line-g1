@@ -27,25 +27,33 @@ const day=86400000
 export class InterviewGoogle {
   private readonly redirect:string
   private readonly recent=new Map<string,{access:string;expires:number}>()
-  private sharedToken?:{access:string;expires:number}
+  private readonly sharedTokens=new Map<string,{access:string;expires:number}>()
+  private readonly sharedCalendars:Map<string,SharedCalendar>
   constructor(private readonly cfg:Config, private readonly settings?:GoogleSetup, private readonly request=fetch,
-    private readonly shared?:SharedCalendar){
+    shared:SharedCalendar|SharedCalendar[]=[]){
     this.redirect=cfg.origin+'/interview/google-return.html'
+    const entries=Array.isArray(shared)?shared:[shared]
+    this.sharedCalendars=new Map(entries.map(entry=>[entry.store,entry]))
+    if(this.sharedCalendars.size!==entries.length||new Set(entries.map(entry=>entry.calendar)).size!==entries.length){
+      throw new Error('Shared calendars must be assigned to distinct stores.')
+    }
   }
   get configured(){return !!this.settings && new URL(this.cfg.origin).protocol==='https:'}
 
-  sharedCalendar(store:string){return this.shared?.store===store?this.shared.calendar:undefined}
+  sharedCalendar(store:string){return this.sharedCalendars.get(store)?.calendar}
 
   async sharedBusy(store:string,range:Interval,calendar:string){
-    if(!this.shared || !this.sharedCalendar(store) || calendar==='primary')throw unavailable()
-    if(!this.sharedToken || this.sharedToken.expires<=Date.now()){
+    const shared=this.sharedCalendars.get(store)
+    if(!shared || calendar!==shared.calendar)throw unavailable()
+    let cached=this.sharedTokens.get(shared.account)
+    if(!cached || cached.expires<=Date.now()){
       const metadata=await this.json('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',{
         headers:{'Metadata-Flavor':'Google'},
       })
       const runtime=z.object({access_token:z.string().min(1)}).safeParse(metadata)
       if(!runtime.success)throw unavailable()
       const credentials='https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/'
-      const data=await this.json(credentials+encodeURIComponent(this.shared.account)+':generateAccessToken',{
+      const data=await this.json(credentials+encodeURIComponent(shared.account)+':generateAccessToken',{
         method:'POST',headers:{Authorization:'Bearer '+runtime.data.access_token,'Content-Type':'application/json'},
         body:JSON.stringify({scope:[scope],lifetime:'900s'}),
       })
@@ -53,9 +61,10 @@ export class InterviewGoogle {
       if(!token.success)throw unavailable()
       const expires=Date.parse(token.data.expireTime)-60000
       if(expires<=Date.now())throw unavailable()
-      this.sharedToken={access:token.data.accessToken,expires}
+      cached={access:token.data.accessToken,expires}
+      this.sharedTokens.set(shared.account,cached)
     }
-    return this.query(this.sharedToken.access,calendar,range)
+    return this.query(cached.access,calendar,range)
   }
 
   authorization(store:string,raw:string,verifier:string,write=false){
@@ -169,7 +178,9 @@ export function googleFromEnvironment(cfg:Config){
   const clientId=process.env.GOOGLE_CALENDAR_CLIENT_ID,secret=process.env.GOOGLE_CALENDAR_CLIENT_SECRET
   const store=process.env.GOOGLE_SHARED_CALENDAR_STORE,calendar=process.env.GOOGLE_SHARED_CALENDAR_ID
   const account=process.env.GOOGLE_SHARED_CALENDAR_ACCOUNT
-  const shared=store||calendar||account?sharedCalendarSettings.parse({store,calendar,account}):undefined
+  const extra=process.env.GOOGLE_SHARED_CALENDARS
+  const shared=extra?z.array(sharedCalendarSettings).max(100).parse(JSON.parse(extra)):[]
+  if(store||calendar||account)shared.push(sharedCalendarSettings.parse({store,calendar,account}))
   return new InterviewGoogle(cfg,clientId&&secret?{clientId,secret}:undefined,fetch,shared)
 }
 export async function beginCalendarLink(db:DB,actor:Actor,store:string,calendar:string,google:InterviewGoogle){
@@ -231,7 +242,7 @@ export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range
     return []
   }
   const shared=google.sharedCalendar(store)
-  if(shared)return google.sharedBusy(store,range,alternate??shared)
+  if(shared&&(!alternate||alternate===shared))return google.sharedBusy(store,range,shared)
   const record=await calendarRecord(db,store)
   if((alternate||required)&&!record)throw unavailable()
   return record?google.busy(record,range,alternate):[]

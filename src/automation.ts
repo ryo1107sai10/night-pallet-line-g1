@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import { localPart, nextWindow, renderMessage, waitUntil } from '../public/studio/engine.mjs'
-import { audit, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
+import { audit, automationForStore, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
 import { channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
 import { customerById, emitDelivery, endCustomerRuns, ensureCustomer, stopFromLine, type Customer } from './customer.js'
 import { handoffUntil } from './line-handoff.js'
@@ -93,7 +93,7 @@ export async function updateAutomation(db:DB,cfg:Config,actor:Actor,id:string,in
 }) {
   await lockDispatch(db,actor.tenant_id)
   const location=await locationOf(db,id)
-  if (input.enabled && (!cfg.external || !cfg.automation || !input.contract || !location.eligible_at)) {
+  if (input.enabled && (!automationForStore(cfg,id) || !input.contract || !location.eligible_at)) {
     throw conflict()
   }
   if (input.enabled) {

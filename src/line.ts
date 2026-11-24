@@ -346,7 +346,8 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     // postback は認識した action と、実在する流入元IDだけを保存する（生データは保存しない）。
     const params=kind==='postback'&&event.postback?new URLSearchParams(event.postback.data):null
     const actionParam=params?.get('action')
-    const action=actionParam==='interview_link'||actionParam==='customer_link'?actionParam:null
+    const action=actionParam==='interview_link'||actionParam==='customer_link'?actionParam:
+      kind==='message'&&user&&phrase==='面談予約'&&c.purpose!=='customer'?'interview_link':null
     let sourceId:string|null=null
     const sourceParam=params?.get('source')
     if (action&&sourceParam&&uuid.safeParse(sourceParam).success) {

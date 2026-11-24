@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type pg from 'pg'
 import { z } from 'zod'
 import {
-  type Actor, type Config, type DB, Fault, audit, conflict, email, newId, once, purpose, revision,
+  type Actor, type Config, type DB, Fault, audit, automationForStore, conflict, email, newId, once, purpose, revision,
   route, scope, text, tx, uuid,
 } from './core.js'
 import { accept, authenticate, createInvite, disableStaff, gate, login, logout, memberRole,
@@ -714,7 +714,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const {rows:jobs}=await db.query(`SELECT j.id,j.status,j.reason,j.line_request_id,j.first_attempt_at,
       j.node_id,j.category FROM automatic_send j ORDER BY first_attempt_at DESC LIMIT 60`)
     const {rows:notes}=await db.query(`SELECT kind,node_id,detail,occurred_at FROM delivery_note ORDER BY id DESC LIMIT 60`)
-    return {...settings,process_enabled:cfg.automation===true&&cfg.external,jobs,notes}
+    return {...settings,process_enabled:automationForStore(cfg,settings.id),jobs,notes}
   }))
   api.patch('/stores/:store/automation',inStore(async(db,actor,req)=>{
     requireAdmin(actor)
