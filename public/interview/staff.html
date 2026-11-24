@@ -12,7 +12,7 @@
 <header class="hero"><h1>面談枠の管理</h1><p>公開した枠は応募者がLINEから選べます。</p></header>
 <div id="notice" class="notice" role="status" hidden></div>
 <div class="columns">
-<section class="box stack"><h2>面談スケジュール</h2><label class="field">店舗<select id="stores"></select></label><div id="slots"></div></section>
+<section class="box stack"><h2>面談スケジュール</h2><label class="field">店舗<select id="stores"></select></label><label><input type="checkbox" id="interviews-today" class="inline-check"> 今日の予約だけ表示</label><div id="slots"></div></section>
 <div class="stack">
 <section class="box stack"><h2>受付時間の設定</h2>
 <form id="interview-hours" class="stack" hidden>
@@ -36,7 +36,36 @@
 <label><input type="checkbox" name="published" checked class="inline-check"> 予約カレンダーに公開する</label>
 <button type="submit" class="primary">面談枠を登録する</button>
 </form><p id="slot-help"></p>
-</section><div id="interview-hosts" class="stack"></div><div id="availability" class="stack"></div></div></div>
+</section>
+<section class="box stack" id="slot-batch" hidden>
+<h2>面談枠をまとめて公開</h2>
+<form id="batch-form" class="stack">
+  <label class="field">採用用公式アカウント<select name="channel" required></select></label>
+  <label class="field" id="batch-host" hidden>面談担当者<select name="host"></select></label>
+  <div class="time-fields">
+    <label class="field">開始日<input type="date" name="first_day" required></label>
+    <label class="field">終了日<input type="date" name="last_day" required></label>
+  </div>
+  <fieldset><legend>受付する曜日</legend><div class="weekday-options">
+    <label><input type="checkbox" name="weekday" value="1" checked>月</label>
+    <label><input type="checkbox" name="weekday" value="2" checked>火</label>
+    <label><input type="checkbox" name="weekday" value="3" checked>水</label>
+    <label><input type="checkbox" name="weekday" value="4" checked>木</label>
+    <label><input type="checkbox" name="weekday" value="5" checked>金</label>
+    <label><input type="checkbox" name="weekday" value="6">土</label>
+    <label><input type="checkbox" name="weekday" value="0">日</label>
+  </div></fieldset>
+  <div class="time-fields">
+    <label class="field">開始時刻<select name="start"></select></label>
+    <label class="field">終了時刻<select name="end"></select></label>
+  </div>
+  <label class="field">1枠の所要時間<select name="minutes"></select></label>
+  <label class="field">確定後に表示する会場案内<input name="instructions" maxlength="800" required></label>
+  <button type="submit">公開前に確認する</button>
+</form>
+<div id="batch-preview" class="stack" aria-live="polite"></div>
+</section>
+<div id="interview-hosts" class="stack"></div><div id="availability" class="stack"></div></div></div>
 </main>
 </body>
 </html>

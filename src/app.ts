@@ -28,6 +28,7 @@ import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBo
   requestBooking, slotInput, bookingChange, staffBooking } from './booking.js'
 import { endScope, locationOf, updateAutomation } from './automation.js'
 import { changeInterviewVisibility, confirmInterview, interviewAccess, interviewApplicant, interviewCalendar, interviewChange,
+  interviewBatchInput, interviewBatchPublish, checkInterviewBatch, publishInterviewBatch,
   interviewCreate, interviewDates, interviewSlotInput, interviewVisibility, publishInterviewSlot, staffInterviewOverview,
   guestInterviewCreate, interviewHours, saveInterviewHours, startGuestInterviewSession,
   updateInterview, recruitmentSubject } from './interviews.js'
@@ -42,8 +43,9 @@ import { saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInp
 import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepareCampaign, stopCampaign } from './campaigns.js'
 import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
 import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitlistInput } from './interview-notices.js'
-import { serviceHistory } from './service-delivery.js'
-import { changeThread, classifyThread, handoffInput, changeHandoff, inboxClassify, inboxEdit, inboxMessages, inboxOverview, inboxText, writeInbox } from './inbox.js'
+import { retryService, serviceHistory } from './service-delivery.js'
+import { changeThread, classifyThread, createInboxTemplate, handoffInput, changeHandoff, inboxClassify, inboxEdit,
+  inboxMessages, inboxOverview, inboxTemplateEdit, inboxTemplateInput, inboxTemplates, inboxText, updateInboxTemplate, writeInbox } from './inbox.js'
 import { hostInput, queueGoogleSync, saveHost } from './interview-hosts.js'
 import { redeemInterviewLink } from './interview-link.js'
 import { completeStoreSetup, confirmStoreSetup, createRegistration, designateRegistrationMaster,
@@ -52,6 +54,7 @@ import { completeStoreSetup, confirmStoreSetup, createRegistration, designateReg
 import { CUSTOMER_LINK_SESSION_TTL_SECONDS, redeemCustomerLink } from './customer-link.js'
 import { workflowChecks } from './workflow-checks.js'
 import { dispatchLineWork, lineDispatchFromEnvironment, lineDispatchInput, lineDispatchPath } from './line-dispatch.js'
+import { operationsDashboard } from './operations-dashboard.js'
 
 
 
@@ -203,7 +206,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','supervisor-handoff.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','supervisor-handoff.mjs','dashboard.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -471,10 +474,32 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     return action(db,actor,req)
   },status)
   const workflow='/stores/:store/workflows/:purpose'
+  api.get('/dashboard',staff((db,actor)=>operationsDashboard(db,actor)))
   api.get(workflow+'/settings',workflowStaff((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
   api.get(workflow+'/checks',workflowStaff((db,_actor,req)=>workflowChecks(db,cfg,idOf(req,'store'),workPurpose(req),google.configured)))
-  api.get(workflow+'/delivery',workflowStaff((db,_actor,req)=>serviceHistory(db,workPurpose(req))))
+  api.get(workflow+'/delivery',workflowStaff((db,_actor,req)=>
+    serviceHistory(db,cfg,idOf(req,'store'),workPurpose(req),req.query.failures==='1')))
+  api.post(workflow+'/delivery/:delivery/retry',async(req,res)=>{
+    const store = idOf(req,'store'), usage = workPurpose(req)
+    const job=await staffAction(req,async(db,actor)=>{
+      await workflowAccess(db,actor,store,usage)
+      return retryService(db,cfg,actor,store,usage,idOf(req,'delivery'))
+    })
+    await wakeLine(store,job.channel_id,'service')
+    res.json({queued:true})
+  })
   api.get(workflow+'/inbox',workflowStaff((db,actor,req)=>inboxOverview(db,idOf(req,'store'),workPurpose(req),actor.platform?actor.id:undefined)))
+  const templates=workflow+'/inbox/templates'
+  api.get(templates,workflowStaff((db,_actor,req)=>inboxTemplates(db,cfg,idOf(req,'store'),workPurpose(req))))
+  api.post(templates,workflowStaff((db,actor,req)=>
+    createInboxTemplate(db,cfg,actor,idOf(req,'store'),workPurpose(req),keyOf(req),inboxTemplateInput.parse(req.body)),201))
+  api.patch(templates+'/:template',workflowStaff((db,actor,req)=>{
+    const {revision:version,...input}=inboxTemplateEdit.parse(req.body)
+    return updateInboxTemplate(db,cfg,actor,idOf(req,'store'),workPurpose(req),idOf(req,'template'),version,input)
+  }))
+  api.delete(templates+'/:template',workflowStaff((db,actor,req)=>
+    updateInboxTemplate(db,cfg,actor,idOf(req,'store'),workPurpose(req),idOf(req,'template'),
+      z.strictObject({revision}).parse(req.body).revision)))
   api.get(workflow+'/inbox/:thread',workflowStaff((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),workPurpose(req),idOf(req,'thread'))))
   api.patch(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
     changeThread(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),inboxEdit.parse(req.body))))
@@ -530,7 +555,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.post(campaigns+'/:campaign/approve',inStore((db,actor,req)=>
     approveCampaign(db,cfg,actor,idOf(req,'store'),idOf(req,'campaign'),approvalInput.parse(req.body))))
   api.post(campaigns+'/:campaign/stop',inStore((db,actor,req)=>stopCampaign(db,actor,idOf(req,'store'),idOf(req,'campaign'))))
-  api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'),cfg)))
+  api.get('/stores/:store/interviews',interviewStaff((db,_actor,req)=>staffInterviewOverview(db,idOf(req,'store'),cfg,google)))
+  api.post('/stores/:store/interviews/slots/batch/preview',interviewStaff((db,_actor,req)=>
+    checkInterviewBatch(db,cfg,idOf(req,'store'),interviewBatchInput.parse(req.body),google)))
+  api.post('/stores/:store/interviews/slots/batch',interviewStaff((db,actor,req)=>
+    publishInterviewBatch(db,cfg,actor,idOf(req,'store'),keyOf(req),interviewBatchPublish.parse(req.body),google),201))
   api.patch('/stores/:store/interviews/hours',interviewStaff((db,actor,req)=>
     saveInterviewHours(db,actor,idOf(req,'store'),interviewHours.parse(req.body))))
   const availability='/stores/:store/interviews/availability'

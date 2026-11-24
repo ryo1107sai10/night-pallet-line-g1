@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import { newId, scope, seal, tx, unseal, type Config, type DB, type Route } from './core.js'
+import { audit, automationForStore, Fault, newId, scope, seal, tx, unseal, type Actor, type Config, type DB, type Route } from './core.js'
 import { channel, channelCredentials, channelReady, messagingReady, testDeliveryConfirmed, type Channel, type LineAPI } from './line.js'
 import { deliveryScope, messageBudget } from './delivery-budget.js'
 import { locationOf } from './automation.js'
@@ -110,9 +110,57 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
     ...(manage?['予約の確認・変更・取消はこちら',manage]:[])].filter(line=>line!=='').join('\n')}
 }
 
-export async function serviceHistory(db:DB,purpose:WorkflowSubject['purpose']){
-  return (await db.query(`SELECT id,kind,status,next_at,first_attempt_at,accepted_at,line_request_id,reason
-    FROM service_delivery WHERE purpose=$1 ORDER BY coalesce(first_attempt_at,least(next_at,expires_at)) DESC LIMIT 100`,[purpose])).rows
+const quotaFailures = "'LINEの通数を確認できません','LINEの月間通数に達しました'"
+const knownRejection = `(d.status='failed' AND d.reason='LINEの送信制限に達しました'
+  OR d.status='cancelled' AND d.reason IN (${quotaFailures}))`
+export const deliveryNeedsAttention = `(d.status IN ('failed','unknown') OR ${knownRejection})`
+export const automatedLineDeliveries = `
+  SELECT id,store_id,channel_id,'customer' AS purpose,'step' AS kind,status,next_at,first_attempt_at,accepted_at,line_request_id,reason
+    FROM automatic_send WHERE store_id=$1 AND $2='customer'
+  UNION ALL
+  SELECT id,store_id,channel_id,'recruitment','step',status,next_at,first_attempt_at,accepted_at,line_request_id,reason
+    FROM applicant_send WHERE store_id=$1 AND $2='recruitment'
+  UNION ALL
+  SELECT id,store_id,channel_id,'customer','campaign',status,next_at,first_attempt_at,accepted_at,line_request_id,reason
+    FROM campaign_delivery WHERE store_id=$1 AND $2='customer'`
+const canRetryDelivery = `${knownRejection} AND d.kind IN ('chat_reply','interview_confirm')
+  AND d.accepted_at IS NULL AND d.manual_retry_at IS NULL AND d.attempt<3
+  AND d.first_attempt_at > now()-interval '30 minutes' AND d.expires_at > now()
+  AND d.generation=c.generation AND d.scope_version=concat_ws(':',t.delivery_version,s.delivery_version,c.delivery_version)
+  AND NOT (c.stopped OR s.stopped OR t.stopped)
+  AND CASE WHEN d.kind='chat_reply' THEN s.inbox_enabled ELSE s.reminders_enabled END
+  AND s.contract_active AND s.eligible_at IS NOT NULL`
+
+export async function serviceHistory(db:DB,cfg:Config,store:string,purpose:WorkflowSubject['purpose'],failures=false){
+  return (await db.query(`WITH history AS (
+    SELECT d.id,d.channel_id,d.kind,d.status,d.next_at,d.first_attempt_at,d.accepted_at,d.line_request_id,d.reason,
+      (${deliveryNeedsAttention}) AS needs_attention,coalesce($3 AND ${canRetryDelivery},false) AS retryable,
+      coalesce(d.first_attempt_at,least(d.next_at,d.expires_at)) AS sort_at
+    FROM service_delivery d JOIN channel c ON c.id=d.channel_id JOIN store s ON s.id=d.store_id
+      JOIN tenant t ON t.id=d.tenant_id WHERE d.store_id=$1 AND d.purpose=$2
+    UNION ALL
+    SELECT id,channel_id,kind,status,next_at,first_attempt_at,accepted_at,line_request_id,reason,
+      status IN ('failed','unknown'),false,coalesce(first_attempt_at,next_at) FROM (${automatedLineDeliveries}) automated
+  )
+  SELECT h.id,h.kind,h.status,h.next_at,h.first_attempt_at,h.accepted_at,h.line_request_id,h.reason,
+    h.needs_attention,h.retryable,c.label FROM history h JOIN channel c ON c.id=h.channel_id
+    WHERE NOT $4 OR needs_attention AND first_attempt_at>=now()-interval '7 days'
+    ORDER BY h.sort_at DESC NULLS LAST,h.id LIMIT 100`,
+  [store,purpose,automationForStore(cfg,store),failures])).rows
+}
+
+export async function retryService(db:DB,cfg:Config,actor:Actor,store:string,purpose:WorkflowSubject['purpose'],id:string){
+  const unavailable=()=>new Fault(409,'LINE_RETRY_UNAVAILABLE','再送できる状態ではありません。最新の送信履歴を確認してください。')
+  if(!automationForStore(cfg,store))throw unavailable()
+  await lockDispatch(db,actor.tenant_id)
+  const {rows:[job]}=await db.query<{channel_id:string}>(`UPDATE service_delivery d
+    SET status='queued',next_at=now(),manual_retry_at=now(),reason=NULL
+    FROM channel c,store s,tenant t WHERE d.id=$1 AND d.store_id=$2 AND d.purpose=$3
+    AND c.id=d.channel_id AND s.id=d.store_id AND t.id=d.tenant_id AND ${canRetryDelivery}
+    RETURNING d.channel_id`,[id,store,purpose])
+  if(!job)throw unavailable()
+  await audit(db,actor.tenant_id,store,actor.id,'line.service.retry',id)
+  return job
 }
 
 async function markStopped(db:DB,job:ServiceJob,reason:string){
@@ -174,17 +222,20 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
       (quota===null?'LINEの通数を確認できません':quota<=0?'LINEの月間通数に達しました':null)
     if(!message||hold){await markStopped(db,fresh,hold??'通知対象外');return}
     return {promise:api.push(channelCredentials(cfg,connection),message.to,job.id,message.body)
-      .catch(()=>({status:'unknown',requestId:null,authError:false}))}
+      .catch(()=>({status:'unknown',requestId:null,authError:false,statusCode:undefined}))}
   })
   if(!send)return true
   const result=await send.promise
   await locked(async db=>{
     const status=job.attempt>1&&result.status==='failed'?'unknown':result.status
+    const reason=status==='failed'?(result.authError?'LINE認証に失敗しました':
+      result.statusCode===429?'LINEの送信制限に達しました':
+      result.statusCode===400?'LINEが宛先または内容を受け付けませんでした':'LINEが送信要求を拒否'):null
     await db.query(`UPDATE service_delivery SET status=$3,line_request_id=$4,
       accepted_at=CASE WHEN $3='accepted' THEN now() ELSE accepted_at END,
       next_at=CASE WHEN $3='unknown' AND $6 AND attempt<3 AND next_at<>'infinity' THEN now()+interval '1 minute' ELSE 'infinity' END,
       reason=coalesce(reason,$5) WHERE id=$1 AND attempt=$2 AND status='submitting'`,
-    [job.id,job.attempt,status,result.requestId,status==='failed'?'LINEが送信要求を拒否':null,result.status==='unknown'])
+    [job.id,job.attempt,status,result.requestId,reason,result.status==='unknown'])
   })
   return true
 }

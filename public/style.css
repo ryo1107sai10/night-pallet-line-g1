@@ -31,6 +31,11 @@ button.danger { background: #942e3c; border-color: #942e3c; }
 button:disabled { opacity: .48; cursor: default; }
 :focus-visible { outline: 3px solid #3a75ce; outline-offset: 3px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,260px),1fr)); gap: 12px; }
+.dashboard-card { min-width: 0; padding: 14px; border: 1px solid #d7dfec; border-radius: 10px; background: #f8faff; }
+.dashboard-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 8px; }
+.dashboard-actions a { color: #223d72; padding-block: 6px; }
+#operations-dashboard p:empty { display: none; }
 .check { display: flex; align-items: center; gap: 10px; font-weight: 400; min-height: 44px; }
 input[type=checkbox] { flex: 0 0 20px; width: 20px; height: 20px; }
 details { margin: 12px 0; }

@@ -12,7 +12,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
     '020_tour_revisions','021_supervisor_handoff','022_interview_link_tokens','023_liff_free_links',
     '024_registration_flow','025_remove_liff','026_recruitment_delivery','027_agency_master_self_service',
-    '028_registered_supervision']
+    '028_registered_supervision','029_operations_usability']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -46,7 +46,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.workflow_contact,night.workflow_menu,night.service_delivery TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.interview_waitlist TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.line_handoff TO ${role}`)
-    await db.query(`GRANT SELECT,INSERT,UPDATE ON night.inbox_thread,night.inbox_message TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE ON night.inbox_thread,night.inbox_message,night.inbox_template TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.interview_host,night.interview_google_sync TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.interview_google_session,night.interview_google_calendar TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.line_module_session TO ${role}`)

@@ -38,8 +38,10 @@ export async function saveHost(db:DB,actor:Actor,store:string,data:z.infer<typeo
 
 export async function requireHost(db:DB,store:string,id:string){
   await requireFeature(db,store,'interviewers_enabled')
-  const result=await db.query('SELECT 1 FROM interview_host WHERE store_id=$1 AND id=$2 AND active',[store,id])
-  if(!result.rowCount)throw missing()
+  const {rows:[host]}=await db.query<{calendar_id:string|null}>(
+    'SELECT calendar_id FROM interview_host WHERE store_id=$1 AND id=$2 AND active',[store,id])
+  if(!host)throw missing()
+  return host
 }
 
 export async function queueGoogleSync(db:DB,store:string,booking?:string){

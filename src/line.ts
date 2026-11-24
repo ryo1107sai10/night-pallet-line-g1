@@ -243,7 +243,7 @@ export class LineAPI {
       return { status: 'accepted', requestId: acceptedId ?? requestId }
     }
     if (response.status >= 500) return { status: 'unknown', requestId }
-    return { status: 'failed', requestId, authError: [401,403].includes(response.status) }
+    return { status: 'failed', requestId, authError: [401,403].includes(response.status), statusCode: response.status }
   }
 }
 
