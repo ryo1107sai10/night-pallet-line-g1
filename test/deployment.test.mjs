@@ -96,3 +96,29 @@ else if(args[0]==='run'&&args[1]==='services'&&args[2]==='describe'){
     assert.ok(!(await readFile(join(dir,'calls'),'utf8')).includes('update-traffic'))
   } finally { await rm(dir,{recursive:true,force:true}) }
 })
+
+test('定期実行の新規作成と更新を区別し、専用アカウントで1分ごとにジョブだけを実行する',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'night-scheduler-'))
+  try{
+    await writeFile(join(dir,'gcloud'),`#!/usr/bin/env node
+import {appendFileSync} from 'node:fs';
+const args=process.argv.slice(2),root=process.env.NIGHT_TEST_DIR;
+appendFileSync(root+'/calls',JSON.stringify(args)+'\\n');
+if(args[0]==='scheduler'&&args[2]==='list'&&process.env.NIGHT_EXISTING==='true')console.log('projects/sample/locations/asia-northeast1/jobs/night-pro-line-notices');
+if(args[0]==='scheduler'&&args[2]==='update'&&args.some(a=>a.startsWith('--headers=')))process.exit(2);
+`,{mode:0o700})
+    for(const existing of ['false','true']){
+      const result=spawnSync('bash',['deploy/schedule-worker.sh','sample-project','1'],
+        {env:{...process.env,PATH:dir+':'+process.env.PATH,NIGHT_TEST_DIR:dir,NIGHT_EXISTING:existing},encoding:'utf8'})
+      assert.equal(result.status,0,result.stderr)
+      const calls=(await readFile(join(dir,'calls'),'utf8')).trim().split('\n').map(JSON.parse)
+      const setup=calls.find(c=>c[0]==='scheduler'&&['create','update'].includes(c[2]))
+      assert.equal(setup[2],existing==='true'?'update':'create')
+      assert.ok(setup.includes('--schedule=*/1 * * * *'))
+      assert.ok(setup.includes('--http-method=POST'))
+      assert.ok(setup.includes('--oauth-service-account-email=night-schedule-invoker@sample-project.iam.gserviceaccount.com'))
+      assert.ok(setup.includes('--uri=https://run.googleapis.com/v2/projects/sample-project/locations/asia-northeast1/jobs/night-pro-line-worker:run'))
+      await rm(join(dir,'calls'))
+    }
+  }finally{await rm(dir,{recursive:true,force:true})}
+})

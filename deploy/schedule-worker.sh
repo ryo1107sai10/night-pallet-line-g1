@@ -21,11 +21,12 @@ gcloud run jobs add-iam-policy-binding "$worker" --project "$project" --region "
 existing=$(gcloud scheduler jobs list --project "$project" --location "$region" \
   --filter="name:/$schedule" --format='value(name)')
 operation=create
-if [[ -n "$existing" ]]; then operation=update; fi
+headers_flag=--headers=Content-Type=application/json
+if [[ -n "$existing" ]]; then operation=update; headers_flag=--update-headers=Content-Type=application/json; fi
 gcloud scheduler jobs "$operation" http "$schedule" --project "$project" --location "$region" \
   --schedule="*/$interval * * * *" --time-zone=Asia/Tokyo --uri="$uri" --http-method=POST \
   --oauth-service-account-email="$account" --oauth-token-scope=https://www.googleapis.com/auth/cloud-platform \
-  --headers=Content-Type=application/json --message-body='{}' --attempt-deadline=30s \
+  "$headers_flag" --message-body='{}' --attempt-deadline=30s \
   --max-retry-attempts=0 --quiet
 # Scheduling never enables a store or overrides the application's send gates.
 gcloud scheduler jobs describe "$schedule" --project "$project" --location "$region" \
