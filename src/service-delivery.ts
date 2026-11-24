@@ -120,7 +120,7 @@ async function markStopped(db:DB,job:ServiceJob,reason:string){
     [job.id,job.attempt>1?'unknown':'cancelled',reason])
 }
 
-export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route){
+export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route,immediate=false){
   if(!cfg.external||!cfg.automation)return
   const locked=<T>(work:(db:DB)=>Promise<T>)=>tx(pool,async db=>{
     await scope(db,r.tenant_id,r.store_id)
@@ -130,20 +130,21 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
   const claim=await locked(async db=>{
     const {rows:[pending]}=await db.query<ServiceJob>(`SELECT * FROM service_delivery
       WHERE channel_id=$1 AND status IN ('queued','submitting','unknown') AND next_at<=now()
-      ORDER BY next_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[r.id])
+      AND (NOT $2::boolean OR kind<>'interview_reminder')
+      ORDER BY next_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[r.id,immediate])
     if(!pending)return
     if(pending.attempt>=3||+pending.expires_at<=Date.now()||
       pending.first_attempt_at&&Date.now()-+pending.first_attempt_at>=30*60000){
       await db.query("UPDATE service_delivery SET status=$2,next_at='infinity',reason='配信期限切れ' WHERE id=$1",
         [pending.id,pending.attempt?'unknown':'cancelled'])
-      return
+      return null
     }
     const {rows:[job]}=await db.query<ServiceJob>(`UPDATE service_delivery SET status='submitting',
       attempt=attempt+1,first_attempt_at=coalesce(first_attempt_at,now()),next_at=now()+interval '45 seconds'
       WHERE id=$1 RETURNING *`,[pending.id])
     return {job,c:await channel(db,r.id)}
   })
-  if(!claim)return
+  if(!claim)return claim===null
   const {job,c}=claim
   let quota:number|null=null
   try{quota=await api.quota(channelCredentials(cfg,c))}catch{/* LINE quota must be available before a send. */}
@@ -175,7 +176,7 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     return {promise:api.push(channelCredentials(cfg,connection),message.to,job.id,message.body)
       .catch(()=>({status:'unknown',requestId:null,authError:false}))}
   })
-  if(!send)return
+  if(!send)return true
   const result=await send.promise
   await locked(async db=>{
     const status=job.attempt>1&&result.status==='failed'?'unknown':result.status
@@ -185,4 +186,5 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
       reason=coalesce(reason,$5) WHERE id=$1 AND attempt=$2 AND status='submitting'`,
     [job.id,job.attempt,status,result.requestId,status==='failed'?'LINEが送信要求を拒否':null,result.status==='unknown'])
   })
+  return true
 }

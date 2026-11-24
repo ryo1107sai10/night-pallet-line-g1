@@ -169,6 +169,6 @@ export async function writeInbox(db:DB,cfg:Config,actor:Actor,store:string,use:U
     actor.id,data.internal?'internal':'outgoing',seal(cfg,'inbox-message:'+message,data.body)])
     await db.query('UPDATE inbox_thread SET revision=revision+1,unread=false WHERE id=$1',[id])
     await audit(db,actor.tenant_id,store,actor.id,data.internal?'inbox.note':'inbox.reply',id)
-    return {id:message,status:data.internal?'saved':'queued'}
+    return {id:message,status:data.internal?'saved':'queued',channel:job?thread.channel_id:undefined}
   })
 }

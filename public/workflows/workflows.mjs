@@ -79,7 +79,7 @@ const blankField=()=>({key:crypto.randomUUID(),kind:'text',label:'',required:fal
 const stages={applied:'応募',interviewed:'面談実施',trial_scheduled:'体入予定',trial_done:'体入実施',hired:'入店',withdrawn:'辞退・終了'}
 const allowed={applied:['interviewed','withdrawn'],interviewed:['trial_scheduled','hired','withdrawn'],
   trial_scheduled:['trial_scheduled','trial_done','interviewed','withdrawn'],trial_done:['hired','withdrawn'],hired:[],withdrawn:[]}
-let stores,current,openThread,agency=false,view=0
+let stores,current,openThread,refreshOpenChat,agency=false,view=0
 let actor
 
 function formEditor(root,data,path,refresh,use){
@@ -393,12 +393,16 @@ function inbox(root,data,store,path,refresh,intake=false){
       }
       const row=details(title,panel)
       row.classList.add('record')
-      row.ontoggle=async()=>{
-        if(!row.open){if(openThread===threadPath)openThread=undefined;return}
-        openThread=threadPath
-        chat.replaceChildren(el('p','読み込み中…'))
+      let loading=false,previous
+      const loadMessages=async()=>{
+        if(!row.isConnected||!row.open||loading)return
+        loading=true
         try{
           const messages=await api(threadPath)
+          if(!row.isConnected||!row.open)return
+          const snapshot=JSON.stringify(messages)
+          if(snapshot===previous)return
+          previous=snapshot
           chat.replaceChildren(...messages.map(message=>{
             const note=el('article',null,'record')
             const direction={incoming:'受信',outgoing:'公式LINEからの返信',internal:'内部メモ'}[message.direction]
@@ -407,7 +411,19 @@ function inbox(root,data,store,path,refresh,intake=false){
             return note
           }))
           if(!messages.length)chat.append(el('p','表示できるメッセージがありません。'))
-        }catch(error){chat.replaceChildren(el('p',error.message))}
+        }catch(error){
+          if(previous===undefined)chat.replaceChildren(el('p',error.message))
+        }finally{loading=false}
+      }
+      row.ontoggle=()=>{
+        if(!row.open){
+          if(refreshOpenChat===loadMessages){openThread=undefined;refreshOpenChat=undefined}
+          return
+        }
+        openThread=threadPath
+        refreshOpenChat=loadMessages
+        if(previous===undefined)chat.replaceChildren(el('p','読み込み中…'))
+        void loadMessages()
       }
       row.open=openThread===threadPath
       rows.append(row)
@@ -422,6 +438,7 @@ function inbox(root,data,store,path,refresh,intake=false){
 
 async function render(){
   const marker=++view
+  refreshOpenChat=undefined
   const store=stores.find(entry=>entry.id===$('#store').value)
   if(!store)throw new Error('利用できる店舗がありません。')
   const use=$('#use').value
@@ -473,6 +490,10 @@ async function render(){
   if(key==='checks')checks(panel,data)
   content.replaceChildren(panel)
 }
+
+setInterval(()=>{
+  if(!document.hidden)void refreshOpenChat?.()
+},3000)
 
 async function start(){
   const session=await api('/session')

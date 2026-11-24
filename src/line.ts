@@ -275,7 +275,7 @@ function decodeWebhook(raw:Buffer,signature:string,secret:string) {
 
 export async function receiveWebhook(pool:pg.Pool,cfg:Config,id:string,raw:Buffer,signature:string) {
   if (!/^[A-Za-z0-9+/]{43}=$/.test(signature)) throw signatureError()
-  await tx(pool,async db=>{
+  return tx(pool,async db=>{
     const r=await route(db,id)
     if (r.module_channel_id) throw missing()
     await scope(db,r.tenant_id,r.store_id)
@@ -285,7 +285,7 @@ export async function receiveWebhook(pool:pg.Pool,cfg:Config,id:string,raw:Buffe
     if ('module' in cred) throw signatureError()
     const payload=decodeWebhook(raw,signature,cred.channel_secret)
     if (payload.destination!==c.bot_user_id) throw signatureError()
-    await recordWebhookEvents(db,cfg,c,payload.events,await inboxEnabled(db,c.store_id))
+    if (await recordWebhookEvents(db,cfg,c,payload.events,await inboxEnabled(db,c.store_id))) return r
   })
 }
 
@@ -293,7 +293,7 @@ export async function receiveModuleWebhook(pool:pg.Pool,cfg:Config,raw:Buffer,si
   const module=requireModule(cfg)
   const payload=decodeWebhook(raw,signature,module.secret)
   if (!payload.events.length) return
-  await tx(pool,async db=>{
+  return tx(pool,async db=>{
     const {rows:[r]}=await db.query<Route>('SELECT * FROM channel_route WHERE module_channel_id=$1 AND module_bot_id=$2',
       [module.id,payload.destination])
     if (!r) return
@@ -302,6 +302,7 @@ export async function receiveModuleWebhook(pool:pg.Pool,cfg:Config,raw:Buffer,si
     const c=await channel(db,r.id)
     const inbox=await inboxEnabled(db,c.store_id)
     const events=payload.events.sort((a,b)=>a.timestamp-b.timestamp)
+    let requestedLink=false
     for (const event of events) {
       if (event.timestamp>Date.now()+5*60000 || !event.mode || event.timestamp<+(c.module_status_at ?? 0)) continue
       if (event.module && event.module.botId!==c.bot_user_id) continue
@@ -323,9 +324,10 @@ export async function receiveModuleWebhook(pool:pg.Pool,cfg:Config,raw:Buffer,si
       }
       if ((state==='active' && !['module','activated','botResumed'].includes(event.type)) ||
         (state==='standby' && event.type==='unsend')) {
-        await recordWebhookEvents(db,cfg,c,[event],inbox)
+        if (await recordWebhookEvents(db,cfg,c,[event],inbox)) requestedLink=true
       }
     }
+    if (requestedLink) return r
   })
 }
 
@@ -335,6 +337,7 @@ async function inboxEnabled(db:DB,store:string) {
 }
 
 async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typeof eventSchema>[],inbox:boolean) {
+  let requestedLink=false
   for (const event of events) {
     if (event.timestamp>Date.now()+5*60000) continue
     const source=event.source?.type==='user' ? event.source.userId : undefined
@@ -372,6 +375,8 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
       ON CONFLICT(channel_id,event_id) DO NOTHING`,
     [c.tenant_id,c.store_id,c.id,event.webhookEventId,c.generation,new Date(event.timestamp),test?'test_link':kind,eventPurpose,key,recipient,stopSignal,action,sourceId])
     if (!written.rowCount || !key || !user) continue
+    if (recipient && action && (kind==='message'||kind==='postback') &&
+        Date.now()-event.timestamp<10*60000) requestedLink=true
     if (test) {
       const hash=digest(test[1])
       await db.query(`UPDATE tester SET verified_at=now(),user_key=$2,recipient=$3 WHERE code_hash=$1 AND channel_id=$4
@@ -381,6 +386,7 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
         body:event.message?.type==='text'?event.message.text:undefined,unsent:event.unsend?.messageId,when:new Date(event.timestamp)},inbox)
     }
   }
+  return requestedLink
 }
 
 export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.infer<typeof purpose>) {

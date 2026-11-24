@@ -14,6 +14,7 @@ import { bootstrap, inviteSupervisor, migrate } from '../dist/setup.js'
 import { LineAPI, userKey } from '../dist/line.js'
 import { InterviewGoogle } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
+import { lineDispatchPath } from '../dist/line-dispatch.js'
 
 // E2E検収（LIFF撤去後の最終状態）。一続きの物語として検証する:
 // 店舗の立ち上げ→Messaging APIのみの接続→通常のやり取り→面談予約の一生→
@@ -42,6 +43,7 @@ let pg, owner, pool, server, dir, base, line, google
 let platform, master, tenant, storeId, created
 let recruit, customer
 const pushes = []
+const dispatches = []
 const signed = raw => createHmac('sha256', channelSecret).update(raw).digest('base64')
 const send = (url, options = {}) => fetch(base + url, { redirect: 'error', ...options })
 const idempotency = () => ({ 'Idempotency-Key': randomUUID() })
@@ -72,6 +74,22 @@ const worker = () => workOnce(pool, cfg, line, google)
 const flush = async (n = 3) => { for (let i = 0; i < n; i++) await worker() }
 const pushesTo = who => pushes.filter(item => item.to === who)
 const rawOf = text => text?.match(/\?t=([A-Za-z0-9_-]{43})/)?.[1]
+const dispatchRequest = (input, authorization) => send(lineDispatchPath, {
+  method: 'POST', headers: {'Content-Type': 'application/json', Authorization: authorization},
+  body: JSON.stringify(input),
+})
+async function processTask(source, channel) {
+  const index = dispatches.findIndex(task => task.channel === channel && task.source === source)
+  assert.notEqual(index, -1, 'コミット後に配信タスクが登録されること')
+  const [input] = dispatches.splice(index, 1)
+  const rejected = await dispatchRequest(input, 'Bearer invalid')
+  assert.equal(rejected.status, 403)
+  const results = await Promise.all([
+    dispatchRequest(input, 'Bearer test-worker'),
+    dispatchRequest(input, 'Bearer test-worker'),
+  ])
+  assert.ok(results.every(response => response.status === 204))
+}
 
 const eventFor = (id, type, who, extra = {}) => ({
   webhookEventId: id, type, timestamp: Date.now(), source: { type: 'user', userId: who }, ...extra,
@@ -145,7 +163,10 @@ before(async () => {
   line = new LineAPI(fetchLine)
   google = new InterviewGoogle(cfg, { clientId: 'calendar-client', secret: 'calendar-secret' },
     async () => Response.json({ calendars: {} }))
-  server = createApp(pool, cfg, line, google).listen(0, '127.0.0.1')
+  server = createApp(pool, cfg, line, google, {
+    wake: async input => { dispatches.push(input) },
+    verify: async authorization => authorization === 'Bearer test-worker',
+  }).listen(0, '127.0.0.1')
   await new Promise(resolve => server.once('listening', resolve))
   base = 'http://127.0.0.1:' + server.address().port
 
@@ -320,7 +341,6 @@ test('段落3: 顧客のメッセージが受信箱に保存され、管理側�
   await inbound(customer, botC, [
     eventFor('e2e-c-message', 'message', userC, { message: { id: 'e2e-msg-1', type: 'text', text } }),
   ])
-  await flush(2)
   const inboxPath = '/stores/' + storeId + '/workflows/customer/inbox'
   const overview = expect(await request(inboxPath, { cookie: master }), 200)
   assert.equal(overview.threads.length, 1, '受信箱にスレッドができること')
@@ -336,8 +356,10 @@ test('段落3: 顧客のメッセージが受信箱に保存され、管理側�
   const reply = 'お問い合わせありがとうございます。明日19時にお待ちしております。'
   expect(await post(inboxPath + '/' + thread.id, master,
     { revision: handling.revision, body: reply, internal: false }, idempotency()), 201)
+  await processTask('service', customer)
+  assert.ok(pushesTo(userC).some(item => item.text === reply), '返信が定期実行より先に送られること')
   await flush(2)
-  assert.ok(pushesTo(userC).some(item => item.text === reply), '管理側の返信（Push）が顧客に届くこと')
+  assert.equal(pushesTo(userC).filter(item => item.text === reply).length, 1, '管理側の返信が1通だけ届くこと')
   const sent = expect(await request(inboxPath + '/' + thread.id, { cookie: master }), 200)
   assert.ok(sent.some(item => item.direction === 'outgoing' && item.status === 'accepted'),
     '送信が受け付け済みとして履歴に残ること')
@@ -353,13 +375,18 @@ test('段落4: 面談枠の公開から、トークンURL・予約・採用ケ�
   }, idempotency()), 201).id
 
   await inbound(recruit, botR, [eventFor('e2e-a-follow', 'follow', userA)])
-  await inbound(recruit, botR, [
-    eventFor('e2e-a-postback', 'postback', userA, { postback: { data: 'action=interview_link' } }),
-  ])
-  await flush(2)
+  const requestLink = eventFor('e2e-a-keyword', 'message', userA, {
+    message: {id: 'e2e-a-message', type: 'text', text: '面談予約'},
+  })
+  await inbound(recruit, botR, [requestLink])
+  await inbound(recruit, botR, [requestLink])
+  assert.equal(dispatches.filter(task => task.channel === recruit && task.source === 'webhook').length, 1)
+  assert.equal(pushesTo(userA).length, 0, 'Webhook応答はLINEへの配信を待たないこと')
+  await processTask('webhook', recruit)
+  assert.equal(pushesTo(userA).length, 1, '同時にタスクを受けても定期実行前に1通だけ送ること')
   const tokens = await read('SELECT * FROM interview_link_token WHERE channel_id=$1 AND applicant_key=$2',
     [recruit, keyed(cfg, 'interview:' + recruit + ':' + userA)])
-  assert.equal(tokens.rowCount, 1, 'postbackで面談トークンが発行されること')
+  assert.equal(tokens.rowCount, 1, 'トークの「面談予約」で面談トークンが発行されること')
   const linkPush = pushesTo(userA).find(item => item.text.includes('/reserve/'))
   assert.ok(linkPush, '面談リンク（トークンURL）がPushで届くこと')
   assert.ok(!linkPush.text.includes('liff.line.me'), 'LIFF URLが混入しないこと')
@@ -372,6 +399,7 @@ test('段落4: 面談枠の公開から、トークンURL・予約・採用ケ�
   assert.ok(redeemed.cookie?.startsWith('night_interview='))
   applicantCookie = redeemed.cookie
   expect(await put('/interview/notices', applicantCookie, { enabled: true }), 200)
+  await processTask('service', recruit)
 
   const calendar = expect(await request('/interview/calendar?start=' + dateA, { cookie: applicantCookie }), 200)
   assert.ok(calendar.slots.some(slot => slot.id === slotA && slot.available), '公開した面談枠がカレンダーに出ること')
@@ -386,7 +414,11 @@ test('段落4: 面談枠の公開から、トークンURL・予約・採用ケ�
   const manage = after.rows.find(row => row.booking_id === bookingId)
   assert.ok(manage, '変更・取消用トークンが発行されること')
 
+  await processTask('service', recruit)
+  assert.ok(pushesTo(userA).some(item => item.text.includes('面談予約が確定しました。')),
+    '確定通知が定期実行より先に送られること')
   await flush(3)
+  assert.equal(pushesTo(userA).filter(item => item.text.includes('面談予約が確定しました。')).length, 1)
   const confirmPush = pushesTo(userA).find(item => item.text.includes('面談予約が確定しました。'))
   assert.ok(confirmPush, '確定通知がPushで届くこと')
   manageRaw = rawOf(confirmPush.text)
