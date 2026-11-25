@@ -24,7 +24,7 @@ let applicantCatalog={enabled:false,definitions:[]}
 let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,original='',dirty=false,tab='edit',part='workspace',simulation
 let busy=false, ready=false, preset='unbooked', localCreateKey
 let currentSession, viewMode='basic', zoom=1, autosave=true, saveTimer, savePromise=null, saveIssue='', historyKey='', historyTime=0
-let undoStack=[],redoStack=[],searchText='',folderFilter='',libraryKind='all',matrix=null,branchOpen=new Map(),pendingMeta={folder:'',is_template:false}
+let undoStack=[],redoStack=[],searchText='',folderFilter='',libraryKind='all',matrix=null,branchOpen=new Map(),pendingMeta={folder:'',is_template:false},recoveryAvailable=true
 const recoveryKey=()=>store&&currentSession?'npl-studio-recovery-v2:'+currentSession.actor.id+':'+store.id:null
 function recoverRead(){try{const k=recoveryKey();return k?JSON.parse(localStorage.getItem(k)):null}catch{return null}}
 function recoverWrite(){
@@ -33,7 +33,8 @@ function recoverWrite(){
   try{
     if(dirty&&graph)localStorage.setItem(k,JSON.stringify({id:scenario?.id??null,key:localCreateKey??null,revision:scenario?.revision??null,graph,meta:pendingMeta,at:Date.now()}))
     else{const existing=recoverRead();if(!existing||existing.id===(scenario?.id??null)||localCreateKey&&existing.key===localCreateKey)localStorage.removeItem(k)}
-  }catch{}
+    recoveryAvailable=true
+  }catch{recoveryAvailable=false}
 }
 function clearRecovery(){try{const k=recoveryKey();if(k)localStorage.removeItem(k)}catch{}}
 function recordHistory(key=''){
@@ -61,7 +62,7 @@ function scheduleSave(){
 }
 function updateSaveIndicator(){
   const status=$('#save-state')
-  if(status){status.textContent=savePromise?'保存中…':saveIssue?'保存失敗：'+saveIssue:dirty?(autosave?'下書き・自動保存待ち':'未保存（端末保護）'):'下書き保存済み';status.dataset.state=saveIssue?'error':dirty?'dirty':'saved'}
+  if(status){status.textContent=savePromise?'保存中…':saveIssue?'保存失敗：'+saveIssue:dirty?(autosave?'下書き・自動保存待ち':(recoveryAvailable?'未保存（端末保護）':'未保存（端末保護不可）')):'下書き保存済み';status.dataset.state=saveIssue?'error':dirty?'dirty':'saved'}
   for(const el of document.querySelectorAll('[data-save-action]')){el.disabled=!graph||!!savePromise||busy||(!dirty&&!!scenario);el.textContent=savePromise?'保存中…':'下書き保存'}
   const u=$('#undo-work'),r=$('#redo-work')
   if(u)u.disabled=!undoStack.length||busy
@@ -214,8 +215,9 @@ function field(label,value,change,options={}) {
 function dialog(title,text,content) {
   const box=$('#dialog')
   box.classList.remove('template-dialog')
-  box.replaceChildren(node('h2',title),node('p',text),content,button('閉じる',()=>box.close()))
-  box.showModal()
+  const heading=node('h2',title);heading.tabIndex=-1
+  box.replaceChildren(heading,node('p',text),content,button('閉じる',()=>box.close()))
+  box.showModal();heading.focus({preventScroll:true});box.scrollTop=0
 }
 function ask(question,description='現在の画面で保存していない内容は破棄されます。') {
   return new Promise(resolve=>{
@@ -246,7 +248,7 @@ function update(change,rerender=true,key='') {
     const context=$('#workbar .work-context strong');if(context)context.textContent=graph.name||'名称未設定'
     updateSaveIndicator()
   }
-  scheduleSave()
+  scheduleSave();updateSaveIndicator()
 }
 function limits() { return validate(graph,true) }
 const currentNode=()=>graph?.nodes.find(item=>item.id===selection)
@@ -392,12 +394,12 @@ async function openCopy(source,sourceStore,asTemplate=false,folder=''){
     const info=await readStoreResources(current)
     if(serial!==request)return
     const targets=info.channels.filter(c=>c.purpose===initial.purpose||c.purpose==='shared')
-    let channel=''
+    let channel=sourceStore.id===current.id&&targets.some(c=>c.id===initial.channel)?initial.channel:''
     const tagMap={}
     const sourceCatalog=sourceStore.id===store.id?applicantCatalog:(await readStoreResources(sourceStore)).catalog
     if(serial!==request)return
     dest.replaceChildren()
-    const channelField=field('配信先の公式LINE（必須）','',value=>{channel=value;validateCopy()},{items:{'':'選択してください',...Object.fromEntries(targets.map(c=>[c.id,c.label]))}})
+    const channelField=field('配信先の公式LINE（必須）',channel,value=>{channel=value;validateCopy()},{items:{'':'選択してください',...Object.fromEntries(targets.map(c=>[c.id,c.label]))}})
     dest.append(channelField)
     if(!targets.length)dest.append(node('p','複製先に対象用途のLINEを登録してください。','field-hint'))
     const keys=initial.purpose==='recruitment'?tagKeys(initial):[]
@@ -912,13 +914,13 @@ function settings() {
   const advanced=node('details',null,'advanced-options');advanced.open=viewMode==='graph';advanced.append(node('summary','詳細な配信制限と担当者設定'))
   if(graph.purpose==='customer')advanced.append(window,freq)
   const holidays=node('details')
-  holidays.append(node('summary','販促の休業曜日と再参加条件'))
+  holidays.append(node('summary','販促の休業曜日'))
   for (const [index,label] of ['日','月','火','水','木','金','土'].entries()) holidays.append(field(label+'曜日を休業',graph.holidays.includes(index),checked=>update(()=>{
     graph.holidays=checked?[...new Set([...graph.holidays,index])]:graph.holidays.filter(day=>day!==index)
   },false),{type:'checkbox'}))
-  holidays.append(field('再参加を許可する',graph.rejoin,set('rejoin',false),{type:'checkbox'}),
-    field('再参加の間隔（日）',graph.cooldownDays,set('cooldownDays',false),{type:'number',attributes:{min:'1',max:'365'}}))
   if(graph.purpose==='customer')advanced.append(holidays)
+  advanced.append(field('再参加を許可する',graph.rejoin,set('rejoin',false),{type:'checkbox'}),
+    field('再参加の間隔（日）',graph.cooldownDays,set('cooldownDays',false),{type:'number',attributes:{min:'1',max:'365'}}))
   advanced.append(field('担当者が不在の場合',graph.missingAssignee,set('missingAssignee'),
     {items:{manager:'店舗責任者へ回す',hold:'保留'}}));wrap.append(advanced)
   return wrap
