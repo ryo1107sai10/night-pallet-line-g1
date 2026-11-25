@@ -43,6 +43,11 @@ export class InterviewGoogle {
 
   sharedCalendar(store:string){return this.sharedCalendars.get(store)?.calendar}
 
+  canManageLink(store:string){
+    const legacy=this.sharedCalendars.get(store)
+    return !!this.managedAccount&&(!legacy||legacy.account===this.managedAccount)
+  }
+
   legacyCalendarOwner(calendar:string){
     return [...this.sharedCalendars.values()].find(entry=>entry.calendar.toLowerCase()===calendar.toLowerCase())?.store
   }
@@ -255,10 +260,10 @@ export async function managedCalendarRecord(db:DB,store:string){
     'SELECT calendar_id,linked_at FROM interview_shared_calendar WHERE store_id=$1',[store])).rows[0]
 }
 async function sharedCalendarFor(db:DB,google:InterviewGoogle,store:string){
-  const legacy=google.sharedCalendar(store)
-  if(legacy)return {calendar_id:legacy,managed:false}
   const record=await managedCalendarRecord(db,store)
-  return record?{calendar_id:record.calendar_id,managed:true}:null
+  if(record)return {calendar_id:record.calendar_id,managed:true}
+  const legacy=google.sharedCalendar(store)
+  return legacy?{calendar_id:legacy,managed:false}:null
 }
 
 export async function linkManagedCalendar(db:DB,actor:Actor,store:string,calendar:string,google:InterviewGoogle){
@@ -266,7 +271,8 @@ export async function linkManagedCalendar(db:DB,actor:Actor,store:string,calenda
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'google_calendar_enabled')
   const unavailableLink=()=>new Fault(409,'GOOGLE_SHARED_CALENDAR','別の連携が設定済みです。店舗専用の未登録カレンダーを使用してください。')
-  if(google.sharedCalendar(store)||google.legacyCalendarOwner(calendar))throw unavailableLink()
+  const legacyOwner=google.legacyCalendarOwner(calendar)
+  if(!google.canManageLink(store)||(legacyOwner&&legacyOwner!==store))throw unavailableLink()
   const credential=await calendarRecord(db,store)
   if(credential&&credential.calendar_id!==calendar)throw unavailableLink()
   // Reserve only within this store; a unique constraint prevents sharing a
@@ -313,7 +319,7 @@ export async function availabilityOverview(db:DB,store:string,google:InterviewGo
   const connection=shared?{configured:shared.managed?!!google.managedAccount:true,connected:true,calendar_id:shared.calendar_id,shared:true}:
     {configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null}
   return {google:connection,
-    ...(canManage&&google.managedAccount&&(!shared||shared.managed)?{managed_calendar_account:google.managedAccount}:{}),
+    ...(canManage&&google.canManageLink(store)?{managed_calendar_account:google.managedAccount}:{}),
     google_enabled:features.google_calendar_enabled,google_write_enabled:features.google_write_enabled,
     google_write_granted:record?.write_granted??false,blocks}
 }

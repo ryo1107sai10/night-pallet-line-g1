@@ -1776,6 +1776,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const businessCalendar='new-agency@group.calendar.google.com'
   const account='calendar-reader@project.iam.gserviceaccount.com'
   const originalBusy=google.managedBusy
+  const originalSharedCalendar=google.sharedCalendar,originalOwner=google.legacyCalendarOwner
   let sharedPermission=false
   google.managedAccount=account
   google.managedBusy=async id=>{
@@ -1788,6 +1789,8 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
     expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),422)
     assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).google.connected,false)
     sharedPermission=true
+    google.sharedCalendar=id=>id===agencyShop?businessCalendar:originalSharedCalendar.call(google,id)
+    google.legacyCalendarOwner=id=>id===businessCalendar?agencyShop:originalOwner.call(google,id)
     expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),200)
     assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).google.calendar_id,businessCalendar)
     expect(await post('/stores/'+gamma.stores[0].id+'/interviews/availability/google/shared',admin,{calendar_id:businessCalendar}),404)
@@ -1801,7 +1804,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
       sharedPermission=false
       await assert.rejects(googleBusy(db,google,agencyShop,range,undefined,true))
     })
-  }finally{google.managedBusy=originalBusy;delete google.managedAccount}
+  }finally{google.managedBusy=originalBusy;google.sharedCalendar=originalSharedCalendar;google.legacyCalendarOwner=originalOwner;delete google.managedAccount}
   const eligible=expect(await patch('/stores/'+agencyShop+'/eligibility',admin,{revision:afterFeature.revision,verified:true,reference:'契約店舗確認の試験'}),200)
   expect(await patch(agencySetup+'/automation',admin,{revision:eligible.revision,enabled:true,contract:true,monthly_limit:100,reason:'未接続のため拒否'}),409)
   expect(await patch(agencySetup+'/automation',admin,{revision:eligible.revision,enabled:false,contract:true,monthly_limit:100,reason:'契約記録を保存'}),200)

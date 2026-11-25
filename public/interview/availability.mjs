@@ -31,7 +31,7 @@ export function drawAvailability(root,state,zone,controls){
   }else if(state.google_enabled!==false&&state.managed_calendar_account&&controls.connectShared){
     const link=el('details')
     link.open=!state.google.connected
-    link.append(el('summary',state.google.connected?'店舗専用の共有カレンダーを変更':'店舗専用カレンダーを連携（推奨）'))
+    link.append(el('summary',state.google.connected?'店舗専用の共有カレンダーを設定・変更':'店舗専用カレンダーを連携（推奨）'))
     const f=el('form',null,'stack')
     const account=field('共有先のメールアドレス','text','account',state.managed_calendar_account)
     account.querySelector('input').readOnly=true
@@ -44,7 +44,7 @@ export function drawAvailability(root,state,zone,controls){
       external('Google カレンダーの設定を開く ↗','https://calendar.google.com/calendar/u/0/r/settings'),
       el('p','③ カレンダーの統合欄から @group.calendar.google.com のIDをコピーし、連携します。Googleの許可が確認できた場合だけ保存されます。'),calendar,el('button','空き時間を確認して連携する','primary'))
     f.onsubmit=event=>{event.preventDefault();run(f.querySelector('button:last-child'),async()=>{
-      if(state.google.connected&&!confirm('この店舗の空き状況の照合先を変更します。よろしいですか？'))return
+      if(state.google.connected&&input.value.trim()!==state.google.calendar_id&&!confirm('この店舗の空き状況の照合先を変更します。よろしいですか？'))return
       await controls.connectShared(input.value.trim())
     })}
     link.append(f);busyList.append(link)
