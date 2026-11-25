@@ -1,6 +1,7 @@
 import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
+import {completeMasterPasswordReset,masterPasswordResetPath,resetCompletion} from './master-password-reset.js'
 import { checkAgencyAccess } from './agency-access.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
@@ -190,6 +191,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.get(supervisorHandoffPath,(_req,res)=>{
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/supervisor-handoff.html'))
   })
+  app.get(masterPasswordResetPath,(_req,res)=>{
+    res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/master-recovery.html'))
+  })
   app.get('/platform/',async(req,res)=>{
     res.set('X-Robots-Tag','noindex, nofollow')
     const signedIn=await tx(pool,db=>authenticate(db,platformCredential(req),'platform')).then(()=>true,error=>{
@@ -221,7 +225,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','dashboard.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -334,6 +338,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     res.set('Set-Cookie',sessionCookie(cfg,'','platform')).json(result)
   })
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
+  api.post('/auth/master/recovery',async(req,res)=>{
+    const result=await completeMasterPasswordReset(pool,cfg,resetCompletion.parse(req.body),address(req))
+    res.set('Set-Cookie',sessionCookie(cfg)).json(result)
+  })
 
   const localCustomerSession = (req:Request) => req.headers.cookie?.split(';').map(value=>value.trim())
     .find(value=>value.startsWith('night_customer='))?.slice('night_customer='.length)

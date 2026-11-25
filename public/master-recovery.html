@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>マスターのパスワード再設定 | Night PRO LINE</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/master-recovery.mjs"></script>
+</head>
+<body>
+  <header><div class="header-inner"><span class="brand">Night <strong>PRO LINE</strong></span></div></header>
+  <main>
+    <section class="auth panel">
+      <h1>管理会社マスターのパスワード再設定</h1>
+      <p id="recovery-notice" role="status" aria-live="polite"></p>
+      <form id="recovery-form" hidden>
+        <p>登録メールに届いたリンクと、既に登録している認証アプリの最新コードで本人確認します。認証アプリの設定キーは変わりません。</p>
+        <label>新しいパスワード（12文字以上）<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+        <label>新しいパスワード（確認）<input name="confirmation" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
+        <label>現在の認証アプリの6桁コード<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required></label>
+        <p class="muted">再設定完了後、旧パスワードと以前のログインは無効になります。</p>
+        <button type="submit">パスワードを再設定</button>
+      </form>
+      <a href="/master/" class="studio-link">エールの管理画面へ</a>
+    </section>
+  </main>
+</body>
+</html>

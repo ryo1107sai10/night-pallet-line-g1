@@ -12,6 +12,9 @@ import { createApp } from '../dist/app.js'
 import { assertAppRole, poolFor } from '../dist/core.js'
 import { bootstrap, inviteSupervisor, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
+import {prepareMasterPasswordReset} from '../dist/master-password-reset.js'
+import {verifyPassword} from '../dist/auth.js'
+import {scope,tx} from '../dist/core.js'
 
 // 代理店マスター交代のセルフサービス化の結合試験。
 // 現マスター本人が自法人分だけ招待・切り替えできること、マスターでない代理店スタッフと
@@ -143,6 +146,34 @@ test('マスターでない代理店スタッフと非代理店の管理者は�
   expect(await request('/agency-master', { cookie: plain }), 403)
   expect(await post('/agency-master/invite', plain, { address: 'nobody@example.test' }, idempotency()), 403)
   expect(await post('/agency-master/promote', plain, { pending: randomUUID() }), 403)
+})
+
+test('現マスターのパスワード回復は登録メールへの一回限りリンクと既存MFAを必要とし、セッションだけを失効する',async()=>{
+  const tenant='recovery-test',address='recovery@example.test',nextPassword='New password only for local test!'
+  const invite=await bootstrap(owner,cfg,{slug:tenant,name:'回復検証用法人',email:address})
+  const existing=await activate(invite,address,tenant)
+  const {tenant:{id}}=expect(await request('/session',{cookie:existing}),200)
+  // 実運用データに触れず、管理会社の検証用テナントを設定する。
+  await tx(owner,async db=>{await scope(db,id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[id])})
+  const target={tenant,address}
+  await assert.rejects(prepareMasterPasswordReset(owner,cfg,{...target,address:'other@example.test'}))
+  await assert.rejects(prepareMasterPasswordReset(pool,cfg,target),{code:'42501'})
+  const issued=await prepareMasterPasswordReset(owner,cfg,target)
+  assert.equal(issued.email,address)
+  const recovery=new URL(issued.url).hash.slice(1)
+  expect(await request('/session',{cookie:existing}),200)
+  const badCode=String((Number(code(invite.setup_key))+1)%1000000).padStart(6,'0')
+  expect(await post('/auth/master/recovery',null,{recovery,password:nextPassword,code:badCode}),400)
+  expect(await request('/session',{cookie:existing}),200)
+  const proof=code(invite.setup_key,1)
+  expect(await post('/auth/master/recovery',null,{recovery,password:nextPassword,code:proof}),200)
+  expect(await request('/session',{cookie:existing}),401)
+  expect(await post('/auth/master/recovery',null,{recovery,password:nextPassword,code:proof}),400)
+  const hashes=await tx(owner,async db=>{await scope(db,id,undefined,true);return (await db.query('SELECT password_hash FROM staff WHERE email=$1',[address])).rows[0]})
+  assert.equal(await verifyPassword(nextPassword,hashes.password_hash),true)
+  assert.equal(await verifyPassword(pass,hashes.password_hash),false)
+  expect(await request('/session',{cookie:master}),200)
+  expect(await request('/platform/session',{cookie:platform}),200)
 })
 
 test('代理店の現マスターは自法人で後任を招待し、切り替えまで完結できる', async () => {
