@@ -2,6 +2,8 @@
 
 ## 公式LINEのかんたん連携
 
+2026年11月25日確認：LINEマーケットプレイスの拡張機能開発企業の募集は一時停止中です。モジュールチャネルは、LINE公式が案内する有償の拡張機能公開向けの申請が必要です。申請条件は [公式仕様](https://developers.line.biz/ja/docs/partner-docs/module/) と [募集状況](https://line-marketplace.com/jp/inquiry) を参照してください。既存の通常のMessaging API連携や店舗向け案内リンクは引き続き利用できます。
+
 1. 運営法人が [LINEマーケットプレイス](https://line-marketplace.com/jp/inquiry) に申請し、モジュールチャネルを用意します。メッセージ送受信の権限とチャットの主導権の設定をLINE側で確認してください。
 2. モジュールチャネルにリダイレクトURL `PUBLIC_ORIGIN/line-module/return` とWebhook URL `PUBLIC_ORIGIN/api/v1/webhooks/line-module` を登録します。`PUBLIC_ORIGIN` は管理画面を開く公開HTTPSのオリジンです。
 3. Webサービスとワーカーに `LINE_MODULE_CHANNEL_ID`、`LINE_MODULE_CHANNEL_SECRET`、`LINE_MODULE_BOT_HEADER` を設定します。シークレットはSecret Managerに保存します。ボットを指定するヘッダー名はLINEから参画時に案内された値を使います。DBには `014_line_modules` のマイグレーションを適用します。
@@ -97,6 +99,8 @@
 
 自動配信ワーカーが扱うイベントは、顧客専用OAの新規友だち追加、顧客向け画面での同意、手動登録、来店予約の確定・変更・取消、来店記録です。配信する種類の同意が必要です。最初の友だち追加時点で未同意の場合は同意イベントから始まる別シナリオを使います。兼用OAは、顧客リンクで顧客向け画面を開いた本人のみ顧客台帳に登録します。
 
-顧客向けの来店予約は店舗単位の時間帯と人数枠を扱います。来店予約への外部カレンダー連携、担当者・席区分ごとの複数資源、料金マスター、一斉配信、フォーム／計測リンクを発生源とする実配信は別途実装が必要です。`{{price}}` の本番値がない場合は送信を保留します。受信本文・添付の管理画面は今回の範囲外です。実機試験と本番公開の全受入試験は未実施です。
+採用では、友だち追加、応募フォーム送信、面談予約・日程変更・取消を開始条件にできます。応募フォーム送信時点でLINE通知に同意している人だけが対象で、同じフォームの同じ版への二重回答から配信は開始されません。エールのマスター・店舗担当マネージャーは担当店舗の採用応募フォームを登録・公開し、回答を確認できます。店舗のフォーム機能を有効にしておく必要があり、顧客用フォーム・LINE接続・監督者向け画面ツアーの権限はエールに付与しません。
+
+顧客向けの来店予約は店舗単位の時間帯と人数枠を扱います。来店予約への外部カレンダー連携、担当者・席区分ごとの複数資源、料金マスター、顧客フォーム／計測リンクを発生源とする実配信は別途実装が必要です。`{{price}}` の本番値がない場合は送信を保留します。受信本文・添付の管理画面は今回の範囲外です。実機試験と本番公開の全受入試験は未実施です。
 
 LINE公式資料。 [Webhook受信](https://developers.line.biz/ja/docs/messaging-api/receiving-messages/) · [送信・通数のAPI仕様](https://developers.line.biz/en/reference/messaging-api/#get-quota-consumption) · [再試行](https://developers.line.biz/ja/docs/messaging-api/retrying-api-request/)
