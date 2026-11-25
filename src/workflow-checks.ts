@@ -1,9 +1,10 @@
 import { automationForScopedStore, type Config, type DB } from './core.js'
 import { channel, messagingReady } from './line.js'
 import { storeFeatures } from './store-features.js'
+import { managedCalendarRecord, calendarRecord, type InterviewGoogle } from './interview-availability.js'
 import type { WorkflowSubject } from './forms.js'
 
-export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowSubject['purpose'],googleConfigured:boolean) {
+export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowSubject['purpose'],google:InterviewGoogle) {
   const flags=await storeFeatures(db,store)
   const checks:{section:string;text:string}[]=[]
   const {rows:channels}=await db.query<{id:string}>(`SELECT id FROM channel WHERE purpose IN ($1,'shared')`,[use])
@@ -27,8 +28,12 @@ export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowS
   if(flags.forms_enabled&&!status.forms)checks.push({section:'forms',text:'公開中の回答フォームがありません。'})
   if(use==='customer'&&flags.inbox_enabled&&status.intake)checks.push({section:'intake',text:status.intake+'件の会話で用途の確認が必要です。'})
   if(maySend&&status.failures)checks.push({section:'delivery',text:'直近7日間に失敗または結果不明のLINE送信が'+status.failures+'件あります。'})
+  if(use==='recruitment'&&flags.google_calendar_enabled&&google.managedAccount&&!google.sharedCalendar(store)&&
+    !await managedCalendarRecord(db,store)&&!await calendarRecord(db,store)){
+    checks.push({section:'interviews',text:'Googleカレンダーが未連携です。面談枠とカレンダー画面で店舗専用のカレンダーを連携してください。'})
+  }
   if(use==='recruitment'&&flags.google_write_enabled){
-    if(!flags.google_calendar_enabled||!googleConfigured||!status.write_granted){
+    if(!flags.google_calendar_enabled||!google.configured||!status.write_granted){
       checks.push({section:'interviews',text:'Googleへの予定登録にはカレンダー照合をオンにし、書き込み権限を許可してください。'})
     }
     if(status.google_errors)checks.push({section:'interviews',text:status.google_errors+'件の面談でGoogleへの書き込みを確認できませんでした。'})

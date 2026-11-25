@@ -530,7 +530,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     if(workPurpose(req)!=='recruitment')throw forbidden()
     return saveRecruitmentAcquisition(db,actor,idOf(req,'store'),recruitmentAcquisitionInput.parse(req.body))
   }))
-  api.get(workflow+'/checks',workflowStaff((db,_actor,req)=>workflowChecks(db,cfg,idOf(req,'store'),workPurpose(req),google.configured)))
+  api.get(workflow+'/checks',workflowStaff((db,_actor,req)=>workflowChecks(db,cfg,idOf(req,'store'),workPurpose(req),google)))
   api.get(workflow+'/delivery',workflowStaff((db,_actor,req)=>
     serviceHistory(db,cfg,idOf(req,'store'),workPurpose(req),req.query.failures==='1')))
   api.post(workflow+'/delivery/:delivery/retry',async(req,res)=>{

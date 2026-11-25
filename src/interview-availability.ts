@@ -300,7 +300,10 @@ export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range
   const shared=await sharedCalendarFor(db,google,store)
   const match=shared&&(!alternate||alternate===shared.calendar_id)
   const record=match?null:await calendarRecord(db,store)
-  if(!match&&!record&&(alternate||required))throw unavailable()
+  // In a self-service production deployment, enabling Google means a
+  // calendar must be connected before any reservation can be accepted.
+  // LINE-only stores can explicitly switch off the feature.
+  if(!match&&!record&&(alternate||required||!!google.managedAccount))throw unavailable()
   try{
     if(match&&shared)return await (shared.managed?google.managedBusy(shared.calendar_id,range):google.sharedBusy(store,range,shared.calendar_id))
     return record?await google.busy(record,range,alternate):[]

@@ -1786,6 +1786,14 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   }
   try{
     assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).managed_calendar_account,account)
+    const tenant=expect(await request('/session',{cookie:admin}),200).tenant
+    const range={starts_at:new Date(),ends_at:new Date(Date.now()+3600000)}
+    await tx(pool,async db=>{
+      await scope(db,tenant.id,agencyShop)
+      await assert.rejects(googleBusy(db,google,agencyShop,range),{code:'GOOGLE_UNAVAILABLE'})
+    })
+    const warnings=expect(await request('/stores/'+agencyShop+'/workflows/recruitment/checks',{cookie:admin}),200)
+    assert.ok(warnings.some(item=>item.section==='interviews'&&item.text.includes('未連携')))
     expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),422)
     assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).google.connected,false)
     sharedPermission=true
@@ -1796,8 +1804,6 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
     expect(await post('/stores/'+gamma.stores[0].id+'/interviews/availability/google/shared',admin,{calendar_id:businessCalendar}),404)
     expect(await post(otherCalendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),409)
     expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:'personal@example.test'}),400)
-    const tenant=expect(await request('/session',{cookie:admin}),200).tenant
-    const range={starts_at:new Date(),ends_at:new Date(Date.now()+3600000)}
     await tx(pool,async db=>{
       await scope(db,tenant.id,agencyShop)
       assert.deepEqual(await googleBusy(db,google,agencyShop,range,undefined,true),[])
