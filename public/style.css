@@ -61,6 +61,21 @@ pre { padding: 12px; background: #edf1f9; white-space: pre-wrap; overflow-wrap: 
 .line-step legend { padding: 0 6px; font-weight: 700; }
 .line-step .actions:not(:empty) { margin-bottom: 14px; }
 .line-step .studio-link { font-size: .9rem; }
+.line-navigation { background: linear-gradient(145deg,#fff,#f4faf8); border-color:#c9ded8; }
+.line-navigation-store { display:inline-block;padding:6px 10px;border-radius:8px;background:#dcf4e9;font-weight:700;color:#1b503a;margin-right:8px; }
+.line-navigation>h3 { margin-top:16px; }
+.line-quick-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:10px;margin:10px 0 16px; }
+.line-quick-grid:empty { display:none; }
+.line-shortcut.studio-link { display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:5px;min-height:76px;min-width:0;padding:10px 14px;line-height:1.45;border-color:#b7c9d8;background:linear-gradient(120deg,#fff,#f2f6fb);overflow-wrap:anywhere; }
+.line-shortcut.studio-link:hover,.line-shortcut.studio-link:focus-visible { border-color:#6285b5;background:#e9f1fa; }
+.line-shortcut strong { font-size:.95rem; }
+.line-shortcut small { font-size:.78rem;color:#4d5d77;font-weight:400; }
+.line-full-field { grid-column:1 / -1; }
+.line-full-field small { display:block;font-size:.8rem;margin-top:4px;font-weight:400; }
+.line-device-note { font-size:.86rem;color:#425575;border:1px solid #c8d8eb;border-radius:10px;background:#eff5fb;padding:10px 12px;margin:12px 0;overflow-wrap:anywhere; }
+.line-copy-value { display:block;width:100%;min-height:64px;resize:vertical;font:inherit;font-size:.85rem;color:#172443;background:#f5f8fc;border:1px solid #c6d2e3;border-radius:8px;padding:9px 11px;margin-bottom:10px;overflow-wrap:anywhere; }
+.line-navigation #line-register { margin-top:18px;border-top:1px solid #d2dfe6;padding-top:6px; }
+@media(max-width:700px){.line-quick-grid { grid-template-columns:minmax(0,1fr);gap:8px; }.line-shortcut.studio-link { min-height:62px; }.line-navigation .studio-link,.line-step .studio-link { width:100%; }.line-setting .actions>* { flex:1 1 100%; }.line-step { padding:11px; }.line-navigation-store { display:block;margin-right:0; }}
 .line-setting { border-top: 1px solid #d7dfec; padding: 12px 0; }
 .line-setting h3 { font-size: 1rem; margin-bottom: 8px; }
 .line-setting pre { margin: 0 0 8px; }

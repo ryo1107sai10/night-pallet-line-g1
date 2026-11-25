@@ -1,5 +1,5 @@
-import {workspace,workspacePath,scopeWorkspaceLinks,rememberReturnWorkspace} from '/static/workspace-path.mjs'
-import {lineSetupLinks} from './line-setup.mjs'
+import {workspace,workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
+import {lineSetupLinks,lineConsoleId,lineBasicId} from './line-setup.mjs'
 import {mountDashboard} from '/static/dashboard.mjs'
 
 const $ = selector => document.querySelector(selector)
@@ -178,10 +178,46 @@ function lineLink(label, href) {
   return link
 }
 
+function lineShortcut(label,description,href) {
+  const link=lineLink('',href)
+  link.classList.add('line-shortcut')
+  link.append(el('strong'),el('small'))
+  updateShortcut(link,label,description,href)
+  return link
+}
+
+function updateShortcut(link,label,description,href){
+  link.href=href
+  link.querySelector('strong').textContent=label+' ↗'
+  link.querySelector('small').textContent=description
+  link.setAttribute('aria-label',label+'（別タブで開く）')
+}
+
+function lineShortcutGrid(...links){
+  const grid=el('div',null,'line-quick-grid')
+  grid.append(...links)
+  return grid
+}
+
+const mobileLineHelp='スマートフォンでも各リンクはブラウザーで開けます。Messaging APIの有効化はLINE公式のWeb管理画面（PC版）の機能です。スマホで設定が表示されない場合はPC用サイト表示、またはパソコンから続けてください。'
+
+function basicIdField(value=''){
+  const label=el('label','公式LINEの@ID または管理画面URL（任意）','line-full-field')
+  const input=el('input')
+  input.type='text'
+  input.autocomplete='off'
+  input.autocapitalize='off'
+  input.spellcheck=false
+  input.placeholder='@123abcd または LINE公式の管理画面URL'
+  input.value=lineBasicId(value)
+  label.append(input,el('small','入力すると対象公式LINEの設定ページへ直接移動できます。','muted'))
+  // This is only a navigation hint, not connection credentials or form data.
+  return {label,input}
+}
+
 function lineStep(title, instruction, links, ...fields) {
   const step = el('fieldset',null,'line-step')
-  const actions = el('div',null,'actions')
-  actions.append(...links)
+  const actions = lineShortcutGrid(...links)
   const grid = el('div',null,'grid')
   grid.append(...fields)
   step.append(el('legend',title),el('p',instruction,'muted'),actions,grid)
@@ -190,17 +226,37 @@ function lineStep(title, instruction, links, ...fields) {
 
 function lineRegistration(base) {
   const destinations = lineSetupLinks()
-  const provider = lineLink('プロバイダー設定を開く',destinations.provider)
-  const basics = lineLink('チャネル基本設定を開く',destinations.messagingBasics)
-  const messaging = lineLink('Messaging API設定を開く',destinations.messagingSettings)
+  const {label:basicField,input:basic}=basicIdField()
+  const manager=lineShortcut('Messaging APIを有効にする','公式LINEの管理画面から開始',destinations.manager)
+  const provider = lineShortcut('プロバイダーIDを確認','プロバイダーの設定画面',destinations.provider)
+  const basics = lineShortcut('チャネルID・シークレットを確認','チャネル基本設定',destinations.messagingBasics)
+  const secretLink = lineShortcut('チャネルシークレットを取得','チャネル基本設定',destinations.messagingBasics)
+  const messaging = lineShortcut('アクセストークンを確認・発行','Messaging API設定',destinations.messagingSettings)
+  const webhook = lineShortcut('Webhook設定を開く','接続情報を登録した後に使用',destinations.messagingSettings)
   const form = formOf([
-    lineStep('公式アカウントとMessaging API',
-      '未設定なら公式アカウント管理画面でMessaging APIを有効にします。チャネル基本設定からIDとシークレット、Messaging API設定からトークンを取得します。本人確認はLINEトークへ送るリンク方式で行うため、LINEログインの設定は不要です。',
-      [lineLink('LINE公式アカウント管理を開く',destinations.manager),provider,basics,messaging],
-      template('messaging-fields'),template('credentials-fields')),
-    lineStep('店舗での利用情報',
+    el('div',mobileLineHelp,'line-device-note'),
+    lineStep('1　公式LINEの管理画面を開く',
+      '既存の公式LINEを選び、設定 → Messaging API で利用状況を確認します。アカウントがない場合のみ新規作成してください。',
+      [manager,lineShortcut('LINE公式アカウント一覧','管理しているアカウントを選択',destinations.manager),
+        lineShortcut('公式LINEを新規作成','まだ公式LINEがない場合',destinations.create),
+        lineShortcut('公式の有効化手順','画像付きマニュアル',destinations.enableHelp)],basicField),
+    lineStep('2　プロバイダーとチャネルを確認',
+      '同じLINEアカウントでDevelopersにログインします。プロバイダー設定とチャネル基本設定のIDをコピーしてください。設定画面のURLをそのまま貼り付けてもIDを取り出します。',
+      [lineShortcut('LINE Developersを開く','プロバイダー・チャネル一覧',destinations.console),provider,basics],
+      template('messaging-fields')),
+    lineStep('3　接続に必要な情報を取得',
+      'チャネル基本設定の「チャネルシークレット」とMessaging API設定の「チャネルアクセストークン」を下の専用欄へ貼り付けます。既に有効なトークンの再発行は、他の連携ツールに影響するため必要な場合だけ行ってください。',
+      [secretLink,messaging,lineShortcut('シークレットの確認方法','LINE公式マニュアル',destinations.secretHelp),
+        lineShortcut('トークンの発行方法','LINE公式マニュアル',destinations.tokenHelp)],template('credentials-fields')),
+    lineStep('4　店舗での利用情報',
       'この店舗での用途と、公式アカウントの管理権限を記録します。',[],template('channel-fields')),
+    lineStep('5　登録後にWebhookを設定',
+      '下の「接続情報を登録」を押すと、この店舗専用のWebhook URLを発行します。登録完了後にURLをコピーし、LINE側で検証とWebhook利用を有効にします。',
+      [webhook,lineShortcut('Webhook・応答設定の公式手順','設定と動作確認',destinations.webhookHelp)]),
   ],'接続情報を登録',async (data,key)=>{
+    data.provider_id=lineConsoleId(data.provider_id,'provider')
+    data.messaging_id=lineConsoleId(data.messaging_id,'channel')
+    if(!data.provider_id||!data.messaging_id)throw new Error('プロバイダーIDとチャネルIDは、数字またはLINE Developersの該当設定画面URLを入力してください。')
     for (const optional of ['existing_webhook','existing_tools']) if (!data[optional]) delete data[optional]
     const created = await api(base+'/connections','POST',data,key)
     channelId = created.id
@@ -210,14 +266,22 @@ function lineRegistration(base) {
   })
   const fields = form.elements
   function updateLinks() {
-    const links = lineSetupLinks({provider_id:fields.provider_id.value,messaging_id:fields.messaging_id.value})
-    provider.href = links.provider
-    basics.href = links.messagingBasics
-    messaging.href = links.messagingSettings
-    messaging.hidden = links.messagingSettings===links.messagingBasics
-    basics.textContent = messaging.hidden ? 'LINE Developersでチャネルを選ぶ' : 'チャネル基本設定を開く'
+    const links = lineSetupLinks({basic_id:basic.value,provider_id:fields.provider_id.value,messaging_id:fields.messaging_id.value})
+    updateShortcut(manager,'Messaging APIを有効にする',links.hasBasic?'対象の公式LINEのMessaging API設定':'公式LINE一覧 → 対象の店舗 → 設定',links.managerMessaging)
+    updateShortcut(provider,'プロバイダーIDを確認',links.hasProvider?'対象プロバイダーの設定':'未入力：プロバイダーを選択',links.provider)
+    updateShortcut(basics,'チャネルID・シークレットを確認',links.hasMessaging?'対象チャネルの基本設定':'未入力：対象チャネルを選択',links.messagingBasics)
+    updateShortcut(secretLink,'チャネルシークレットを取得',links.hasMessaging?'対象チャネルの基本設定':'未入力：対象チャネルを選択',links.messagingBasics)
+    updateShortcut(messaging,'アクセストークンを確認・発行',links.hasMessaging?'対象チャネルのMessaging API設定':'未入力：チャネル選択後、Messaging API設定',links.messagingSettings)
+    updateShortcut(webhook,'Webhook設定を開く',links.hasMessaging?'対象チャネルのMessaging API設定':'未入力：対象チャネルを選択',links.messagingSettings)
   }
   form.addEventListener('input',updateLinks)
+  for(const [name,type] of [['provider_id','provider'],['messaging_id','channel']]){
+    fields[name].addEventListener('change',()=>{
+      const id=lineConsoleId(fields[name].value,type)
+      if(id)fields[name].value=id
+      updateLinks()
+    })
+  }
   updateLinks()
   return form
 }
@@ -243,6 +307,7 @@ async function refresh() {
   $('#auth').hidden = true
   $('#workspace').hidden = false
   $('#manage-line').hidden = session.actor.role!=='admin'
+  $('#manage-line').href = session.actor.platform?'#quick-line':'#line-setup'
   $('#back-to-platform').hidden = !session.actor.platform
   $('#account').textContent = (session.actor.platform?'監督者':roles[session.actor.role]) + ' · ' + session.actor.email
   $('#tenant-name').textContent = session.tenant.legal_name
@@ -341,7 +406,9 @@ function connectedPanel(base, c, testers) {
   const urls = details('Webhookの設定先',...urlSettings)
   urls.open = c.status!=='connected'
   const shortcuts = el('div',null,'actions')
-  shortcuts.append(lineLink('Messaging API設定を開く',links.messagingSettings))
+  shortcuts.append(lineLink('チャネルID・シークレットを確認',links.messagingBasics),
+    lineLink('アクセストークン・Webhook設定',links.messagingSettings),
+    lineLink('応答設定の公式手順',links.responseHelp))
   box.append(shortcuts,urls,el('p','設定記録を保存し、トークンとWebhookを確認してからテスト利用者を登録します。','muted'))
   const consoleInputs = Object.entries(checks)
     .map(([key,label])=>[key,key==='provider_verified'?'Messaging APIが法人のプロバイダー内にある':label])
@@ -400,25 +467,43 @@ function connectedPanel(base, c, testers) {
   return box
 }
 
-function moduleConnect(base, configured, store) {
-  const box = el('section',null,'panel')
+function lineNavigationPanel(store, current, registration) {
+  const box = el('section',null,'panel line-navigation')
   box.id='quick-line'
-  box.append(el('h2','公式LINEをつなぐ'))
-  if(store)box.append(el('p','連携先の店舗 · '+store.name,'muted'))
-  if (!configured) {
-    box.append(el('p','LINEのかんたん連携を利用するには、LINEヤフーから発行されたモジュールの設定が必要です。','muted'))
-    const manual=el('a','手動設定を開く','studio-link')
-    manual.href='#line-register'
-    box.append(manual)
-    return box
+  box.append(el('h2','公式LINE連携 · 設定ナビ'),
+    el('p','必要な設定画面を直接開き、情報を取得してこの画面へ貼り付けます。','muted'),
+    el('p','対象店舗 · '+store.name,'line-navigation-store'))
+  const switchStore=el('a','対象店舗を切り替える','studio-link')
+  switchStore.href='#workspace-store'
+  box.append(switchStore)
+  if(current&&!current.module_channel_id){
+    box.append(el('h3','登録済みの公式LINE · '+current.label),
+      el('p',mobileLineHelp,'line-device-note'))
+    const switchAccount=el('a','設定する公式LINEを選び直す','studio-link')
+    switchAccount.href='#line-account-picker'
+    box.append(switchAccount)
+    const links=lineSetupLinks(current)
+    const manager=lineShortcut('公式LINEのMessaging API設定',links.hasBasic?'対象の公式LINE設定':'公式LINE一覧 → 対象の店舗 → 設定',links.managerMessaging)
+    if(!links.hasBasic){
+      const {label,input}=basicIdField()
+      input.addEventListener('input',()=>{
+        const dest=lineSetupLinks({...current,basic_id:input.value})
+        updateShortcut(manager,'公式LINEのMessaging API設定',dest.hasBasic?'対象の公式LINE設定':'公式LINE一覧 → 対象の店舗 → 設定',dest.managerMessaging)
+      })
+      box.append(label,el('p','「トークンとボットの照合」で公式LINEの@IDを自動取得できます。','muted'))
+    }
+    box.append(lineShortcutGrid(manager,
+      lineShortcut('プロバイダーIDを確認',links.hasProvider?'対象プロバイダーの設定':'プロバイダー一覧',links.provider),
+      lineShortcut('チャネルID・シークレットを確認',links.hasMessaging?'対象チャネルの基本設定':'チャネル一覧',links.messagingBasics),
+      lineShortcut('アクセストークンを確認・発行',links.hasMessaging?'対象チャネルのMessaging API設定':'チャネル一覧',links.messagingSettings),
+      lineShortcut('Webhook設定を開く','Webhookの設定・検証・再送',links.messagingSettings),
+      lineShortcut('応答設定の確認方法','重複応答・手動返信の公式手順',links.responseHelp)),
+      connectionSetting('Webhook URL',current.webhook_url,'Webhook設定を開く',links.messagingSettings))
+    const checkLink=el('a','送受信の接続確認へ','studio-link')
+    checkLink.href='#line-connection'
+    box.append(checkLink)
   }
-  const purpose = field('この店舗での用途','purpose',{choices:types,value:'recruitment'})
-  box.append(el('p','LINEで公式アカウントを選択し、接続を許可してください。','muted'),
-    formOf([purpose],'公式LINEをつなぐ',async data=>{
-      const result = await api(base+'/line-module','POST',data)
-      rememberReturnWorkspace('line',base.split('/').at(-1))
-      location.assign(result.url)
-    }))
+  box.append(registration)
   return box
 }
 
@@ -517,11 +602,21 @@ function moduleConnection(base,c,testers) {
 function connectionSetting(label,value,linkLabel,href) {
   const row = el('section',null,'line-setting')
   const actions = el('div',null,'actions')
+  const code=el('textarea',null,'line-copy-value')
+  code.rows=2
+  code.value=value
+  code.readOnly=true
+  code.setAttribute('aria-label',label)
   actions.append(button(label+'をコピー',async ()=>{
-    await navigator.clipboard.writeText(value)
-    feedback(label+'をコピーしました。')
+    try {
+      await navigator.clipboard.writeText(value)
+      feedback(label+'をコピーしました。')
+    } catch {
+      code.focus();code.select();code.setSelectionRange(0,code.value.length)
+      feedback('表示した'+label+'を長押し、またはコピー操作でコピーしてください。')
+    }
   }),lineLink(linkLabel,href))
-  row.append(el('h3',label),el('pre',value),actions)
+  row.append(el('h3',label),code,actions)
   return row
 }
 
@@ -638,7 +733,7 @@ function onboardingLink(label,store,anchor) {
 }
 
 function revealLineAnchor() {
-  if (!['#line-setup','#line-register','#line-connection'].includes(location.hash)) return
+  if (!['#quick-line','#line-setup','#line-register','#line-connection'].includes(location.hash)) return
   const target = $(location.hash) ?? (location.hash==='#line-setup' ? $('#line-register') : null)
   if (target instanceof HTMLDetailsElement) target.open = true
   target?.scrollIntoView()
@@ -780,12 +875,11 @@ async function render() {
   const onboardingList = admin ? api('/line-onboarding') : Promise.resolve([])
   const onboardingItem = admin && store ? api(base+'/line-onboarding') : Promise.resolve(null)
   const connectionPromise = manage && store ? api(base+'/connections') : Promise.resolve([])
-  const modulePromise = session.actor.platform && store ? api(base+'/line-module') : Promise.resolve(null)
   const featurePromise = admin && store ? api(base+'/features') : Promise.resolve(null)
   const masterPromise = session.actor.platform ? api('/agency-master') : Promise.resolve(null)
   const setupPromise = admin && store ? api(base+'/setup') : Promise.resolve(null)
-  const [staff,connections,features,module,onboarding,detail,agencyMaster,setup] = await Promise.all([
-    staffPromise,connectionPromise,featurePromise,modulePromise,onboardingList,onboardingItem,masterPromise,setupPromise,
+  const [staff,connections,features,onboarding,detail,agencyMaster,setup] = await Promise.all([
+    staffPromise,connectionPromise,featurePromise,onboardingList,onboardingItem,masterPromise,setupPromise,
   ])
   if (generation!==view) return
   const url = new URL(location.href)
@@ -866,6 +960,7 @@ async function render() {
     })))
   if (setup) main.append(setupPanel(setup,store,base))
   main.append(storePanel)
+  let navigation
   if (manage && store) {
     const line = panel('LINE接続')
     line.id='supervisor-line'
@@ -873,6 +968,7 @@ async function render() {
       const picker = field('公式アカウント','channel',{
         choices:Object.fromEntries(connections.map(item=>[item.id,item.label])),value:current.id,
       })
+      picker.querySelector('select').id='line-account-picker'
       picker.querySelector('select').onchange = event => {
         channelId = event.target.value
         render().catch(report)
@@ -881,9 +977,9 @@ async function render() {
     } else line.append(el('p','この店舗に公式アカウントが登録されていません。'))
     const registration = details('公式LINEの接続情報を登録',lineRegistration(base))
     registration.id = 'line-register'
-    registration.open = location.hash==='#line-register' ||
-      !admin && (!current || location.hash==='#line-setup')
-    line.append(registration)
+    registration.open = !current || ['#line-register','#line-setup'].includes(location.hash)
+    if(session.actor.platform) navigation=lineNavigationPanel(store,current,registration)
+    else line.append(registration)
     main.append(line)
   }
   if (agencyMaster) side.append(masterPanel(agencyMaster))
@@ -892,7 +988,7 @@ async function render() {
     stopForm('/tenant/stop',session.tenant,'法人の配信'),auditPanel('/tenant/audit')))
   layout.append(main,side)
   const sections=admin ? [onboardingPanel(onboarding,store,detail,connections),layout] : [layout]
-  if (session.actor.platform && store) sections.unshift(moduleConnect(base,module.configured,store))
+  if (navigation) sections.unshift(navigation)
   content.replaceChildren(...sections)
   if (linked) feedback(linked.label+'を連携しました。')
   revealLineAnchor()

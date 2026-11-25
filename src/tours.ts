@@ -5,8 +5,8 @@ import { platformPrincipal } from './platform.js'
 const catalog={
   line:{title:'公式LINEをつなぐ',steps:{
     select_store:['master','#workspace-store','店舗を選ぶ','公式LINEを紐づける店舗を選んでください。'],
-    connect:['master','#quick-line','公式LINEの接続を始める','用途を選び「公式LINEをつなぐ」を押します。LINEで対象アカウントを選んで許可してください。手動設定が表示された場合は、その案内に沿って進めます。'],
-    check_connection:['master','#supervisor-line','接続結果を確認する','LINEの許可画面から戻ったら、選んだ店舗と公式アカウント名を照合してください。接続後は送受信を確認できます。'],
+    connect:['master','#quick-line','LINE設定ナビから必要な情報を取得','「公式LINE連携 · 設定ナビ」のボタンで公式LINEとLINE Developersの設定ページを開きます。チャネルID・シークレット・アクセストークンを取得し、案内に沿ってこの画面へ貼り付けて登録してください。'],
+    check_connection:['master','#supervisor-line','Webhookと送受信を確認する','登録後は店舗専用のWebhook URLをコピーし、LINE側のMessaging API設定で検証・利用・再送を設定してください。ここでトークンとWebhookを照合し、送受信テストを行います。'],
   }},
   master:{title:'エールのマスターを管理する',steps:{
     current_master:['master','#supervisor-team','現在のマスターを見る','「エールのマスター管理」で現在の担当者を確認します。'],

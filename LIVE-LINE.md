@@ -1,13 +1,13 @@
 # Night PRO LINE 実LINE検収手順
 
-## 公式LINEのかんたん連携
+## 公式LINE連携・設定ナビ
 
-2026年11月25日確認：LINEマーケットプレイスの拡張機能開発企業の募集は一時停止中です。モジュールチャネルは、LINE公式が案内する有償の拡張機能公開向けの申請が必要です。申請条件は [公式仕様](https://developers.line.biz/ja/docs/partner-docs/module/) と [募集状況](https://line-marketplace.com/jp/inquiry) を参照してください。既存の通常のMessaging API連携や店舗向け案内リンクは引き続き利用できます。
+新規導入は通常のMessaging APIと設定ページへの直接リンクを使用します。LINEマーケットプレイスのモジュールチャネルは完成・運用開始の必須項目ではありません。既存の対応コードは互換性維持のため残しますが、新規のモジュール連携ボタンは表示しません。
 
-1. 運営法人が [LINEマーケットプレイス](https://line-marketplace.com/jp/inquiry) に申請し、モジュールチャネルを用意します。メッセージ送受信の権限とチャットの主導権の設定をLINE側で確認してください。
-2. モジュールチャネルにリダイレクトURL `PUBLIC_ORIGIN/line-module/return` とWebhook URL `PUBLIC_ORIGIN/api/v1/webhooks/line-module` を登録します。`PUBLIC_ORIGIN` は管理画面を開く公開HTTPSのオリジンです。
-3. Webサービスとワーカーに `LINE_MODULE_CHANNEL_ID`、`LINE_MODULE_CHANNEL_SECRET`、`LINE_MODULE_BOT_HEADER` を設定します。シークレットはSecret Managerに保存します。ボットを指定するヘッダー名はLINEから参画時に案内された値を使います。DBには `014_line_modules` のマイグレーションを適用します。
-4. 管理画面で店舗と用途を選び、［公式LINEを連携］を押します。LINE側で対象のアカウントを確認して［連携］を押すと店舗に登録されます。［送受信テスト］で公式LINEへの受信とテスト端末への配送を確認します。ワーカージョブの実行後に結果が更新されます。
+1. 北村さんの監督画面から法人・店舗を選び、［公式LINE連携 · 設定ナビ］を開きます。店舗に管理権限がある場合は公式LINEの［Messaging API］画面へ進み、未権限の場合は店舗向けの管理者招待案内を使用します。
+2. ［LINE Developersを開く］で対象プロバイダー・チャネルを選び、数字のIDか公式設定ページのURLを貼り付けます。IDが分かると、［プロバイダーIDを確認］［チャネルシークレットを取得］［アクセストークンを確認・発行］などのボタンが対象の設定画面を直接開きます。
+3. 接続情報を登録してWebhook URLをコピーし、［Webhook設定を開く］からLINE側の設定・検証・利用・再送を確認します。続けて通常のトークン照合と送受信の検収を行います。既存の認証情報を自動で再発行する処理は行いません。
+4. 各ボタンは別タブで公式HTTPSページを開き、入力中の内容は保持します。スマートフォンのブラウザーでも利用できます。ただし、Messaging API有効化はLINE公式がWeb版（PC版）の機能として案内しています。スマホで設定が表示されない場合はPC用サイト表示を試すか、パソコンでその手順を行ってください。 [LINE公式の有効化手順](https://www.lycbiz.com/jp/manual/OfficialAccountManager/account-settings_messaging_api/) / [LINE Developersの設定手順](https://developers.line.biz/ja/docs/messaging-api/building-bot/)
 
 初回は未登録の検証用公式アカウントを使います。登録済みのアカウントは、元の店舗へのひも付けを保持します。本人確認はトークン方式（LINEトークへ送る専用URL）のため、LINEログインやLIFFの設定は不要です。
 
