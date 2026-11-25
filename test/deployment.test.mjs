@@ -4,6 +4,8 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { automationForStore, configFromEnvironment } from '../dist/core.js'
 import { runtimeConfig, verifyTraffic } from '../deploy/runtime-config.mjs'
 
 const current = { spec: { template: { spec: { containers: [{ env: [
@@ -135,4 +137,41 @@ if(args[0]==='scheduler'&&args[2]==='update'&&args.some(a=>a.startsWith('--heade
       await rm(join(dir,'calls'))
     }
   }finally{await rm(dir,{recursive:true,force:true})}
+})
+
+test('本番の配信対象を複数検証店舗だけに限定し、以前の対象と他店の停止を維持する',t=>{
+  const [old,a,b,other]=Array.from({length:4},()=>randomUUID())
+  const cfg={origin:'https://example.test',external:true,automation:true,master:Buffer.alloc(32),automationStore:old,automationStores:[a,b]}
+  for(const store of [old,a,b])assert.equal(automationForStore(cfg,store),true)
+  assert.equal(automationForStore(cfg,other),false)
+  assert.equal(automationForStore({...cfg,automation:false},a),false)
+  assert.equal(automationForStore({...cfg,automationStores:[]},a),false)
+  assert.equal(automationForStore({...cfg,automationStore:undefined,automationStores:[]},a),false)
+  const env={...current,spec:{template:{spec:{containers:[{env:[...current.spec.template.spec.containers[0].env,{name:'AUTO_SEND_STORE',value:old}]}]}}}}
+  const next=runtimeConfig(env,'https://example.test',undefined,'',{AUTO_SEND_STORES:JSON.stringify([a,b])})
+  assert.equal(next.environment.AUTO_SEND_STORE,old)
+  assert.deepEqual(JSON.parse(next.environment.AUTO_SEND_STORES),[a,b])
+})
+
+test('複数店舗の環境設定は厳密に検証し、不正な設定を全店有効へ戻さない',()=>{
+  const keys=['PUBLIC_ORIGIN','MASTER_KEY','AUTO_SEND_ENABLED','AUTO_SEND_STORE','AUTO_SEND_STORES']
+  const previous=Object.fromEntries(keys.map(key=>[key,process.env[key]]))
+  try{
+    const [one,two,other]=Array.from({length:3},()=>randomUUID())
+    process.env.PUBLIC_ORIGIN='https://example.test'
+    process.env.MASTER_KEY=Buffer.alloc(32).toString('base64')
+    process.env.AUTO_SEND_ENABLED='true'
+    process.env.AUTO_SEND_STORE=one
+    process.env.AUTO_SEND_STORES=JSON.stringify([two])
+    const cfg=configFromEnvironment()
+    assert.equal(automationForStore(cfg,one),true)
+    assert.equal(automationForStore(cfg,two),true)
+    assert.equal(automationForStore(cfg,other),false)
+    for(const invalid of ['[]','["not-a-uuid"]',JSON.stringify([two,two]),'false','{']){
+      process.env.AUTO_SEND_STORES=invalid
+      assert.throws(()=>configFromEnvironment())
+    }
+  }finally{
+    for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key]
+  }
 })
