@@ -101,9 +101,10 @@ async function tenantProgress(db: DB, tenantId: string) {
   const { rows: [tenant] } = await db.query<{ slug: string; legal_name: string }>(
     'SELECT slug,legal_name FROM tenant WHERE id=$1', [tenantId])
   if (!tenant) throw missing()
-  const { rows: [master] } = await db.query<{ email: string; activated: boolean; invite_expires_at: Date | null }>(`
-    SELECT f.email, f.password_hash IS NOT NULL AS activated, i.expires_at AS invite_expires_at
+  const { rows: [master] } = await db.query<{ email: string; activated: boolean; invite_expires_at: Date | null; co_email:string|null }>(`
+    SELECT f.email, f.password_hash IS NOT NULL AS activated, i.expires_at AS invite_expires_at,co.email AS co_email
     FROM tenant_master m JOIN staff f ON (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
+    LEFT JOIN staff co ON (m.tenant_id,m.co_staff_id)=(co.tenant_id,co.id)
     LEFT JOIN invite i ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id) WHERE m.tenant_id=$1`, [tenantId])
   const { rows: stores } = await db.query<{ id: string; name: string; address: string; business_type: string;
     responsible: string; timezone: string; cutoff: string; hours_start: number; hours_end: number }>(`
@@ -154,7 +155,7 @@ async function tenantProgress(db: DB, tenantId: string) {
     : list.some(store => store.line_stage !== 'unknown') ? 'setting' : 'registered'
   return { tenant: { id: tenantId, ...tenant },
     master: master ? { email: master.email, activated: master.activated,
-      invite_expires_at: master.invite_expires_at } : null,
+      invite_expires_at: master.invite_expires_at,co_email:master.co_email } : null,
     stage, stores: list }
 }
 
@@ -186,12 +187,15 @@ export async function designateRegistrationMaster(db: DB, principal: Actor, tena
     [tenantId, address])
   if (!staff) throw new Fault(404, 'MASTER_NOT_ACTIVE', '有効な法人管理者アカウントを指定してください。')
   const result = await db.query(`INSERT INTO tenant_master(tenant_id,staff_id) VALUES($1,$2)
-    ON CONFLICT (tenant_id) DO UPDATE SET staff_id=excluded.staff_id,pending_staff_id=NULL
-    WHERE tenant_master.staff_id<>excluded.staff_id RETURNING staff_id`, [tenantId, staff.id])
+    ON CONFLICT (tenant_id) DO UPDATE SET staff_id=excluded.staff_id,pending_staff_id=NULL,
+      pending_mode='replace',pending_replace_id=NULL
+    WHERE tenant_master.staff_id<>excluded.staff_id AND tenant_master.co_staff_id IS DISTINCT FROM excluded.staff_id
+    RETURNING staff_id`, [tenantId, staff.id])
   if (result.rowCount) {
     await db.query(`DELETE FROM staff_session s USING staff f WHERE s.staff_id=f.id
-      AND s.tenant_id=$1 AND f.tenant_id=s.tenant_id AND f.role='admin' AND f.id<>$2
-      AND s.session_kind='staff'`, [tenantId, staff.id])
+      AND s.tenant_id=$1 AND f.tenant_id=s.tenant_id AND f.role='admin'
+      AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id))
+      AND s.session_kind='staff'`, [tenantId])
     await audit(db, tenantId, null, null, 'master.designated', staff.id)
   }
   return { designated: true, changed: !!result.rowCount, email: address }

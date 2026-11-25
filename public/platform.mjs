@@ -92,6 +92,7 @@ async function loadProgress() {
       element('span',tenantStages[entry.stage] ?? entry.stage,'status'+(entry.stage==='verified'?' good':'')))
     if (entry.master) head.append(element('span',
       'マスター '+entry.master.email+' · '+(entry.master.activated?'有効化済':'招待中'),'muted'))
+    if(entry.master?.co_email)head.append(element('span','兼任マスター '+entry.master.co_email+' · 有効化済','muted'))
     row.append(head)
     for (const store of entry.stores) {
       const line = element('div',null,'onboarding-store')
@@ -102,7 +103,7 @@ async function loadProgress() {
       row.append(line)
     }
     const form = document.createElement('form')
-    const label = element('label','マスターに指定する管理者のメールアドレス')
+    const label = element('label','代表マスターに指定する有効な管理者のメールアドレス')
     const input = document.createElement('input')
     input.type = 'email'
     input.required = true
@@ -113,11 +114,12 @@ async function loadProgress() {
     form.append(label,submit)
     form.onsubmit = async event => {
       event.preventDefault()
+      if(!window.confirm('代表マスターを変更します。兼任マスターはそのままです。新しい招待や引き継ぎは「契約店舗の管理を開く」→「マスター管理・引き継ぎ」を使用できます。実行しますか？'))return
       submit.disabled = true
       try {
         const result = await platformApi('/registrations/'+entry.tenant.id+'/master','POST',{address:input.value})
         notice.textContent = result.changed
-          ? 'マスターを指定しました。前任者のログインは終了します。'
+          ? '代表マスターを指定しました。交代対象の前任者のログインを終了しました。'
           : 'すでにその人がマスターです。'
         notice.classList.remove('error')
         await loadProgress()

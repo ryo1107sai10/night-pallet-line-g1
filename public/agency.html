@@ -104,21 +104,8 @@
       </section>
     </div>
     <section id="agency-master" class="panel" hidden>
-      <h2>マスター管理</h2>
-      <p id="agency-master-current"></p>
-      <p id="agency-master-pending"></p>
-      <div class="actions">
-        <button type="button" id="agency-master-refresh" class="secondary">最新の状態を取得</button>
-        <button type="button" id="agency-master-promote" hidden>マスターを切り替える</button>
-      </div>
-      <p class="muted">「マスターを切り替える」を押すと、前任者（現在のマスター）のマスター権限が終了し、ログインも終了します。</p>
-      <form id="agency-master-invite">
-        <h3>新しいマスターを招待</h3>
-        <label>候補者のメールアドレス <input id="agency-master-address" type="email" required></label>
-        <button type="submit">招待を発行</button>
-      </form>
-      <p id="agency-master-invite-note" hidden>招待コードと設定キーを候補者の本人に渡してください。候補者はエールのログイン画面から有効化できます。</p>
-      <pre id="agency-master-invite-result" hidden></pre>
+      <h2>マスター管理・引き継ぎ</h2>
+      <div id="agency-master-content"></div>
       <p id="agency-master-status" role="status"></p>
     </section>
   </main>

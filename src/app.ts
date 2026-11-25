@@ -1,4 +1,4 @@
-import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, requireSupervisor } from './platform.js'
+import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
 import {completeMasterPasswordReset,masterPasswordResetPath,resetCompletion} from './master-password-reset.js'
@@ -232,7 +232,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs','master-team.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -788,12 +788,16 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   }))
   api.get('/agency-master',staff((db,actor)=>agencyMasterDetails(db,actor)))
   api.post('/agency-master/invite',staff((db,actor,req)=>{
-    const {address}=z.strictObject({address:email}).parse(req.body)
-    return inviteAgencyMaster(db,cfg,actor,address,keyOf(req))
+    const {address,mode,replace_id}=z.strictObject({address:email,mode:z.enum(['add','replace']).default('replace'),replace_id:uuid.optional()}).parse(req.body)
+    return inviteAgencyMaster(db,cfg,actor,address,keyOf(req),{mode,replace_id})
   },201))
   api.post('/agency-master/promote',staff((db,actor,req)=>{
     const {pending}=z.strictObject({pending:uuid}).parse(req.body)
     return promoteAgencyMaster(db,actor,pending)
+  }))
+  api.post('/agency-master/remove',staff((db,actor,req)=>{
+    const {target}=z.strictObject({target:uuid}).parse(req.body)
+    return removeAgencyMaster(db,actor,target)
   }))
   api.post('/stores',staff(async (db,actor,req)=>{
     requireAdmin(actor)

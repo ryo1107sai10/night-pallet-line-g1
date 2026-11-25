@@ -232,3 +232,90 @@ test('監督者（北村さん）は従来どおりスコープ経由で代理�
   assert.equal(promoted.pending_id, null)
   // 監督者の切り替えで前任者のセッションが終了することは g1 側でも検証している
 })
+
+test('兼任マスターは2名が個別認証で全店舗を運用し、片方だけを引き継げる',async()=>{
+  const tenant='joint-masters',firstEmail='first@example.test',secondEmail='second@example.test',nextEmail='next@example.test'
+  const firstInvite=await bootstrap(owner,cfg,{slug:tenant,name:'兼任マスター検証',email:firstEmail})
+  const first=await activate(firstInvite,firstEmail,tenant)
+  const {tenant:{id}}=expect(await request('/session',{cookie:first}),200)
+  await tx(owner,async db=>{await scope(db,id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[id])})
+  const storeData=name=>({name,address:'東京都',business_type:'検証',responsible:'検証担当',timezone:'Asia/Tokyo',cutoff:'06:00'})
+  const firstStore=expect(await post('/stores',first,storeData('一号店'),idempotency()),201).id
+  const original=expect(await request('/agency-master',{cookie:first}),200)
+  assert.deepEqual(original.masters.map(m=>m.email),[firstEmail])
+  assert.equal(original.master_limit,2)
+  const pending=expect(await post('/agency-master/invite',first,{address:secondEmail,mode:'add'},idempotency()),201)
+  assert.equal(expect(await request('/agency-master',{cookie:first}),200).pending_mode,'add')
+  expect(await post('/agency-master/promote',first,{pending:pending.id}),409)
+  const loginInput={tenant,email:secondEmail,password:pass,code:code(pending.setup_key)}
+  expect(await post('/auth/activate',null,{invite:pending.invite_code,password:pass,code:await previousCode(pending.setup_key)}),200)
+  expect(await post('/auth/master/login',null,loginInput),401)
+  const joint=expect(await post('/agency-master/promote',first,{pending:pending.id}),200)
+  assert.deepEqual(joint.masters.map(m=>m.email),[firstEmail,secondEmail])
+  expect(await request('/session',{cookie:first}),200)
+  const secondLogin=await post('/auth/master/login',null,{...loginInput,code:code(pending.setup_key)})
+  expect(secondLogin,200)
+  const second=secondLogin.cookie
+  assert.notEqual(first,second)
+  assert.equal(expect(await request('/session',{cookie:second}),200).actor.role,'admin')
+  const secondStore=expect(await post('/stores',second,storeData('二号店'),idempotency()),201).id
+  assert.deepEqual(new Set(expect(await request('/session',{cookie:first}),200).stores.map(s=>s.id)),new Set([firstStore,secondStore]))
+  assert.deepEqual(new Set(expect(await request('/session',{cookie:second}),200).stores.map(s=>s.id)),new Set([firstStore,secondStore]))
+  expect(await request('/stores/'+firstStore+'/connections',{cookie:second}),200)
+  expect(await request('/stores/'+secondStore+'/connections',{cookie:first}),200)
+  const linked=expect(await post('/stores/'+secondStore+'/connections',second,{
+    label:'兼任マスターの採用LINE',purpose:'recruitment',owner_name:'検証店舗',provider_id:'2000000010',
+    messaging_id:messaging,account_type:'unverified',management_authority:'検証のみ',
+    access_token:'local-test-token-for-co-master',channel_secret:'a'.repeat(32),token_type:'console',
+  },idempotency()),201)
+  assert.equal(expect(await request('/stores/'+secondStore+'/connections',{cookie:first}),200)[0].id,linked.id)
+  expect(await request('/stores/'+firstStore+'/connections',{cookie:plain}),404)
+  expect(await request('/platform/session',{cookie:second}),401)
+  expect(await post('/agency-master/invite',second,{address:'third@example.test',mode:'add'},idempotency()),409)
+  expect(await post('/agency-master/invite',second,{address:firstEmail,mode:'replace',replace_id:pending.id},idempotency()),409)
+  // Both members can recover their own password, not other tenants' credentials.
+  assert.equal((await prepareMasterPasswordReset(owner,cfg,{tenant,address:secondEmail})).email,secondEmail)
+  const replacement=expect(await post('/agency-master/invite',second,{address:nextEmail,mode:'replace',replace_id:original.current_id},idempotency()),201)
+  const ready=expect(await request('/agency-master',{cookie:second}),200)
+  assert.equal(ready.pending_replace_email,firstEmail)
+  expect(await post('/agency-master/promote',second,{pending:replacement.id}),409)
+  expect(await request('/session',{cookie:first}),200)
+  expect(await post('/auth/activate',null,{invite:replacement.invite_code,password:pass,code:await previousCode(replacement.setup_key)}),200)
+  const handed=expect(await post('/agency-master/promote',second,{pending:replacement.id}),200)
+  assert.deepEqual(handed.masters.map(m=>m.email),[nextEmail,secondEmail])
+  expect(await request('/session',{cookie:first}),401)
+  expect(await request('/session',{cookie:second}),200)
+  const nextLogin=await post('/auth/master/login',null,{tenant,email:nextEmail,password:pass,code:code(replacement.setup_key)})
+  expect(nextLogin,200)
+  assert.equal(expect(await request('/agency-master',{cookie:nextLogin.cookie}),200).masters.length,2)
+  // The continuing master can also hand over their own seat, or revoke it.
+  const removed=expect(await post('/agency-master/remove',nextLogin.cookie,{target:pending.id}),200)
+  assert.deepEqual(removed.masters.map(m=>m.email),[nextEmail])
+  expect(await request('/session',{cookie:second}),401)
+  expect(await post('/agency-master/remove',nextLogin.cookie,{target:replacement.id}),409)
+  await assert.rejects(prepareMasterPasswordReset(owner,cfg,{tenant,address:secondEmail}))
+  // DB membership remains tenant-scoped and non-authorized application requests cannot change it.
+  await tx(pool,async db=>{await scope(db,id);assert.equal((await db.query('UPDATE tenant_master SET co_staff_id=$1 WHERE tenant_id=$2',[pending.id,id])).rowCount,0)})
+})
+
+test('既に有効な店舗担当者の兼任昇格は最終確定までは権限を変えない',async()=>{
+  const tenant='existing-co-master',address='master@example.test',staffAddress='operator@example.test'
+  const primaryInvite=await bootstrap(owner,cfg,{slug:tenant,name:'既存担当者検証',email:address})
+  const primary=await activate(primaryInvite,address,tenant)
+  const store=expect(await post('/stores',primary,{name:'担当店舗',address:'東京都',business_type:'検証',responsible:'担当',timezone:'Asia/Tokyo',cutoff:'06:00'},idempotency()),201)
+  const existingInvite=expect(await post('/staff/invites',primary,{email:staffAddress,role:'manager',stores:[store.id]},idempotency()),201)
+  const existing=await activate(existingInvite,staffAddress,tenant)
+  const {tenant:{id}}=expect(await request('/session',{cookie:primary}),200)
+  await tx(owner,async db=>{await scope(db,id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[id])})
+  const proposal=expect(await post('/agency-master/invite',primary,{address:staffAddress,mode:'add'},idempotency()),201)
+  assert.equal(proposal.existing_active,true)
+  assert.equal(proposal.invite_code,undefined)
+  assert.equal(expect(await request('/session',{cookie:existing}),200).actor.role,'manager')
+  expect(await request('/agency-master',{cookie:existing}),403)
+  expect(await post('/agency-master/promote',primary,{pending:proposal.id}),200)
+  expect(await request('/session',{cookie:existing}),401)
+  const promoted=await post('/auth/master/login',null,{tenant,email:staffAddress,password:pass,code:code(existingInvite.setup_key,1)})
+  expect(promoted,200)
+  assert.equal(expect(await request('/session',{cookie:promoted.cookie}),200).actor.role,'admin')
+  expect(await request('/session',{cookie:primary}),200)
+})

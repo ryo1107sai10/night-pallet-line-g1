@@ -1,4 +1,5 @@
 import {mountDashboard} from '/static/dashboard.mjs'
+import {masterTeam} from '/static/master-team.mjs'
 
 const $=id=>document.getElementById(id)
 const status=$('agency-status')
@@ -148,8 +149,7 @@ $('agency-store-automation').onsubmit=event=>{
   saveSetup(s=>masterCall('/stores/'+encodeURIComponent(s.id)+'/recruitment/setup/automation','PATCH',{revision:s.revision,contract:data.has('contract'),enabled:form.elements.enabled.checked,monthly_limit:Number(data.get('monthly_limit')),reason:data.get('reason')}))
 }
 
-// マスター管理: 自法人の現マスターだけが GET /agency-master に成功し、この欄が表示される。
-// マスターでない代理店スタッフや他法人のアカウントでは 403 になるため欄は隠れたまま。
+// マスター管理は登録された2名と監督者だけが利用できる。
 const masterSection=$('agency-master')
 const masterStatus=$('agency-master-status')
 let masterInfo=null
@@ -165,57 +165,33 @@ async function masterCall(path,method='GET',data,key){
   return result
 }
 function renderMaster(){
-  const info=masterInfo
-  $('agency-master-current').textContent='現在のマスター · '+info.current_email
-  const pending=$('agency-master-pending')
-  const promote=$('agency-master-promote')
-  if(info.pending_id){
-    pending.textContent='招待中 · '+info.pending_email+' · '+
-      (info.pending_active?'本人による有効化が完了':info.expires_at?'有効期限 '+new Date(info.expires_at).toLocaleString('ja-JP'):'本人の有効化待ち')
-    promote.hidden=false
-    promote.disabled=!info.pending_active
-  }else{
-    pending.textContent=''
-    promote.hidden=true
-  }
-  const note=$('agency-master-invite-note'),issued=$('agency-master-invite-result')
-  if(lastMasterInvite&&lastMasterInvite.id===info.pending_id&&!info.pending_active){
-    note.hidden=false
-    issued.hidden=false
-    issued.textContent=['招待コード　'+lastMasterInvite.invite_code,
-      '認証アプリ設定キー　'+lastMasterInvite.setup_key,
-      '期限　'+new Date(lastMasterInvite.expires_at).toLocaleString('ja-JP')].join('\n')
-  }else{
-    note.hidden=true
-    issued.hidden=true
-  }
+  $('agency-master-content').replaceChildren(masterTeam(masterInfo,{
+    inviteResult:lastMasterInvite,refresh:loadMaster,
+    invite:async data=>{
+      lastMasterInvite=await masterCall('/agency-master/invite','POST',data)
+      await loadMaster()
+      masterStatus.textContent=lastMasterInvite.existing_active?'既存のアカウントを候補者に登録しました。最終確定してください。':'招待を発行しました。本人が有効化した後、追加・交代を確定してください。'
+    },
+    approve:async (pending,replaces)=>{
+      const result=await masterCall('/agency-master/promote','POST',{pending})
+      lastMasterInvite=null
+      if(await loadMaster())masterStatus.textContent=replaces?'引き継ぎが完了しました。':'兼任マスターを追加しました。2名とも利用できます。'
+      else{masterStatus.textContent='引き継ぎが完了しました。新しいマスターでログインしてください。';location.reload()}
+    },
+    remove:async target=>{
+      await masterCall('/agency-master/remove','POST',{target})
+      lastMasterInvite=null
+      if(await loadMaster())masterStatus.textContent='対象のマスターの権限を終了しました。'
+      else location.reload()
+    },
+  }))
 }
 async function loadMaster(){
   try{
     masterInfo=await masterCall('/agency-master')
     masterSection.hidden=false
     renderMaster()
-  }catch{masterSection.hidden=true}
-}
-$('agency-master-refresh').onclick=()=>loadMaster()
-$('agency-master-invite').onsubmit=async event=>{
-  event.preventDefault()
-  masterStatus.textContent=''
-  try{
-    lastMasterInvite=await masterCall('/agency-master/invite','POST',{address:$('agency-master-address').value})
-    masterStatus.textContent='招待を発行しました。招待の有効化が済むと切り替えられます。'
-    await loadMaster()
-  }catch(error){masterStatus.textContent=error.message}
-}
-$('agency-master-promote').onclick=async()=>{
-  if(!masterInfo?.pending_id)return
-  if(!window.confirm(masterInfo.pending_email+' に切り替えると、前任者のログインは終了します。切り替えますか？'))return
-  const promote=$('agency-master-promote')
-  promote.disabled=true
-  try{
-    await masterCall('/agency-master/promote','POST',{pending:masterInfo.pending_id})
-    masterStatus.textContent='マスターを切り替えました。新しいマスターでログインしてください。'
-    setTimeout(()=>location.reload(),1500)
-  }catch(error){masterStatus.textContent=error.message;promote.disabled=false}
+    return true
+  }catch{masterSection.hidden=true;return false}
 }
 loadMaster()

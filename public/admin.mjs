@@ -1,6 +1,7 @@
 import {workspace,workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
 import {lineSetupLinks,lineConsoleId,lineBasicId} from './line-setup.mjs'
 import {mountDashboard} from '/static/dashboard.mjs'
+import {masterTeam} from '/static/master-team.mjs'
 
 const $ = selector => document.querySelector(selector)
 const masterEntry = /^\/master\/?$/i.test(location.pathname)
@@ -511,42 +512,24 @@ function lineNavigationPanel(store, current, registration) {
 
 let recentMasterInvite
 function masterPanel(info) {
-  const team=panel('エールのマスター管理',el('p','現在のマスター · '+info.current_email))
-  team.id='supervisor-team'
-  if(info.pending_id){
-    team.append(el('p','招待中 · '+info.pending_email+' · '+
-      (info.pending_active?'本人による有効化が完了':info.expires_at?'有効期限 '+date(info.expires_at):'本人の有効化待ち')))
-    const refreshStatus=el('button','最新の状態を取得','secondary')
-    refreshStatus.type='button'
-    refreshStatus.onclick=()=>refresh().catch(report)
-    team.append(refreshStatus)
-    if(info.pending_active){
-      const promote=el('button','マスターを切り替える')
-      promote.type='button'
-      promote.onclick=async()=>{
-        if(!window.confirm(info.pending_email+' に切り替えると、前任者のログインは終了します。切り替えますか？'))return
-        promote.disabled=true
-        try {
-          await change('/agency-master/promote','POST',{pending:info.pending_id},'エールのマスターを切り替えました。')
-        }catch(error){report(error);promote.disabled=false}
-      }
-      team.append(promote)
-    }
-  }
-  const invite=details('新しいマスターを招待',formOf([field('候補者のメールアドレス','address',{type:'email'})],'招待を発行',
-    async (data,key)=>{
-      recentMasterInvite=await api('/agency-master/invite','POST',data,key)
+  const team=panel('エールのマスター管理・引き継ぎ',masterTeam(info,{
+    inviteResult:recentMasterInvite,refresh:()=>refresh(),
+    invite:async data=>{
+      recentMasterInvite=await api('/agency-master/invite','POST',data,true)
       await refresh()
-      feedback('招待を発行しました。招待の有効化が済むと切り替えられます。')
-    }))
-  invite.id='supervisor-invite'
-  if(recentMasterInvite&&recentMasterInvite.id===info.pending_id&&!info.pending_active){
-    invite.open=true
-    const {invite_code,setup_key,expires_at}=recentMasterInvite
-    invite.append(el('p','招待コードと設定キーを候補者の本人に渡してください。候補者はエールのログイン画面から有効化できます。'),
-      el('pre',['招待コード　'+invite_code,'認証アプリ設定キー　'+setup_key,'期限　'+date(expires_at)].join('\n')))
-  }
-  team.append(invite)
+      feedback(recentMasterInvite.existing_active?'既存アカウントを候補者に登録しました。最終確定してください。':'招待を発行しました。本人が有効化した後、追加・交代を確定してください。')
+    },
+    approve:async (pending,replaces)=>{
+      recentMasterInvite=null
+      await change('/agency-master/promote','POST',{pending},replaces?'選択したマスターの引き継ぎが完了しました。':'兼任マスターを追加しました。')
+    },
+    remove:async target=>{
+      recentMasterInvite=null
+      await change('/agency-master/remove','POST',{target},'対象のマスターの権限を終了しました。')
+    },
+  }))
+  team.id='supervisor-team'
+  team.querySelector('form').id='supervisor-invite'
   return team
 }
 

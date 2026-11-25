@@ -84,7 +84,7 @@ export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: stri
     const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE slug=$1', [data.tenant])
     if (directory) await scope(db, directory.tenant_id)
     const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean; supervisor_only:boolean}>(`SELECT f.*,
-      EXISTS(SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)) AS designated_master,
+      EXISTS(SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id)) AS designated_master,
       EXISTS(SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
         AND m.agency_id IS NOT NULL) AS designated_platform,
       t.supervisor_only
@@ -122,7 +122,7 @@ export async function authenticate(db: DB, credential: string | undefined, kind:
       AND CASE WHEN $2='platform' THEN EXISTS (
         SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id) AND m.agency_id IS NOT NULL
       ) ELSE NOT t.supervisor_only AND CASE WHEN f.role='admin' THEN EXISTS (
-        SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
+        SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id)
       ) ELSE f.agency_staff END END
     FOR SHARE OF f`,
     [digest(raw),kind])
@@ -205,7 +205,7 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
       ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND NOT f.platform_actor AND f.disabled_at IS NULL
         AND f.password_hash IS NULL
-        AND CASE WHEN f.role='admin' THEN EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.pending_staff_id))
+        AND CASE WHEN f.role='admin' THEN EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.pending_staff_id))
           ELSE f.agency_staff END
       FOR UPDATE OF f`, [hash])
     if (!staff) throw invalid()
@@ -225,7 +225,7 @@ export async function disableStaff(db: DB, actor: Actor, id: string, reason: str
   await scope(db, actor.tenant_id, undefined, true)
   const updated = await db.query(`UPDATE staff SET disabled_at=now() WHERE id=$1 AND disabled_at IS NULL AND NOT platform_actor
     AND NOT EXISTS (SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(staff.tenant_id,staff.id))
-    AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE (m.tenant_id,m.staff_id)=(staff.tenant_id,staff.id))
+    AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=staff.tenant_id AND staff.id IN (m.staff_id,m.co_staff_id))
     RETURNING id`, [id])
   if (!updated.rowCount) throw missing()
   await db.query('DELETE FROM staff_session WHERE staff_id=$1', [id])
