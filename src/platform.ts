@@ -151,25 +151,33 @@ export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:st
     const invite=existing?.password_hash&&!existing.disabled_at&&!existing.platform_actor&&existing.agency_staff&&existing.role!=='admin'
       ? {id:existing.id,existing_active:true as const}
       : await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[]},actor.id)
+    // A null replace target is reserved for the legacy single-master workflow.
+    // New explicit invitations carry the exact seat to be replaced.
     const changed=await db.query('UPDATE tenant_master SET pending_staff_id=$2,pending_mode=$3,pending_replace_id=$4 WHERE tenant_id=$1',
-      [actor.tenant_id,invite.id,change.mode,replaceId])
+      [actor.tenant_id,invite.id,change.mode,change.replace_id??null])
     if(!changed.rowCount)throw forbidden()
     await audit(db,actor.tenant_id,null,actor.id,'agency.master_invite',invite.id,null,{mode:change.mode,replaces:replaceId})
     return invite
   })
 }
 
-export async function promoteAgencyMaster(db:DB,actor:Actor,pending:string) {
+export async function promoteAgencyMaster(db:DB,actor:Actor,pending:string,expected?:MasterChange) {
   await requireAgencyMasterAccess(db,actor)
   await scope(db,actor.tenant_id,undefined,true)
   await lockDispatch(db,actor.tenant_id)
   const state=await lockedMasterBinding(db,actor)
   if(state.pending_staff_id!==pending)throw conflict()
+  const replaces=state.pending_mode==='replace'?(state.pending_replace_id??state.staff_id):null
+  // A second operator may have replaced the pending invitation while this page
+  // was open. Never let a confirmation for "add" become a handover (or switch
+  // the target seat). Keep the original implicit replacement API compatible.
+  if(expected){
+    if(expected.mode!==state.pending_mode||(expected.replace_id??null)!==replaces)throw conflict()
+  }else if(state.pending_mode!=='replace'||state.pending_replace_id!==null)throw conflict()
   if(state.pending_mode==='add'&&state.co_staff_id)throw fullMasters()
   const {rows:[candidate]}=await db.query<{role:string}>(`SELECT role FROM staff WHERE id=$1 AND tenant_id=$2
     AND (role='admin' OR agency_staff) AND NOT platform_actor AND password_hash IS NOT NULL AND disabled_at IS NULL FOR UPDATE`,[pending,actor.tenant_id])
   if(!candidate)throw new Fault(409,'MASTER_NOT_ACTIVE','新しいマスター本人が招待を有効化してから確定してください。')
-  const replaces=state.pending_mode==='replace'?(state.pending_replace_id??state.staff_id):null
   if(replaces&&![state.staff_id,state.co_staff_id].includes(replaces))throw conflict()
   const primary=replaces===state.staff_id?pending:state.staff_id
   const secondary=state.pending_mode==='add'||replaces===state.co_staff_id?pending:state.co_staff_id

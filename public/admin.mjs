@@ -521,7 +521,7 @@ function masterPanel(info) {
     },
     approve:async (pending,replaces)=>{
       recentMasterInvite=null
-      await change('/agency-master/promote','POST',{pending},replaces?'選択したマスターの引き継ぎが完了しました。':'兼任マスターを追加しました。')
+      await change('/agency-master/promote','POST',{pending,mode:replaces?'replace':'add',...(replaces?{replace_id:replaces}:{})},replaces?'選択したマスターの引き継ぎが完了しました。':'兼任マスターを追加しました。')
     },
     remove:async target=>{
       recentMasterInvite=null

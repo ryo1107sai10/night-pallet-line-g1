@@ -792,8 +792,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     return inviteAgencyMaster(db,cfg,actor,address,keyOf(req),{mode,replace_id})
   },201))
   api.post('/agency-master/promote',staff((db,actor,req)=>{
-    const {pending}=z.strictObject({pending:uuid}).parse(req.body)
-    return promoteAgencyMaster(db,actor,pending)
+    const {pending,mode,replace_id}=z.strictObject({pending:uuid,mode:z.enum(['add','replace']).optional(),replace_id:uuid.optional()}).parse(req.body)
+    if(replace_id&&!mode)throw new Fault(400,'MASTER_CHANGE','交代内容を確認してください。')
+    return promoteAgencyMaster(db,actor,pending,mode?{mode,replace_id}:undefined)
   }))
   api.post('/agency-master/remove',staff((db,actor,req)=>{
     const {target}=z.strictObject({target:uuid}).parse(req.body)

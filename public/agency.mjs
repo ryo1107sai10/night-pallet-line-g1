@@ -173,7 +173,7 @@ function renderMaster(){
       masterStatus.textContent=lastMasterInvite.existing_active?'既存のアカウントを候補者に登録しました。最終確定してください。':'招待を発行しました。本人が有効化した後、追加・交代を確定してください。'
     },
     approve:async (pending,replaces)=>{
-      const result=await masterCall('/agency-master/promote','POST',{pending})
+      await masterCall('/agency-master/promote','POST',{pending,mode:replaces?'replace':'add',...(replaces?{replace_id:replaces}:{})})
       lastMasterInvite=null
       if(await loadMaster())masterStatus.textContent=replaces?'引き継ぎが完了しました。':'兼任マスターを追加しました。2名とも利用できます。'
       else{masterStatus.textContent='引き継ぎが完了しました。新しいマスターでログインしてください。';location.reload()}
