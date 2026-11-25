@@ -1,7 +1,7 @@
 import type pg from 'pg'
 import { localPart, nextWindow, renderMessage, waitUntil } from '../public/studio/engine.mjs'
 import { audit, automationForStore, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
-import { channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
+import { automaticRelationshipReady, channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
 import { customerById, emitDelivery, endCustomerRuns, ensureCustomer, stopFromLine, type Customer } from './customer.js'
 import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
@@ -197,9 +197,7 @@ async function barred(db:DB,cfg:Config,s:Location,c:Channel,run:Run,cst:Customer
   if (run.event_kind==='booking_cancelled' && category!=='service') return '予約取消では業務案内だけを送信できます'
   if (run.booking_id && (!booking||booking.revision!==run.booking_revision)) return '予約が更新されました'
   if (cst.all_stop) return '全配信停止'
-  const {rows:[last]}=await db.query(`SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2
-    AND occurred_at<=now() AND kind IN ('follow','refollow','unfollow') ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,cst.user_key])
-  if (!last||last.kind==='unfollow') return '友だち状態を確認できないかブロックされています'
+  if (!await automaticRelationshipReady(db,c,cst.user_key)) return '友だち状態を確認できないかブロックされています'
   const pending=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND stop_signal IS NOT NULL
     AND processed_at IS NULL AND occurred_at>= $3 AND ($4 OR stop_signal='all') LIMIT 1`,
     [c.id,cst.user_key,cst.preference_at,category==='marketing'])

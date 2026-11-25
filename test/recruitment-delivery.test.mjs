@@ -11,7 +11,7 @@ import { Secret, TOTP} from 'otpauth'
 import { createApp} from '../dist/app.js'
 import { assertAppRole, digest, keyed, poolFor, scope, tx} from '../dist/core.js'
 import { bootstrap, migrate} from '../dist/setup.js'
-import { LineAPI, userKey} from '../dist/line.js'
+import { automaticRelationshipReady, channel, LineAPI, userKey} from '../dist/line.js'
 import { InterviewGoogle} from '../dist/interview-availability.js'
 import { workOnce} from '../dist/jobs.js'
 import { validate} from '../public/studio/engine.mjs'
@@ -145,8 +145,10 @@ const stopGraph = {
 
 // 友だち追加→メニューの postback でリンクを受け取り→引換→通知ONまで済ませた応募者を用意する。
 // この時点では通知がOFFのため follow シナリオには登録されない（同意が登録の前提）。
-async function optInApplicant(who, tag) {
-  await inbound(recruitCh, botR, [eventFor(tag + '-follow', 'follow', who)])
+async function optInApplicant(who, tag,preconnected=false) {
+  await inbound(recruitCh, botR, preconnected
+    ? [eventFor(tag+'-message','message',who,{message:{id:tag+'-msg',type:'text',text:'こんにちは'}})]
+    : [eventFor(tag + '-follow', 'follow', who)])
   await worker()
   await inbound(recruitCh, botR, [
     eventFor(tag + '-postback', 'postback', who, { postback: { data: 'action=interview_link'}}),
@@ -506,8 +508,8 @@ test('採用: 応募フォーム送信から同意済みの応募者へ一度だ
     {id:'end',type:'end',name:'完了'},
   ]})
   const optedIn='U'+'d'.repeat(32),optedOut='U'+'e'.repeat(32)
-  const submit=async(who,tag,consent)=>{
-    const cookie=await optInApplicant(who,tag)
+  const submit=async(who,tag,consent,preconnected=false)=>{
+    const cookie=await optInApplicant(who,tag,preconnected)
     if(!consent)expect(await request('/interview/notices',{method:'PUT',cookie,data:{enabled:false}}),200)
     const input={form:form.id,revision:form.revision,answers:{name:'動作確認'}}
     expect(await post('/interview/form',cookie,input),201)
@@ -515,7 +517,12 @@ test('採用: 応募フォーム送信から同意済みの応募者へ一度だ
     await flush(4)
     return cookie
   }
-  await submit(optedIn,'form-consented',true)
+  // The production test recipient was already a friend when the channel was connected.
+  // They had an authenticated incoming message but no follow event.
+  await submit(optedIn,'form-consented',true,true)
+  const key=userKey(cfg,{id:recruitCh},optedIn)
+  assert.equal((await read("SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow')",[recruitCh,key])).rowCount,0)
+  assert.equal((await read('SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2',[recruitCh,key])).rows[0].following,true)
   const sends=pushesTo(optedIn).filter(item=>item.text.includes('応募フォーム受付完了'))
   assert.equal(sends.length,1)
   assert.ok(rawOf(sends[0].text),'面談予約URLは実際に発行された専用URL')
@@ -525,4 +532,13 @@ test('採用: 応募フォーム送信から同意済みの応募者へ一度だ
   await flush(4)
   assert.equal(pushesTo(optedOut).filter(item=>item.text.includes('応募フォーム受付完了')).length,0)
   assert.equal((await read("SELECT id FROM applicant_event WHERE channel_id=$1 AND applicant_key=$2 AND kind='form'",[recruitCh,applicantKeyOf(optedOut)])).rowCount,0)
+  const ready=()=>tx(pool,async db=>{await scope(db,tenant,storeId);return automaticRelationshipReady(db,await channel(db,recruitCh),key)})
+  assert.equal(await ready(),true)
+  await read("UPDATE webhook_event SET occurred_at=now()-interval '8 days' WHERE channel_id=$1 AND user_key=$2 AND kind='message'",[recruitCh,key])
+  assert.equal(await ready(),false,'過去のメッセージだけでは送信できない')
+  await inbound(recruitCh,botR,[eventFor('form-explicit-block','unfollow',optedIn)])
+  await worker()
+  await inbound(recruitCh,botR,[eventFor('form-late-message','message',optedIn,{message:{id:'late-form-msg',type:'text',text:'旧メッセージ'}})])
+  await worker()
+  assert.equal(await ready(),false,'明示的なブロックをメッセージからの推定で上書きしない')
 })
