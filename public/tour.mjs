@@ -1,3 +1,4 @@
+import {mountPiyomaru} from './piyomaru.mjs'
 import {workspacePath} from './workspace-path.mjs'
 
 const stateKey='npl-supervisor-tour'
@@ -40,6 +41,7 @@ export async function tourRequest(id,content){
 }
 
 export function mountTour(page,{enter}={}){
+  mountPiyomaru(page)
   if(document.querySelector('#npl-tour'))return
   const css=node('link')
   css.rel='stylesheet'

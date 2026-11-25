@@ -1,4 +1,5 @@
 import {mountTour} from '/static/tour.mjs'
+import {mountPiyomaru} from '/static/piyomaru.mjs'
 
 const notice = document.querySelector('#notice')
 const tenants = document.querySelector('#tenants')
@@ -135,6 +136,7 @@ document.querySelector('#progress-refresh').onclick = () => loadProgress().catch
 try {
   const [{actor},records]=await Promise.all([platformApi('/session'),platformApi('/tenants')])
   document.querySelector('#account').textContent=actor.organization+' · '+actor.display_name
+  mountPiyomaru('platform')
   if (!records.length) notice.textContent='管理を担当する会社が登録されていません。'
   else mountTour('platform',{enter:async()=>(await platformApi('/tenants/'+records[0].id+'/enter','POST')).url})
   for (const tenant of records) {

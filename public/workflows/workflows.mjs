@@ -829,6 +829,7 @@ async function start(){
     $('#use').closest('label').hidden=true
   }
   actor=session.actor
+  if(actor.platform)(await import('/static/piyomaru.mjs')).mountPiyomaru('workflows')
   stores=session.stores
   $('#store').append(...stores.map(store=>new Option(store.name,store.id)))
   const query=new URLSearchParams(location.search)

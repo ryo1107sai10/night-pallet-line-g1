@@ -1,3 +1,4 @@
+import {mountPiyomaru} from './piyomaru.mjs'
 import {tourRequest} from './tour.mjs'
 
 const $=id=>document.getElementById(id)
@@ -90,7 +91,7 @@ preview.addEventListener('cancel',event=>{
   if($('publish-tour').disabled)event.preventDefault()
 })
 try{
-  tours=await tourRequest()
+  tours=await tourRequest();mountPiyomaru('tour-editor')
   selector.replaceChildren(...Object.entries(tours).map(([id,tour])=>new Option(tour.title,id)))
   load(selector.value)
   form.hidden=false

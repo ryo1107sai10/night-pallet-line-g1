@@ -1,3 +1,4 @@
+import {piyomaruInfo,configurePiyomaru,askPiyomaru,createPiyomaruJob,readPiyomaruJob,actPiyomaruJob,piyoSettingInput,piyoQuestionInput,piyoJobInput,piyoActionInput,piyoNoteInput,rememberPiyomaruNote,removePiyomaruNote} from './piyomaru.js'
 import {intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
 import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
@@ -234,7 +235,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
   const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs','master-team.mjs'])
-  const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
+  const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs','piyomaru.mjs','piyomaru.css','piyomaru-atlas.png'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
     if(tourAssets.has(asset)){
@@ -323,6 +324,38 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const id=tourId.parse(req.params.tour)
     const input=tourInput.parse(req.body)
     res.json(await tx(pool,db=>publishTour(db,platformCredential(req),id,input)))
+  })
+  api.get('/platform/piyomaru',async(req,res)=>{
+    res.json(await tx(pool,db=>piyomaruInfo(db,cfg,platformCredential(req))))
+  })
+  api.put('/platform/piyomaru/settings',async(req,res)=>{
+    const data=piyoSettingInput.parse(req.body)
+    res.json(await tx(pool,db=>configurePiyomaru(db,cfg,platformCredential(req),data)))
+  })
+  api.post('/platform/piyomaru/ask',async(req,res)=>{
+    res.json(await askPiyomaru(pool,cfg,platformCredential(req),piyoQuestionInput.parse(req.body)))
+  })
+  api.post('/platform/piyomaru/knowledge',async(req,res)=>{
+    const data=piyoNoteInput.parse(req.body)
+    res.status(201).json(await tx(pool,db=>rememberPiyomaruNote(db,cfg,platformCredential(req),data)))
+  })
+  api.delete('/platform/piyomaru/knowledge/:note',async(req,res)=>{
+    res.json(await tx(pool,db=>removePiyomaruNote(db,platformCredential(req),idOf(req,'note'))))
+  })
+  api.post('/platform/piyomaru/jobs',async(req,res)=>{
+    const data=piyoJobInput.parse(req.body)
+    res.status(201).json(await tx(pool,db=>createPiyomaruJob(db,cfg,platformCredential(req),data,keyOf(req))))
+  })
+  api.get('/platform/piyomaru/jobs/:job',async(req,res)=>{
+    res.json(await tx(pool,db=>readPiyomaruJob(db,cfg,platformCredential(req),idOf(req,'job'))))
+  })
+  api.post('/platform/piyomaru/jobs/:job/refresh',async(req,res)=>{
+    z.strictObject({}).parse(req.body)
+    res.json(await tx(pool,db=>readPiyomaruJob(db,cfg,platformCredential(req),idOf(req,'job'),true)))
+  })
+  api.post('/platform/piyomaru/jobs/:job/action',async(req,res)=>{
+    const data=piyoActionInput.parse(req.body)
+    res.json(await tx(pool,db=>actPiyomaruJob(db,cfg,platformCredential(req),idOf(req,'job'),data)))
   })
   api.get('/platform/tenants',async(req,res)=>{
     res.json(await tx(pool,db=>platformTenants(db,platformCredential(req))))

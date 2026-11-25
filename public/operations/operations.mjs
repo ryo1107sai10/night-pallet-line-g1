@@ -233,6 +233,7 @@ async function render(){
 }
 async function start(){
   session=await api('/session')
+  if(session.actor.platform)(await import('/static/piyomaru.mjs')).mountPiyomaru('operations')
   if(!['admin','manager'].includes(session.actor.role))throw new Error('法人管理者または店舗責任者でログインしてください。')
   for(const s of session.stores)$('#store').add(new Option(s.name,s.id))
   const requested=new URLSearchParams(location.search).get('store')
