@@ -10,11 +10,11 @@ RUN npm run build && npm prune --omit=dev
 FROM node:24-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 BIND_HOST=0.0.0.0
-COPY --from=build /app/package.json ./
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/public ./public
-COPY db ./db
+COPY --chown=node:node --from=build /app/package.json ./
+COPY --chown=node:node --from=build /app/node_modules ./node_modules
+COPY --chown=node:node --from=build /app/dist ./dist
+COPY --chown=node:node --from=build /app/public ./public
+COPY --chown=node:node db ./db
 USER node
 EXPOSE 3000
 CMD ["node","dist/server.js"]
