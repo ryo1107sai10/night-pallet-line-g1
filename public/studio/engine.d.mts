@@ -1,3 +1,7 @@
+import type {RichFormat} from './message-format.mjs'
+export type BranchRule={condition:'booked'|'consent'|'adult'|'responded'|'tag'|'assigned';tag?:string;negated?:boolean}
+export function branchRules(node:{condition:string;tag?:string;rules?:BranchRule[]}):BranchRule[]
+export function evaluateBranch(node:{condition:string;tag?:string;rules?:BranchRule[]},states:Record<string,unknown>,tags:string[]):boolean
 export const liveTriggers: Readonly<Record<string,Readonly<Record<string,string>>>>
 
 export function validate(flow: {
@@ -13,7 +17,7 @@ export function simulate(
   }
 ): {
   errors: Array<{ message: string; nodeId?: string | null }>
-  events: Array<{ id: string; type: string; name: string; at: string; state: string; detail: string; message?: string }>
+  events: Array<{ id: string; type: string; name: string; at: string; state: string; detail: string; message?: string; rich?:RichFormat }>
   count: number
 }
 

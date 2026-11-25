@@ -234,7 +234,7 @@ before(async () => {
       case '/v2/bot/message/push': {
         const body = JSON.parse(options.body)
         if(countedQueries!==null&&body.messages[0].text==='タグテンプレート送信確認B')queriesBeforePush=countedQueries
-        pushes.push({ to: body.to, text: body.messages[0].text})
+        const msg=body.messages[0];pushes.push({to:body.to,text:msg.type==='flex'?msg.contents.body.contents.at(-1).text:msg.text,message:msg})
         return new Response('{}', { status: 200, headers: { 'x-line-request-id': 'line-id'}})
       }
       default: throw Error('Unexpected path ' + address.pathname)
@@ -287,7 +287,9 @@ after(async () => {
 })
 
 test('採用: 友だち追加で登録され、面談URLが受信者ごとに発行されて届き、引換できる', async () => {
-  await publishScenario(followLinkGraph)
+  const rich={kind:'card',title:'面談のご案内',imageUrl:'https://images.example.test/guide.png',buttons:[{label:'説明',url:'https://example.test/guide'},{label:'面談予約',url:'{{interview_link}}'}]}
+  const flow={...followLinkGraph,entry:'conditions',nodes:[{id:'conditions',type:'branch',name:'複合条件',condition:'all',rules:[{condition:'consent'},{condition:'adult',negated:true}],yes:'welcome',no:'end'}, {...followLinkGraph.nodes[0],rich},followLinkGraph.nodes[1]]}
+  const published=await publishScenario(flow)
   await optInApplicant(userA, 't1-a')
   await followAgain(userA, 't1-a-follow2')
 
@@ -300,9 +302,13 @@ test('採用: 友だち追加で登録され、面談URLが受信者ごとに発
 
   const delivered = pushesTo(userA).filter(item => item.text.includes('面談予約はこちら'))
   assert.equal(delivered.length, 1)
+  assert.equal(delivered[0].message.type,'flex');assert.equal(delivered[0].message.contents.hero.url,rich.imageUrl)
+  assert.equal(delivered[0].message.contents.footer.contents[0].action.uri,rich.buttons[0].url)
+  const metrics=expect(await request('/stores/'+storeId+'/scenarios/'+published.id+'/metrics',{cookie:admin}),200);assert.equal(metrics.total,1);assert.equal(metrics.nodes.find(n=>n.node_id==='welcome').accepted,1);assert.equal(metrics.nodes.find(n=>n.node_id==='conditions').reached,1)
   assert.ok(delivered[0].text.includes('検証店へのご応募ありがとうございます'))
   assert.ok(!delivered[0].text.includes('link.invalid'), 'プレースホルダのまま送らないこと')
   const raw = rawOf(delivered[0].text)
+  assert.equal(rawOf(delivered[0].message.contents.footer.contents[1].action.uri),raw)
   assert.ok(raw, '実URLが含まれること')
   const tokenRow = (await read('SELECT * FROM interview_link_token WHERE token_hash=$1', [digest(raw)])).rows[0]
   assert.ok(tokenRow, 'PushのURLのハッシュが発行記録と一致すること')

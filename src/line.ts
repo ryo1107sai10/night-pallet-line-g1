@@ -1,3 +1,4 @@
+import {lineMessage,type RichFormat} from '../public/studio/message-format.mjs'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { lockDispatch } from './dispatch-lock.js'
 import { recordInboxEvent } from './inbox.js'
@@ -285,12 +286,12 @@ export class LineAPI {
     return {ok:response.ok||!id&&response.status===404,retry:response.status>=500||response.status===429}
   }
 
-  async push(cred: SendCredentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。') {
+  async push(cred: SendCredentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。',rich?:RichFormat) {
     const authorization = 'module' in cred ? await this.headers(cred) : {Authorization:'Bearer '+cred.access_token}
     const response = await this.call('/v2/bot/message/push', { method: 'POST',
       headers: { ...authorization, 'Content-Type': 'application/json',
         'X-Line-Retry-Key': attemptID },
-      body: JSON.stringify({ to: recipient, messages: [{type:'text',text:testBody}] }),
+      body: JSON.stringify({ to: recipient, messages: [lineMessage(testBody,rich)] }),
     })
     const acceptedId = response.headers.get('x-line-accepted-request-id')
     const requestId = response.headers.get('x-line-request-id')

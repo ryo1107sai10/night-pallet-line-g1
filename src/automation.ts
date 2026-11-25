@@ -1,5 +1,6 @@
+import {resolveRichButtons} from '../public/studio/message-format.mjs'
 import type pg from 'pg'
-import { localPart, nextWindow, renderMessage, waitUntil } from '../public/studio/engine.mjs'
+import { localPart, nextWindow, renderMessage, waitUntil, evaluateBranch } from '../public/studio/engine.mjs'
 import { audit, automationForStore, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
 import { automaticRelationshipReady, channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
 import { customerById, emitDelivery, endCustomerRuns, ensureCustomer, stopFromLine, type Customer } from './customer.js'
@@ -230,6 +231,7 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|n
     await end(db,run,'配信停止または旧予約版')
     return null
   }
+  await db.query(`INSERT INTO delivery_note(tenant_id,store_id,channel_id,enrollment_id,kind,node_id,detail) VALUES($1,$2,$3,$4,'studio_visit',$5,'ステップ到達') ON CONFLICT DO NOTHING`,[run.tenant_id,run.store_id,run.channel_id,run.id,node.id])
   if (node.type==='end') {await end(db,run,'完了');return null}
   if (node.type==='wait') {
     if (run.wait_node===node.id) await advance(db,run,node.next,run.due_at)
@@ -245,8 +247,9 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:Run):Promise<Job|n
   if (node.type==='branch') {
     const states={booked:booking?.status==='confirmed',consent:p.service_consent,adult:!!p.verified_20_at,
       responded:!!p.last_reply_at,assigned:!!p.assigned_to,tag:p.tags.includes(node.tag??'')}
-    await note(db,run,'branch',states[node.condition]?'はい':'いいえ')
-    await advance(db,run,states[node.condition]?node.yes:node.no,run.due_at)
+    const passed=evaluateBranch(node,states,p.tags)
+    await note(db,run,'branch',passed?'はい':'いいえ')
+    await advance(db,run,passed?node.yes:node.no,run.due_at)
     return null
   }
   if (node.type==='tag'||node.type==='task') {
@@ -380,6 +383,7 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
     }
     const to=unseal(cfg,'customer:'+c.id+':'+p.user_key,p.line_address)
     let sendBody=body
+    const richLinks:Record<string,string>={}
     const placeholders=[customerLinkPlaceholder(job.id),bookingUrlPlaceholder(job.id)].filter(p=>body.includes(p))
     if (placeholders.length) {
       // 来店予約・設定URL／予約変更URLは送信の直前に受信者ごと発行する（トークンの3時間期限は送信時点から数える）。
@@ -397,10 +401,11 @@ export async function runAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route)
       const link=await issueCustomerLinkToken(db,cfg,c,to)
       await audit(db,c.tenant_id,c.store_id,null,'customer_link.issue',link.id,null,
         {channel_id:c.id,source:'scenario_auto',enrollment_id:run.id})
+      richLinks[CUSTOMER_LINK_MARKER]=link.url
       sendBody=placeholders.reduce((text,p)=>text.split(p).join(link.url),body)
       if (sendBody.length>5000) return abort('差し込み後に5000文字を超えています')
     }
-    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody)
+    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody,resolveRichButtons(current?.type==='message'?current.rich:undefined,richLinks))
       .catch(()=>({status:'unknown',requestId:null,authError:false}))}
   })
   if (!submitted) return

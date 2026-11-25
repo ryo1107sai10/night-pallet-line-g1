@@ -1,8 +1,9 @@
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
-import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
+import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links,branchRules} from './engine.mjs'
 import {reorderGroups,reorderStep,adjacentMove} from './step-order.mjs'
 import {installStepDrag} from './step-drag.mjs'
-import {edgeTarget,incomingEdges,outgoingEdges,insertStep,formatMinutes,timeUnit,tagKeys,copyFlow,bodyReplacement,compareFlows,simulationCases,routeSteps} from './studio-tools.mjs'
+import {edgeTarget,incomingEdges,outgoingEdges,insertStep,formatMinutes,timeUnit,tagKeys,copyFlow,bodyReplacement,compareFlows,simulationCases,routeSteps,stepBlock,pasteBlock,stepOutline,wizardFlow} from './studio-tools.mjs'
+import {publicHttps} from './message-format.mjs'
 import {tagStepTemplates,recommendedTagTemplate,buildTagTemplate} from './tag-templates.mjs'
 
 scopeWorkspaceLinks()
@@ -25,6 +26,8 @@ let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,origina
 let busy=false, ready=false, preset='unbooked', localCreateKey
 let currentSession, viewMode='basic', zoom=1, autosave=true, saveTimer, savePromise=null, saveIssue='', historyKey='', historyTime=0
 let undoStack=[],redoStack=[],searchText='',folderFilter='',libraryKind='all',matrix=null,branchOpen=new Map(),pendingMeta={folder:'',is_template:false},recoveryAvailable=true
+let hideLibrary=false,hideInspector=false,focusMode=false,minimapOpen=false,stepClipboard=null,metrics=null,metricsBusy=false,presenceInfo=null,presenceSequence=0
+const editorClient=crypto.randomUUID()
 const recoveryKey=()=>store&&currentSession?'npl-studio-recovery-v2:'+currentSession.actor.id+':'+store.id:null
 function recoverRead(){try{const k=recoveryKey();return k?JSON.parse(localStorage.getItem(k)):null}catch{return null}}
 function recoverWrite(){
@@ -53,7 +56,7 @@ function historyMove(direction){
   historyKey='';dirty=JSON.stringify(graph)!==original;simulation=null;matrix=null;saveIssue=''
   show();scheduleSave();recoverWrite()
 }
-function resetEditorState(){clearTimeout(saveTimer);undoStack=[];redoStack=[];historyKey='';historyTime=0;matrix=null;saveIssue='';branchOpen=new Map();const canvas=$('#workspace .canvas-scroll');if(canvas){canvas.scrollTop=0;canvas.scrollLeft=0}$('#inspector').scrollTop=0}
+function resetEditorState(){metrics=null;metricsBusy=false;presenceInfo=null;presenceSequence++;minimapOpen=false;clearTimeout(saveTimer);undoStack=[];redoStack=[];historyKey='';historyTime=0;matrix=null;saveIssue='';branchOpen=new Map();const canvas=$('#workspace .canvas-scroll');if(canvas){canvas.scrollTop=0;canvas.scrollLeft=0}$('#inspector').scrollTop=0}
 function scheduleSave(){
   clearTimeout(saveTimer)
   recoverWrite()
@@ -67,6 +70,7 @@ function updateSaveIndicator(){
   const u=$('#undo-work'),r=$('#redo-work')
   if(u)u.disabled=!undoStack.length||busy
   if(r)r.disabled=!redoStack.length||busy
+  updateValidation();renderPresence()
 }
 function workbar(){
   const root=$('#workbar')
@@ -83,8 +87,9 @@ function workbar(){
   const guide=button('テスト',()=>{tab='test';show();choosePiece('inspector')})
   const publish=button('公開管理',()=>{tab='publish';show();choosePiece('inspector')},'primary')
   const utility=button('その他 ▾',openUtilities)
-  if(graph)ops.append(status,undo,redo,auto,view,utility,saveBtn,guide,publish)
-  root.replaceChildren(context,ops);root.hidden=!graph;updateSaveIndicator()
+  const focus=button(focusMode?'集中モード終了':'集中モード',()=>{focusMode=!focusMode;hideLibrary=focusMode;hideInspector=focusMode;applyPanelMode();show()});focus.setAttribute('aria-pressed',String(focusMode));focus.classList.add('desktop-focus')
+  if(graph)ops.append(status,undo,redo,auto,view,focus,utility,saveBtn,guide,publish)
+  const state=node('span','','presence-state');state.id='presence-state';context.append(state);root.replaceChildren(context,ops);root.hidden=!graph;updateSaveIndicator()
 }
 async function finishBeforeLeave(){
   clearTimeout(saveTimer)
@@ -179,6 +184,7 @@ function announce(text,error=false) {
   el.classList.toggle('error',error)
 }
 function choosePiece(value) {
+  if(value==='inspector'&&hideInspector){hideInspector=false;applyPanelMode()}
   part=value
   $('#layout').dataset.part=part
   for (const btn of document.querySelectorAll('.mobile button')) {
@@ -264,7 +270,7 @@ function setupFlow(data) {
   simulation=null
   selection=graph?.entry
   tab='edit'
-  syncScenarioURL();show()
+  syncScenarioURL();show();pollPresence()
 }
 
 async function refreshStore(next) {
@@ -421,8 +427,8 @@ async function openCopy(source,sourceStore,asTemplate=false,folder=''){
       tagMap[tag]=match?.tag_key??''
       dest.append(field(label,tagMap[tag],value=>{tagMap[tag]=value;validateCopy()},{items:{'':'複製先タグを選択',...Object.fromEntries(definitions.map(t=>[t.tag_key,t.label]))}}))
     }
-    const anyFixed=initial.nodes.some(n=>n.type==='message'&&/https?:\/\//.test(n.body))
-    if(anyFixed)dest.append(node('p','固定URLを含む文面があります。このアプリの既知の予約URLは差し込みに変更されます。外部リンクは自動変換せず、公開前に確認してください。','copy-warning'))
+    const anyFixed=initial.nodes.some(n=>n.type==='message'&&(/https?:\/\//.test(n.body)||n.rich?.imageUrl||n.rich?.buttons.length))
+    if(anyFixed)dest.append(node('p','固定URLを含む文面があります。このアプリの既知の予約URLは差し込みに変更されます。外部リンクは自動変換しません。店舗別予約リンクがボタンに設定されている場合は空欄にして、再設定を求めます。','copy-warning'))
     const confirm=button(asTemplate?'テンプレートを保存（配信しない）':'新規下書きへコピー',async()=>{
       if(!name.trim()||!channel||keys.some(k=>!tagMap[k])||new Set(keys.map(k=>tagMap[k])).size!==keys.length)throw new Error('名称・LINE・タグの対応付けを確認してください。')
       confirm.disabled=true
@@ -481,6 +487,8 @@ function openUtilities(){
   const menu=node('div',null,'insert-picker')
   const action=(label,fn)=>button(label,()=>{$('#dialog').close();return fn()})
   menu.append(action('シナリオを複製・他店舗へコピー',()=>openCopy(graph,store,false,scenario?.folder??'')),
+    action('複数店舗へ一括コピー',()=>openBatchCopy(graph)),
+    action('ステップを選択してコピー',()=>openStepCopy()),
     action('自社テンプレートとして保存',()=>openCopy(graph,store,true)),
     action('メッセージ文面の一括置換',openBatchReplace))
   if(scenario)menu.append(action('フォルダを設定',openFolder))
@@ -545,7 +553,7 @@ async function save(automatic=false) {
         scenarioList=[created,...scenarioList.filter(s=>s.id!==created.id)]
       }
       scenario={versions:scenario?.versions??[],...created}
-      syncScenarioURL()
+      syncScenarioURL();if(!id)pollPresence()
       original=JSON.stringify(snapshot)
       dirty=JSON.stringify(graph)!==original
       recoverWrite()
@@ -634,11 +642,14 @@ function library() {
 }
 
 const selectStep = id=>{
+  for(const key of stepOutline(graph).find(n=>n.id===id)?.path??[])branchOpen.set(key,true)
+  if(hideInspector){hideInspector=false;applyPanelMode()}
   selection=id
   tab='edit'
   show()
   choosePiece(matchMedia('(max-width:950px)').matches?'inspector':'workspace')
   $('#inspector').scrollTop=0
+  requestAnimationFrame(()=>{const card=[...$('#workspace').querySelectorAll('[data-step-id]')].find(c=>c.dataset.stepId===id);if(card&&matchMedia('(min-width:951px)').matches)card.scrollIntoView({block:'nearest',inline:'nearest'})})
 }
 const nameOf = id=>graph.nodes.find(item=>item.id===id)?.name??'接続なし'
 
@@ -674,10 +685,11 @@ function addStep(edge){
   }
   const target=edgeTarget(graph,edge)
   const menu=node('div',null,'insert-picker')
+  if(stepClipboard?.store===store.id&&stepClipboard.purpose===graph.purpose){const paste=button('コピーしたステップを挿入（'+stepClipboard.block.nodes.length+'件）',()=>{const result=pasteBlock(graph,edge,stepClipboard.block,newStepId);if(!result)throw new Error('この位置にはコピーできません。終了ステップを除いた範囲を選んでください。');$('#dialog').close();update(()=>{graph=result.flow;selection=result.entry;tab='edit'});selectStep(result.entry)},'primary');menu.append(paste)}
   const descriptions={message:'LINEの本文を送る',wait:'時間や日付まで待つ',branch:'条件に応じて経路を分ける',tag:'タグを追加・解除する',task:'担当者への作業を作る',end:'この経路を終了する'}
   for(const [type,label] of Object.entries(kinds)){
     const item=button('',()=>{
-      const id='step-'+crypto.randomUUID().slice(0,8),next=insertStep(graph,edge,type,id)
+      const id=newStepId(),next=insertStep(graph,edge,type,id)
       if(!next)throw new Error('追加箇所が変更されました。もう一度選んでください。')
       $('#dialog').close()
       update(()=>{graph=next;selection=id;tab='edit'})
@@ -719,7 +731,9 @@ function flowView() {
   badges.append(pill(dirty?'未保存の下書き':steps[scenario?.state??'draft'],dirty?'warn':''))
   title.append(badges)
   const bar=node('div',null,'toolbar')
-  bar.append(button('＋ ステップ追加',()=>addStep()),button('配信前テスト',()=>{tab='test';show();choosePiece('inspector')}),node('span',graph.nodes.length+'ステップ','field-hint'),node('span',null,'spacer'))
+  bar.append(button('＋ ステップ追加',()=>addStep()),button('ステップ検索',openStepSearch),button('コピー',openStepCopy),button(minimapOpen?'マップを閉じる':'ミニマップ',()=>{minimapOpen=!minimapOpen;show()}),button('実績',()=>{tab='metrics';show();choosePiece('inspector');loadMetrics()}),node('span',graph.nodes.length+'ステップ','field-hint'),node('span',null,'spacer'))
+  const left=button(hideLibrary?'一覧を表示':'一覧を隠す',()=>{hideLibrary=!hideLibrary;applyPanelMode();show()});left.classList.add('desktop-panel-toggle');bar.append(left)
+  const right=button(hideInspector?'設定を表示':'設定を隠す',()=>{hideInspector=!hideInspector;applyPanelMode();show()});right.classList.add('desktop-panel-toggle');bar.append(right)
   if(viewMode==='graph'){
     const setZoom=value=>{zoom=Math.max(.35,Math.min(1.5,value));show()}
     const zoomOut=button('－',()=>setZoom(zoom-.1));zoomOut.setAttribute('aria-label','縮小')
@@ -758,11 +772,15 @@ function flowView() {
     const copy=node('span',null,'node-content')
     let detail=kinds[item.type]
     if(item.type==='wait')detail+=' · '+(item.mode==='delay'?formatMinutes(item.minutes):item.mode==='booking'?'予約の'+formatMinutes(item.minutes)+'前':waitTypes[item.mode])
-    if(item.type==='branch')detail+=' · '+(conditions[item.condition]??'条件未設定')+(item.condition==='tag'?'：'+(applicantTagOptions(item.tag)[item.tag]??item.tag):'')
-    if(item.type==='message')detail+=' · '+(item.category==='marketing'?'販促':graph.purpose==='recruitment'?'採用連絡':'業務案内')
+    if(item.type==='branch')detail+=' · '+(conditions[item.condition]??(item.condition==='all'?'すべての条件':item.condition==='any'?'いずれかの条件':'条件未設定'))+(item.condition==='tag'?'：'+(applicantTagOptions(item.tag)[item.tag]??item.tag):'')
+    if(item.type==='branch'&&['all','any'].includes(item.condition))detail+='（'+branchRules(item).length+'件）'
+    if(item.type==='message')detail+=' · '+(item.rich?({image:'画像付き',buttons:'ボタン付き',card:'カード'}[item.rich.kind])+' · ':'')+(item.category==='marketing'?'販促':graph.purpose==='recruitment'?'採用連絡':'業務案内')
     copy.append(node('strong',item.name||kinds[item.type]),node('small',detail+(item.id===graph.entry?' · 開始':'')))
     if(item.type==='message')copy.append(node('small',item.body.replace(/\s+/g,' '),'excerpt'))
     card.append(node('span',icons[item.type],'icon '+item.type),copy)
+    copy.append(node('small','','step-error'))
+    const observed=metrics&&metrics.version===scenario?.published_version?metrics.nodes.find(n=>n.node_id===item.id):null
+    if(observed)copy.append(node('small','実績 v'+metrics.version+'：通過 '+observed.reached+'件'+(item.type==='message'?' ／ LINE受付 '+observed.accepted+'件':''),'step-stat'))
     if((groups.get(item.id)?.length??0)>1){
       card.dataset.reorderable='true';card.setAttribute('aria-describedby','reorder-help');card.setAttribute('aria-keyshortcuts','Alt+ArrowUp Alt+ArrowDown')
       const grip=node('span','⠿','step-grip');grip.setAttribute('aria-hidden','true');grip.title='長押しして並べ替え';card.append(grip)
@@ -774,13 +792,13 @@ function flowView() {
       for(const key of ['yes','no']){
         const next=item[key],label=key==='yes'?'はい':'いいえ',edge={owner:item.id,key}
         if(viewMode==='basic'){
-          const lane=node('details',null,'branch-route')
+          const lane=node('details',null,'branch-route branch-'+key)
           lane.open=branchOpen.get(item.id+':'+key)??true
           lane.addEventListener('toggle',()=>{if(lane.isConnected)branchOpen.set(item.id+':'+key,lane.open)})
           const summary=node('summary',label+' → '+nameOf(next)+'（'+routeSteps(graph,next)+'ステップ）','branch-summary')
           const body=node('div',null,'branch-body');lane.append(summary,body);connect(edge,body);drawPath(next,body,depth+1);lanes.append(lane)
         }else{
-          const lane=node('div',null,'branch-lane')
+          const lane=node('div',null,'branch-lane branch-'+key)
           lane.append(node('span',label,'branch-label'));connect(edge,lane);drawPath(next,lane,depth+1);lanes.append(lane)
         }
       }
@@ -795,7 +813,9 @@ function flowView() {
   }
   board.append(help,trigger,list);scroll.append(board)
   installStepDrag(board,{groups,canMove:()=>!busy&&board.isConnected,onMove:(source,target,position)=>applyStepOrder(reorderStep(graph,source,target,position),source)})
-  root.replaceChildren(title,bar,scroll)
+  const overview=minimapOpen?makeMinimap():null
+  root.replaceChildren(title,bar,...(overview?[overview]:[]),scroll)
+  updateValidation()
   scroll.scrollTop=oldTop;scroll.scrollLeft=oldLeft
 }
 
@@ -820,27 +840,30 @@ function editStep() {
   }
   if (item.type==='message') {
     if(graph.purpose==='customer')wrap.append(field('連絡の用途',item.category,set('category'),{items:{service:'業務案内',marketing:'顧客向け販促'}}))
+    wrap.append(field('メッセージ形式',item.rich?.kind??'text',value=>update(()=>{if(value==='text')delete item.rich;else item.rich={kind:value,title:value==='card'?(item.rich?.title||'ご案内'):item.rich?.title??'',imageUrl:item.rich?.imageUrl??'',buttons:item.rich?.buttons?.length?item.rich.buttons:value==='buttons'?[{label:'詳細を見る',url:''}]:[]}}),{items:{text:'テキスト',image:'画像付きメッセージ',buttons:'リンクボタン付き',card:'カード'}}))
+    if(item.rich)wrap.append(richEditor(item))
     const preview=node('div',null,'preview')
-    const bubble=node('p',null,'bubble')
-    preview.append(node('h3','LINEプレビュー'),bubble)
+    const bubble=node('div',null,'rich-preview')
+    preview.append(node('h3','LINEプレビュー（模擬）'),bubble)
     function updatePreview() {
       const result=renderMessage(item.body,person)
-      bubble.textContent=result.reason??(result.message||'メッセージを入力してください。')
+      bubble.replaceChildren(messagePreview(result.reason??(result.message||'メッセージを入力してください。'),item.rich))
     }
     const body=field('メッセージ本文',item.body,value=>{set('body',false)(value);updatePreview()},
-      {type:'textarea',event:'input',attributes:{maxlength:'5000'}})
+      {type:'textarea',event:'input',attributes:{maxlength:item.rich?'1000':'5000'}})
     const vars=node('div',null,'controls')
     const relevant=graph.purpose==='recruitment'?['name','store','staff','booking','interview_link']:['name','store','staff','booking','price','booking_url','customer_link']
     for (const [key,label] of Object.entries(variables).filter(([key])=>relevant.includes(key))) vars.append(button(label,()=>{
       const input=body.querySelector('textarea')
       input.setRangeText('{{'+key+'}}',input.selectionStart,input.selectionEnd,'end')
       set('body',false)(input.value)
+      count.textContent=input.value.length+'/'+(item.rich?1000:5000)+'文字'
       updatePreview()
       input.focus()
     },'chip'))
     updatePreview()
-    const count=node('p',item.body.length+'/5000文字','field-hint')
-    body.querySelector('textarea').addEventListener('input',()=>{count.textContent=body.querySelector('textarea').value.length+'/5000文字'})
+    const count=node('p',item.body.length+'/'+(item.rich?1000:5000)+'文字','field-hint')
+    body.querySelector('textarea').addEventListener('input',()=>{count.textContent=body.querySelector('textarea').value.length+'/'+(item.rich?1000:5000)+'文字'})
     wrap.append(body,count,vars,preview,node('div',null,'separ'))
     if(graph.purpose==='recruitment'&&!item.tagGuard&&applicantCatalog.enabled&&viewMode==='graph'){
       wrap.append(button('送信直前条件を追加',()=>update(()=>{item.tagGuard={tag:graph.triggerTag||applicantCatalog.definitions.find(t=>t.active)?.tag_key||'',exclude:[]}})))
@@ -876,8 +899,14 @@ function editStep() {
     if (item.mode==='business') wrap.append(field('何営業日後',item.days,set('days'),{type:'number',attributes:{min:'0'}}),field('営業日内の時刻',item.time,set('time'),{type:'time'}))
   }
   if (item.type==='branch') {
-    wrap.append(field('分岐する条件',item.condition,set('condition'),{items:conditions}))
+    wrap.append(field('分岐する条件',item.condition,value=>update(()=>{const prev=branchRules(item);item.condition=value;if(['all','any'].includes(value)){item.rules=prev;delete item.tag}else{delete item.rules;if(value==='tag')item.tag=prev.find(r=>r.condition==='tag')?.tag??'';else delete item.tag}}),{items:{...conditions,all:'すべて満たす（AND）',any:'いずれか満たす（OR）'}}))
     if (item.condition==='tag') wrap.append(tagField('タグ名',item.tag,set('tag',false)))
+    if(['all','any'].includes(item.condition)){
+      const rules=item.rules??[];const ruleBox=node('div',null,'rules-box')
+      ruleBox.append(node('p',item.condition==='all'?'すべての条件を満たす場合「はい」へ':'1つ以上の条件を満たす場合「はい」へ','field-hint'))
+      rules.forEach((rule,i)=>{const row=node('section',null,'rule-row');row.append(node('strong','条件 '+(i+1)),field('条件の内容',rule.condition,v=>update(()=>{rule.condition=v;if(v!=='tag')delete rule.tag}),{items:conditions}));if(rule.condition==='tag')row.append(tagField('タグ',rule.tag??'',v=>update(()=>{rule.tag=v},false,item.id+':rule:'+i)));row.append(field('この条件を満たさない',!!rule.negated,v=>update(()=>{rule.negated=v}),{type:'checkbox'}));const remove=button('条件を削除',()=>update(()=>{item.rules.splice(i,1)}));remove.disabled=rules.length<=1;row.append(remove);ruleBox.append(row)})
+      const add=button('＋ 条件を追加',()=>update(()=>{item.rules??=[];item.rules.push({condition:'booked',negated:false})}));add.disabled=rules.length>=8;ruleBox.append(add);wrap.append(ruleBox)
+    }
     if(viewMode==='graph')wrap.append(field('条件を満たす場合',item.yes,set('yes'),{items:destinations}),field('条件を満たさない場合',item.no,set('no'),{items:destinations}))
     else for(const key of ['yes','no'])wrap.append(node('p',(key==='yes'?'はい':'いいえ')+' → '+nameOf(item[key]),'field-hint'),button((key==='yes'?'はい':'いいえ')+' に挿入',()=>addStep({owner:item.id,key})))
   } else if(item.type!=='end'){const next=field('次のステップ',item.next,set('next'),{items:destinations});if(viewMode==='graph')wrap.append(next);else wrap.append(node('p','次：'+nameOf(item.next),'field-hint'),button('次の位置に挿入',()=>addStep({owner:item.id,key:'next'})))}
@@ -885,7 +914,7 @@ function editStep() {
     field('タグ操作',item.action??'add',set('action'),{items:{add:'付ける',remove:'外す'}}),
     tagField('タグ名',item.tag,set('tag',false)))
   if (item.type==='task') wrap.append(field('担当者へ渡す内容',item.note,set('note',false),{type:'textarea',event:'input',attributes:{maxlength:'400'}}))
-  wrap.append(button('ステップを削除',()=>{
+  wrap.append(button('このステップをコピー',()=>copySelected([item.id])),button('ステップを削除',()=>{
     const ok=button('削除を確定',()=>{$('#dialog').close();removeStep(item)},'danger')
     dialog('「'+item.name+'」を削除しますか？','接続先を変更した後、公開前にフローを検証してください。',ok)
   },'danger'))
@@ -1040,7 +1069,7 @@ function resultView() {
       row.append(time,node('strong',event.name),node('p',(event.state==='held'?'保留・除外　':'')+event.detail))
       if (event.message) {
         const detail=node('details')
-        detail.append(node('summary','送信内容'),node('p',event.message,'bubble'))
+        detail.append(node('summary','送信内容'),messagePreview(event.message,event.rich))
         row.append(detail)
       }
       list.append(row)
@@ -1050,7 +1079,7 @@ function resultView() {
     const timeline=node('section',null,'chat-timeline')
     timeline.append(node('h3','LINEトークの配信プレビュー'))
     for(const event of simulation.events.filter(e=>e.type==='message')){
-      timeline.append(node('time',formatter.format(new Date(event.at))),event.message?node('p',event.message,'bubble'):node('p','送信なし：'+event.detail,'held-note'))
+      timeline.append(node('time',formatter.format(new Date(event.at))),event.message?messagePreview(event.message,event.rich):node('p','送信なし：'+event.detail,'held-note'))
     }
     if(timeline.children.length===1)timeline.append(node('p','この条件では送信されません。','field-hint'))
     output.append(timeline,list)
@@ -1088,10 +1117,11 @@ function stepDescription(flow,n){
   const lines=[n.name+'（'+(kinds[n.type]??n.type)+'）']
   if(n.type==='message'){
     lines.push(n.body)
+    if(n.rich)lines.push('形式：'+n.rich.kind,'タイトル：'+(n.rich.title??''),'画像：'+(n.rich.imageUrl??''),...n.rich.buttons.map(b=>b.label+' → '+b.url))
     if(n.tagGuard)lines.push('送信直前条件：'+n.tagGuard.tag+(n.tagGuard.exclude.length?' ／ 除外 '+n.tagGuard.exclude.join('、'):'')+(n.tagGuard.booked===undefined?'':n.tagGuard.booked?' ／ 予約済み':' ／ 未予約'))
   }
   if(n.type==='wait')lines.push(n.mode==='delay'?formatMinutes(n.minutes)+'待機':n.mode==='booking'?'予約の'+formatMinutes(n.minutes)+'前':n.mode==='business'?n.days+'営業日後 '+n.time:n.time??'未設定')
-  if(n.type==='branch')lines.push((conditions[n.condition]??n.condition)+(n.condition==='tag'?'：'+n.tag:''),'はい → '+name(n.yes),'いいえ → '+name(n.no))
+  if(n.type==='branch')lines.push((n.condition==='all'?'すべて（AND）':n.condition==='any'?'いずれか（OR）':'条件')+'：'+branchRules(n).map(r=>(conditions[r.condition]??r.condition)+(r.condition==='tag'?'：'+r.tag:'')+(r.negated?' を満たさない':'')).join(' ／ '),'はい → '+name(n.yes),'いいえ → '+name(n.no))
   else if(n.type!=='end')lines.push('次 → '+name(n.next))
   if(n.type==='tag')lines.push((n.action==='remove'?'解除':'追加')+'：'+n.tag)
   if(n.type==='task')lines.push(n.note)
@@ -1156,7 +1186,7 @@ async function reviewPublication(){
   box.append(results)
   const messages=node('details',null,'diff-details')
   messages.append(node('summary','公開するLINEメッセージ（'+graph.nodes.filter(n=>n.type==='message').length+'ステップ）'))
-  for(const item of graph.nodes.filter(n=>n.type==='message'))messages.append(node('h4',item.name),node('p',item.body,'bubble'))
+  for(const item of graph.nodes.filter(n=>n.type==='message'))messages.append(node('h4',item.name),messagePreview(item.body,item.rich))
   if(messages.children.length>1)box.append(messages)
   box.append(node('h3',info.published?'現公開版と下書きの差分':'初回公開の内容'),diffSummary(info.published?.graph,graph))
   if(info.related.length){
@@ -1236,20 +1266,162 @@ function inspector() {
   if (!graph) {root.replaceChildren(panelHead('設定・プレビュー'));return}
   const tabs=node('nav',null,'tabs')
   tabs.setAttribute('aria-label','シナリオの設定')
-  for (const [id,label] of Object.entries({edit:'ステップ',settings:'設定',test:'テスト',publish:'公開版'})) {
-    const btn=button(label,()=>{tab=id;show()},tab===id?'active':'')
+  for (const [id,label] of Object.entries({edit:'ステップ',settings:'設定',test:'テスト',publish:'公開版',metrics:'実績'})) {
+    const btn=button(label,()=>{tab=id;show();if(id==='metrics')loadMetrics()},tab===id?'active':'')
     btn.setAttribute('aria-pressed',String(tab===id))
     tabs.append(btn)
   }
   const panel=node('div',null,'panelbody')
-  const chosen={edit:editStep,settings,test:resultView,publish:publication}
-  panel.append(chosen[tab]())
-  root.replaceChildren(panelHead('設定・プレビュー'),tabs,panel)
+  const chosen={edit:editStep,settings,test:resultView,publish:publication,metrics:metricsView}
+  const validation=node('div',null,'validation-panel');validation.id='validation-panel';panel.append(validation,chosen[tab]())
+  root.replaceChildren(panelHead('設定・プレビュー'),tabs,panel);updateValidation()
 }
 
 function show() {
   const inspectorScroll=$('#inspector')?.scrollTop??0;const libraryScroll=$('#library')?.scrollTop??0
-  library();flowView();inspector();workbar();$('#inspector').scrollTop=inspectorScroll;$('#library').scrollTop=libraryScroll
+  library();flowView();inspector();workbar();applyPanelMode();$('#inspector').scrollTop=inspectorScroll;$('#library').scrollTop=libraryScroll
+}
+
+function applyPanelMode(){
+  const layout=$('#layout');layout.classList.toggle('hide-library',hideLibrary);layout.classList.toggle('hide-inspector',hideInspector);layout.classList.toggle('focus-mode',focusMode)
+}
+function validationIssues(){
+  if(!graph)return []
+  const errors=limits()
+  if(graph.entry){const seen=new Set(),map=new Map(graph.nodes.map(n=>[n.id,n])),stack=[graph.entry];while(stack.length){const id=stack.pop();if(seen.has(id)||!map.has(id))continue;seen.add(id);stack.push(...links(map.get(id)))}for(const n of graph.nodes)if(!seen.has(n.id))errors.push({message:'開始条件から到達できないステップ：'+n.name,nodeId:n.id})}
+  if(!Object.hasOwn(liveTriggers[graph.purpose]??{},graph.trigger))errors.push({message:'この開始イベントは実配信に未対応です。',nodeId:null})
+  const channel=channels.find(c=>c.id===graph.channel)
+  if(graph.channel&&(!channel||![graph.purpose,'shared'].includes(channel.purpose)))errors.push({message:'用途に対応する公式LINEを選んでください。',nodeId:null})
+  if(graph.purpose==='recruitment')for(const n of graph.nodes){
+    const tags=tagKeys({nodes:[n]}),active=applicantCatalog.definitions.filter(t=>t.active)
+    if(tags.some(k=>!active.some(t=>t.tag_key===k||t.label===k)))errors.push({message:'現在の店舗で有効な採用タグを選んでください。',nodeId:n.id})
+  }
+  return errors
+}
+function updateValidation(){
+  if(!graph)return
+  const issues=validationIssues(),byStep=new Map()
+  for(const issue of issues)if(issue.nodeId&&!byStep.has(issue.nodeId))byStep.set(issue.nodeId,issue.message)
+  for(const card of document.querySelectorAll('[data-step-id]')){const msg=byStep.get(card.dataset.stepId);card.classList.toggle('invalid-step',!!msg);const badge=card.querySelector('.step-error');if(badge){badge.hidden=!msg;badge.textContent=msg?'⚠ '+msg:''}}
+  const panel=$('#validation-panel');if(!panel)return
+  const summary=node('details',null,'live-check '+(issues.length?'has-errors':'no-errors'))
+  summary.append(node('summary',issues.length?'⚠ 設定の確認 '+issues.length+'件':'✓ フローの設定に問題なし'))
+  const list=node('div',null,'validation-list')
+  for(const issue of issues){const b=button(issue.message,()=>{if(issue.nodeId)selectStep(issue.nodeId);else{tab='settings';show();choosePiece('inspector')}});list.append(b)}
+  if(!issues.length)list.append(node('p','実配信の開始条件・契約・LINE接続は公開前に別途確認します。','field-hint'))
+  summary.append(list);summary.open=panel.querySelector('details')?.open??false;panel.replaceChildren(summary)
+}
+function newStepId(){return 'step-'+crypto.randomUUID().replaceAll('-','').slice(0,16)}
+function copySelected(ids){
+  const block=stepBlock(graph,ids)
+  if(!block)throw new Error('一つにつながるステップを選択してください。')
+  stepClipboard={store:store.id,purpose:graph.purpose,block}
+  announce(block.nodes.length+'ステップをコピーしました。追加位置の「＋」から貼り付けられます。');if($('#dialog').open)$('#dialog').close()
+}
+function openStepCopy(){
+  const chosen=new Set(selection?[selection]:[]),box=node('div',null,'step-copy-dialog'),list=node('div',null,'step-checklist'),hint=node('p','','field-hint')
+  const apply=button('選択したステップをコピー',()=>copySelected([...chosen]),'primary')
+  function refresh(){const block=stepBlock(graph,[...chosen]);hint.textContent=chosen.size+'件を選択'+(block?' · コピー可能':' · ひとつにつながる範囲を選択');apply.disabled=!block}
+  for(const n of stepOutline(graph))list.append(field(n.name+'（'+kinds[n.type]+'）',chosen.has(n.id),v=>{if(v)chosen.add(n.id);else chosen.delete(n.id);refresh()},{type:'checkbox'}))
+  box.append(hint,list,apply);refresh();dialog('ステップをコピー','同じ店舗・用途内で、連続したステップや分岐の一部を複製できます。選択範囲外の出口は挿入先へ接続します。終了を含む範囲は既存経路の途中に挿入できません。',box)
+}
+function openStepSearch(){
+  const box=node('div',null,'step-search'),list=node('div',null,'step-search-results')
+  const search=value=>{list.replaceChildren();const key=value.trim().toLocaleLowerCase();for(const entry of stepOutline(graph)){const n=graph.nodes.find(n=>n.id===entry.id),terms=[n.name,n.body,n.note,n.tag,n.type,...(n.rich?.buttons??[]).map(b=>b.label+' '+b.url),...tagKeys({nodes:[n]}).map(t=>applicantTagOptions(t)[t]??t)].filter(Boolean).join(' ').toLocaleLowerCase();if(!terms.includes(key))continue;const b=button('',()=>{$('#dialog').close();selectStep(n.id)},'mini-result');b.append(node('strong',n.name),node('small',kinds[n.type]+' · '+(n.body??n.note??'').slice(0,100)));list.append(b)}if(!list.children.length)list.append(node('p','一致するステップがありません。','empty'))}
+  box.append(field('ステップ名・本文・タグを検索','',search,{event:'input',attributes:{type:'search',placeholder:'例：面談予約'}}),list);search('');dialog('フロー内検索','結果を選ぶと該当ステップへ移動します。',box);box.querySelector('input').focus()
+}
+function makeMinimap(){
+  const area=node('section',null,'minimap'),head=node('div',null,'minimap-head');head.append(node('strong','フローの全体像'),node('small',graph.nodes.length+' ステップ'),button('閉じる',()=>{minimapOpen=false;show()}));area.append(head,miniGraph())
+  const map=node('div',null,'minimap-nodes');for(const n of stepOutline(graph)){const b=button('',()=>selectStep(n.id),'minimap-node '+n.type+(n.id===selection?' selected':''));b.append(node('span',icons[n.type]),node('small',n.name));b.title=n.name;b.setAttribute('aria-label','移動：'+n.name);b.dataset.depth=String(Math.min(n.depth,3));map.append(b)}area.append(map);return area
+}
+function miniGraph(){
+  const ns='http://www.w3.org/2000/svg',make=(tag,attrs={})=>{const el=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))el.setAttribute(k,String(v));return el}
+  const outline=stepOutline(graph),byId=new Map(graph.nodes.map(n=>[n.id,n])),indegree=new Map(outline.map(n=>[n.id,0])),levels=new Map(outline.map(n=>[n.id,0]))
+  for(const n of graph.nodes)for(const dest of links(n))if(indegree.has(dest))indegree.set(dest,indegree.get(dest)+1)
+  const queue=outline.filter(n=>indegree.get(n.id)===0).map(n=>n.id),visited=new Set()
+  while(queue.length){const id=queue.shift();visited.add(id);for(const dest of links(byId.get(id))){if(!indegree.has(dest))continue;levels.set(dest,Math.max(levels.get(dest),levels.get(id)+1));indegree.set(dest,indegree.get(dest)-1);if(indegree.get(dest)===0)queue.push(dest)}}
+  for(const n of outline)if(!visited.has(n.id))levels.set(n.id,Math.max(0,...levels.values())+1)
+  const columns=new Map();for(const n of outline){const l=levels.get(n.id);if(!columns.has(l))columns.set(l,[]);columns.get(l).push(n)}
+  const width=Math.max(100,...[...columns.keys()].map(k=>k*54+78)),height=Math.max(64,...[...columns.values()].map(c=>c.length*27+20)),points=new Map()
+  for(const [col,list] of columns)list.forEach((n,i)=>points.set(n.id,{x:col*54+38,y:height/2+(i-(list.length-1)/2)*27}))
+  const svg=make('svg',{viewBox:`0 0 ${width} ${height}`,class:'mini-graph',role:'img','aria-label':'分岐と接続の縮小表示'})
+  for(const n of graph.nodes){const a=points.get(n.id);if(!a)continue;for(const [i,target] of links(n).entries()){const b=points.get(target);if(!b)continue;svg.append(make('path',{d:`M${a.x+12} ${a.y} C${(a.x+b.x)/2} ${a.y},${(a.x+b.x)/2} ${b.y},${b.x-12} ${b.y}`,fill:'none',stroke:n.type==='branch'?(i===0?'#72d6b4':'#ffc17c'):'#a7a3cf','stroke-width':1.5}))}}
+  for(const n of outline){const {x,y}=points.get(n.id),g=make('g',{class:'mini-svg-node'});g.append(make('rect',{x:x-12,y:y-8,width:24,height:16,rx:5,fill:n.type==='branch'?'#845f38':n.type==='message'?'#285f58':n.type==='end'?'#394155':'#444071',stroke:n.id===selection?'#ebe2ff':'#9d9bc3','stroke-width':n.id===selection?3:1.2}));const title=make('title');title.textContent=n.name;g.append(title);g.addEventListener('click',()=>selectStep(n.id));svg.append(g)}return svg
+}
+function messagePreview(body,rich){
+  if(!rich)return node('p',body,'bubble')
+  const box=node('div',null,'line-card-preview')
+  if(rich.imageUrl){const img=node('div',null,'line-image-placeholder');img.append(node('strong','▧ 画像'),node('small',publicHttps(rich.imageUrl)?'LINE送信時に画像を表示':'画像URLが未設定'));if(publicHttps(rich.imageUrl)){const a=node('a','画像を別タブで確認');a.href=rich.imageUrl;a.target='_blank';a.rel='noopener noreferrer';img.append(a,button('画像をプレビュー',()=>{const photo=node('img');photo.alt='配信する画像';photo.referrerPolicy='no-referrer';photo.src=rich.imageUrl;photo.addEventListener('error',()=>{img.replaceChildren(node('p','画像を表示できません。公開URLを確認してください。'))});img.replaceChildren(photo)}))}box.append(img)}
+  if(rich.title)box.append(node('strong',rich.title,'line-card-title'))
+  box.append(node('p',body,'line-card-body'))
+  for(const b of rich.buttons??[]){const row=node('div',null,'line-action');row.append(node('strong',b.label||'ボタン名未設定'),node('small',b.url||'URL未設定'));box.append(row)}
+  return box
+}
+function richEditor(item){
+  const wrap=node('div',null,'rich-editor'),rich=item.rich
+  wrap.append(node('p','LINEには1枚のカードとして送信します。画像は公開HTTPS URLのJPEG/PNG、ボタンは公開HTTPS URLまたは受信者専用の予約URLを使えます。予約ボタンを設定すると本文にもURLを追加します。','field-hint'))
+  if(rich.kind==='card'||rich.title)wrap.append(field('タイトル',rich.title??'',v=>update(()=>{rich.title=v}),{attributes:{maxlength:'60'}}))
+  if(rich.kind!=='buttons'||rich.imageUrl)wrap.append(field('画像URL（'+(rich.kind==='image'?'必須':'任意')+'）',rich.imageUrl??'',v=>update(()=>{rich.imageUrl=v}),{attributes:{maxlength:'2000',placeholder:'https://…/image.jpg'}}))
+  rich.buttons.forEach((b,i)=>{const r=node('section',null,'rule-row');r.append(node('strong','リンクボタン '+(i+1)),field('表示名',b.label,v=>update(()=>{b.label=v}),{attributes:{maxlength:'20'}}),field('リンク先URL',b.url,v=>update(()=>{b.url=v}),{attributes:{maxlength:'2000',placeholder:'https://…'}}),button('予約URLをボタンに設定',()=>update(()=>{const marker=graph.purpose==='recruitment'?'{{interview_link}}':'{{customer_link}}';b.url=marker;if(!item.body.includes(marker))item.body+='\n'+marker})),button('ボタンを削除',()=>update(()=>{rich.buttons.splice(i,1)})));wrap.append(r)})
+  const add=button('＋ リンクボタンを追加',()=>update(()=>{rich.buttons.push({label:'詳細を見る',url:''})}));add.disabled=rich.buttons.length>=3;wrap.append(add);return wrap
+}
+function openWizard(empty=false){
+  const box=node('div',null,'wizard-box')
+  let purpose=channels.some(c=>c.purpose==='recruitment'||c.purpose==='shared')?'recruitment':'customer',name='',channel='',trigger='',tag='',first='',follow='',minutes=1440,unit=1440,amount=1,skipBooked=true,stage=0
+  const choices=Object.fromEntries(Object.entries(purposes).filter(([key])=>channels.some(c=>c.purpose===key||c.purpose==='shared')))
+  function defaults(){channel=channels.find(c=>c.purpose===purpose)?.id??channels.find(c=>c.purpose==='shared')?.id??'';trigger=purpose==='recruitment'?'form':'follow';name=purpose==='recruitment'?'応募受付・面談予約案内':'友だち追加・ご案内';first=purpose==='recruitment'?'{{store}}の採用窓口です。ご応募ありがとうございます。面談のご予約はこちらからお願いします。\n{{interview_link}}':'{{name}}さん、友だち追加ありがとうございます。{{store}}です。';follow=purpose==='recruitment'?'面談日時のご希望が決まりましたらこちらからご予約ください。\n{{interview_link}}':''}
+  defaults()
+  function candidate(){const flow=wizardFlow({purpose,name,channel,trigger,triggerTag:tag,first,follow,minutes,skipBooked});if(empty){flow.entry='end';flow.nodes=[{id:'end',type:'end',name:'終了'}]}return flow}
+  function render(){box.replaceChildren();box.append(node('p','目的・開始条件 → メッセージ → 確認　 '+(stage+1)+'/3','wizard-progress'))
+    if(stage===0){box.append(field('用途',purpose,v=>{purpose=v;defaults();render()},{items:choices}),field('シナリオ名',name,v=>{name=v},{event:'input',attributes:{maxlength:'100'}}),field('配信する公式LINE',channel,v=>{channel=v},{items:Object.fromEntries(channels.filter(c=>c.purpose===purpose||c.purpose==='shared').map(c=>[c.id,c.label]))}),field('何をきっかけに開始しますか？',trigger,v=>{trigger=v;render()},{items:Object.fromEntries(Object.entries(liveTriggers[purpose]).filter(([k])=>k!=='tag_campaign'&&(k!=='tag_added'||applicantCatalog.enabled)))}));if(trigger==='tag_added')box.append(field('きっかけのタグ',tag,v=>{tag=v},{items:applicantTagOptions(tag)}))}
+    if(stage===1&&!empty){box.append(field('最初に送るメッセージ',first,v=>{first=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内文（不要なら空欄）',follow,v=>{follow=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内までの時間',amount,v=>{amount=v;minutes=amount*unit},{type:'number',attributes:{min:'1',max:'525600'}}),field('時間の単位',String(unit),v=>{unit=Number(v);minutes=amount*unit},{items:{'1':'分','60':'時間','1440':'日'}}),field('予約した方には再案内しない',skipBooked,v=>{skipBooked=v},{type:'checkbox'}),node('p','同意・店長対応・停止など実際の送信直前条件も従来どおり確認します。','field-hint'))}
+    if(stage===2){const flow=candidate(),errs=validate(flow,true);box.append(node('h3',flow.name),node('p','開始：'+triggers[trigger]+' ／ '+channels.find(c=>c.id===channel)?.label));for(const n of stepOutline(flow))box.append(node('p',icons[n.type]+' '+n.name,'wizard-step'));for(const err of errs)box.append(node('p',err.message,'held-note'));const create=button('この内容で下書きを作成',()=>{$('#dialog').close();draftScenario(flow)},'primary');create.disabled=!!errs.length;box.append(create)}
+    const nav=node('div',null,'controls');if(stage>0)nav.append(button('戻る',()=>{stage=empty?0:stage-1;render()}));if(stage<2)nav.append(button('次へ',()=>{if(stage===0&&(!name.trim()||!channel||trigger==='tag_added'&&!tag))throw new Error('名称・LINE・開始条件を選択してください。');stage=empty?2:stage+1;render()},'primary'));box.append(nav)
+  }
+  dialog(empty?'新規・空のシナリオ':'かんたん作成ウィザード','目的に合わせて下書きのシナリオを組み立てます。自動公開はしません。',box);render()
+}
+async function openBatchCopy(source){
+  const initial=structuredClone(source),sourceStore=store,sourceCatalog=applicantCatalog,box=node('div',null,'batch-copy'),statuses=node('div'),targets=node('div',null,'batch-targets'),controls=node('div'),configs=new Map(),keys=initial.purpose==='recruitment'?tagKeys(initial):[]
+  let name=initial.name,folder=scenario?.folder??'',running=false
+  const confirm=button('選択店舗に未公開下書きを作成',async()=>{
+    if(running)return;running=true;confirm.disabled=true;for(const el of box.querySelectorAll(':scope > label input'))if(el.type!=='checkbox')el.disabled=true;const work=[...configs.values()].filter(c=>c.selected&&c.ready&&!c.done);validateTargets()
+    for(const c of work){c.attempted=true;try{const output=copyFlow(initial,{name,channel:c.channel,sourceName:sourceStore.name,targetName:c.store.name,tagMap:c.map,origin:location.origin});let created;const meta={folder:folder.trim(),is_template:false};if(demo){created={id:crypto.randomUUID(),graph:output,state:'draft',revision:1,stopped:false,published_version:null,versions:[],updated_at:stamp(),...meta};local[c.store.id].unshift(created);saveLocal()}else created=await api('/stores/'+c.store.id+'/scenarios','POST',{graph:output,...meta},c.key);c.done=true;c.result.textContent='✓ 下書き作成済み';if(c.store.id===store.id){scenarioList=[created,...scenarioList.filter(s=>s.id!==created.id)];library()}}catch(e){c.result.textContent='失敗：'+e.message+'（同じ内容で再試行できます）'}}
+    running=false;statuses.textContent=[...configs.values()].filter(c=>c.done).length+'店舗に下書きを作成しました。公開処理は行っていません。';validateTargets()
+  },'primary')
+  const warning=node('p','画像やリンクボタン、外部URLを含む場合は店舗ごとに内容を確認してください。既存の公開版を上書きせず、新規下書きだけ作ります。','copy-warning')
+  const check=field('コピー先のLINE・タグ・固定URLを確認した',false,()=>validateTargets(),{type:'checkbox'})
+  function valid(c){return c.ready&&!!c.channel&&keys.every(k=>c.map[k])&&new Set(keys.map(k=>c.map[k])).size===keys.length}
+  function validateTargets(){const selected=[...configs.values()].filter(c=>c.selected&&!c.done);confirm.disabled=running||!name.trim()||!check.querySelector('input').checked||!selected.length||selected.some(c=>!valid(c));for(const c of configs.values())for(const el of c.panel.querySelectorAll('input,select,button'))el.disabled=running||c.done||c.attempted}
+  box.append(field('コピー後のシナリオ名',name,v=>{name=v;validateTargets()},{event:'input',attributes:{maxlength:'100'}}),field('フォルダ',folder,v=>{folder=v},{event:'input',attributes:{maxlength:'50'}}),warning,targets,check,statuses,controls);controls.append(confirm)
+  for(const target of stores){const panel=node('section',null,'batch-target'),mappings=node('div'),result=node('p','','field-hint'),c={store:target,panel,selected:false,ready:false,done:false,channel:'',map:{},key:crypto.randomUUID(),result};configs.set(target.id,c);panel.append(field(target.name,false,async v=>{c.selected=v;mappings.hidden=!v;validateTargets();if(!v||c.ready)return;mappings.replaceChildren(node('p','設定を読み込み中…','field-hint'));try{const res=await readStoreResources(target);if(!panel.isConnected)return;const lines=res.channels.filter(ch=>ch.purpose===initial.purpose||ch.purpose==='shared');c.channel=target.id===sourceStore.id?initial.channel:lines.length===1?lines[0].id:'';mappings.replaceChildren(field('配信先の公式LINE',c.channel,v=>{c.channel=v;validateTargets()},{items:{'':'選択してください',...Object.fromEntries(lines.map(ch=>[ch.id,ch.label]))}}));const defs=res.catalog.enabled?res.catalog.definitions.filter(t=>t.active):[];for(const key of keys){const label=sourceCatalog.definitions.find(t=>t.tag_key===key)?.label??key;c.map[key]=(defs.find(t=>t.tag_key===key)??defs.find(t=>t.label===label))?.tag_key??'';mappings.append(field(label,c.map[key],v=>{c.map[key]=v;validateTargets()},{items:{'':'選択してください',...Object.fromEntries(defs.map(t=>[t.tag_key,t.label]))}}))}c.ready=true}catch(e){mappings.textContent='読み込み失敗：'+e.message}validateTargets()},{type:'checkbox'}),mappings,result);mappings.hidden=true;targets.append(panel)}
+  dialog('複数店舗へ一括コピー','対象店舗を選び、店舗ごとの公式LINEとタグを確認してください。',box);$('#dialog').classList.add('template-dialog');validateTargets()
+}
+async function loadMetrics(version){
+  if(!scenario?.published_version||metricsBusy)return
+  const id=scenario.id,storeId=store.id;metricsBusy=true;inspector()
+  try{const result=demo?{version:scenario.published_version,total:0,active:0,completed:0,ended:0,nodes:[]}:await api(base()+'/'+id+'/metrics'+(version?'?version='+version:''));if(scenario?.id===id&&store.id===storeId){metrics=result;show()}}catch(e){announce(e.message,true)}finally{metricsBusy=false;if(scenario?.id===id&&tab==='metrics')inspector()}
+}
+function metricsView(){
+  const box=node('div',null,'metrics-view');if(!scenario?.published_version){box.append(node('p','公開後の実配信データを表示します。下書きには実績がありません。','empty'));return box}
+  const versions=scenario.versions?.length?scenario.versions.map(v=>v.version):[scenario.published_version]
+  box.append(field('公開版',String(metrics?.version??scenario.published_version),v=>loadMetrics(Number(v)),{items:Object.fromEntries(versions.map(v=>[String(v),'v'+v]))}),button('実績を更新',()=>loadMetrics(metrics?.version)))
+  if(metricsBusy){box.append(node('p','実績読み込み中…','field-hint'));return box}
+  if(!metrics){box.append(node('p','実績を更新してください。','empty'));return box}
+  box.append(node('p','公開版 v'+metrics.version+' ／ 直近30日に参加した件数','field-hint'))
+  const counts=node('div',null,'metrics-counts');for(const [title,n] of [['参加',metrics.total],['配信中',metrics.active],['完了',metrics.completed],['途中終了',metrics.ended]]){const b=node('div');b.append(node('small',title),node('strong',String(n)));counts.append(b)}box.append(counts)
+  for(const row of metrics.nodes){const card=node('section',null,'metric-card');const name=row.name??nameOf(row.node_id);card.append(node('strong',name),node('p','通過 '+row.reached+'件 ／ 待機 '+row.waiting+'件 ／ 途中終了 '+row.ended+'件','field-hint'));if(row.type==='message')card.append(node('p','LINE受付 '+row.accepted+'件 ／ 受付未確認・失敗 '+row.not_accepted+'件','field-hint'));card.append(node('p','通過後の予約 '+row.booked_after+'件（'+(row.reached?Math.round(row.booked_after/row.reached*100):0)+'%）','field-hint'));const progress=node('progress');progress.max=Math.max(1,metrics.total);progress.value=row.reached;progress.setAttribute('aria-label',name+'の通過件数');card.append(progress);box.append(card)}
+  box.append(node('p','件数は参加単位（同じ人の再参加は別件）。LINE受付は端末での表示・既読を意味しません。予約率は通過後の予約イベントとの関連であり、配信の効果を断定しません。改修以前の履歴は記録された範囲のみです。','field-hint'));return box
+}
+async function pollPresence(){
+  if(demo||!scenario?.id||document.hidden)return
+  const id=scenario.id,storeId=store.id,seq=++presenceSequence
+  try{const data=await api(base()+'/'+id+'/presence','POST',{client:editorClient});if(seq===presenceSequence&&scenario?.id===id&&store.id===storeId){presenceInfo=data;renderPresence()}}catch{}
+}
+function renderPresence(){
+  const root=$('#presence-state');if(!root)return
+  const other=presenceInfo?.other_people??0,tabs=presenceInfo?.other_tabs??0,conflict=presenceInfo?.revision>scenario?.revision
+  root.textContent=conflict?'⚠ 別の編集で新版あり。上書きせず複製できます。':other||tabs?'● 他の担当者 '+other+'人・別タブ '+tabs+'件が編集画面を開いています':''
+  root.classList.toggle('conflict',!!conflict)
 }
 
 async function start() {
@@ -1266,6 +1438,8 @@ async function start() {
     if (!ready || !store) return
     if(!await finishBeforeLeave())return
     const content=node('div',null,'controls')
+    content.append(button('かんたん作成ウィザード',()=>{$('#dialog').close();openWizard()},'primary'))
+    content.append(button('完全に空のシナリオから開始',()=>{$('#dialog').close();openWizard(true)}))
     for(const [value,label] of Object.entries(purposes).filter(([value])=>channels.some(c=>c.purpose===value||c.purpose==='shared'))) content.append(button(label+'の基本シナリオ',()=>{
       $('#dialog').close()
       newScenario(value)
@@ -1308,6 +1482,7 @@ async function start() {
   select.value=initialStore.id
   await refreshStore(initialStore)
   ready=true
+  setInterval(pollPresence,45000)
   const templateRequest=new URLSearchParams(location.search).get('tag-template')
   if(templateRequest!==null&&initialStore.id===requestedStore&&!$('#dialog').open){const url=new URL(location.href);url.searchParams.delete('tag-template');history.replaceState(null,'',url);openTagTemplates(templateRequest)}
   if (demo) $('#foot').textContent='LINE通信は模擬 · 下書きはこのブラウザに保存'

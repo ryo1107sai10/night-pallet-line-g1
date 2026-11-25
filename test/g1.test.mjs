@@ -536,6 +536,15 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   assert.equal(version.graph.name,graph.name)
   assert.equal(version.graph.entry,'welcome')
   assert.equal(version.graph.nodes.find(node=>node.id==='welcome').next,'wait')
+  const metrics=expect(await request(url+'/metrics',{cookie:admin}),200)
+  assert.equal(metrics.version,1);assert.equal(metrics.total,0);assert.equal(metrics.nodes.length,graph.nodes.length)
+  expect(await request(url+'/metrics',{cookie:other}),404)
+  const clientA=randomUUID(),clientB=randomUUID()
+  const presence=expect(await post(url+'/presence',admin,{client:clientA}),200)
+  assert.equal(presence.revision,draft.revision)
+  assert.equal(expect(await post(url+'/presence',admin,{client:clientB}),200).other_tabs,1)
+  expect(await post(url+'/presence',other,{client:clientA}),404)
+  expect(await post(url+'/presence',admin,{client:clientA,leave:true}),200)
   const review=expect(await request(url+'/publication-review',{cookie:admin}),200)
   assert.equal(review.published.graph.entry,'welcome')
   assert.equal(review.revision,draft.revision)
@@ -578,6 +587,16 @@ test('AT34 適合するテスト利用者にだけ差し込み済み本文を1�
   await workOnce(pool,cfg,line)
   assert.equal(intendedId,accepted.id)
   assert.match(pushedBody,/^【接続テスト】\nテスト利用者さん/)
+  assert.equal(expect(await request(path+'/test-sends',{cookie:admin}),200)[0].status,'accepted')
+  // Rich format uses the same verified tester and immutable revision gate, not a direct UI-only mock.
+  const rich={kind:'card',title:'面談案内',imageUrl:'https://images.example.test/guide.png',buttons:[{label:'案内',url:'https://example.test/guide'}]}
+  const edited=structuredClone(graph);edited.nodes[0].rich=rich
+  const saved=expect(await patch(path,admin,{revision:scenario.revision,graph:edited}),200)
+  const cardTester=await prepareTester('customer')
+  const cardJob=expect(await post(path+'/test-sends',admin,{...input,tester:cardTester.id,revision:saved.revision},idempotency()),202)
+  await workOnce(pool,cfg,line)
+  assert.equal(intendedId,cardJob.id);const sent=pushesLog.pop().messages[0]
+  assert.equal(sent.type,'flex');assert.match(sent.altText,/^【接続テスト】/);assert.equal(sent.contents.hero.url,rich.imageUrl);assert.equal(sent.contents.footer.contents[0].action.uri,rich.buttons[0].url)
   assert.equal(expect(await request(path+'/test-sends',{cookie:admin}),200)[0].status,'accepted')
 })
 

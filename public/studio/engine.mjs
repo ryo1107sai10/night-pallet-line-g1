@@ -1,3 +1,4 @@
+import {richErrors} from './message-format.mjs'
 export const triggers = {
   follow:'友だち追加', form:'フォーム送信', consent:'明示同意', booking_created:'予約作成',
   booking_changed:'予約変更', booking_cancelled:'予約取消', visit:'来店登録',
@@ -12,6 +13,11 @@ export const liveTriggers = Object.freeze({
 export const kinds = { message:'メッセージ',wait:'待機',branch:'条件分岐',tag:'タグ更新',task:'担当タスク',end:'終了' }
 export const conditions = { booked:'予約がある',consent:'目的別の同意がある',adult:'20歳以上の確認済み',
   responded:'返信がある',tag:'タグを持つ',assigned:'担当がいる' }
+export function branchRules(node){return ['all','any'].includes(node.condition)?(node.rules??[]):[{condition:node.condition,tag:node.tag}]}
+export function evaluateBranch(node,states,tags){
+  const values=branchRules(node).map(rule=>{const match=rule.condition==='tag'?tags.includes(rule.tag):!!states[rule.condition];return rule.negated?!match:match})
+  return values.length>0&&(node.condition==='any'?values.some(Boolean):values.every(Boolean))
+}
 export const variables = { name:'お名前',store:'店舗名',staff:'担当者',booking:'予約日時',price:'公開料金',booking_url:'予約変更 URL',interview_link:'面談予約 URL',customer_link:'来店予約・設定 URL' }
 const valuePattern = /\{\{\s*([a-z_]+)\s*\}\}/g
 const days = 86400000
@@ -85,7 +91,7 @@ export function validate(flow, publish=false) {
     if (!node.name.trim()) add('ステップ名を入力してください。',node.id)
     if (!Object.hasOwn(kinds,node.type)) add('未対応のステップです。',node.id)
     if (links(node).some(id=>!byId.has(id))) add('次のステップをつないでください。',node.id)
-    if (node.type==='branch' && (!Object.hasOwn(conditions,node.condition) || (node.condition==='tag' && !node.tag?.trim()))) add('分岐条件を入力してください。',node.id)
+    if (node.type==='branch' && (!branchRules(node).length || branchRules(node).length>8 || branchRules(node).some(r=>!Object.hasOwn(conditions,r.condition)||r.condition==='tag'&&!r.tag?.trim()) || (!['all','any'].includes(node.condition)&&node.rules))) add('分岐条件を入力してください。',node.id)
     if ((node.type==='tag' && !node.tag?.trim()) || (node.type==='task' && !node.note?.trim())) add('タグ名またはタスク内容を入力してください。',node.id)
     if (node.type==='wait') {
       if (!['delay','fixed','business','booking'].includes(node.mode)) add('待機方法を選択してください。',node.id)
@@ -101,6 +107,7 @@ export function validate(flow, publish=false) {
         return ''
       })
       if (remaining.includes('{{') || remaining.includes('}}')) add('差し込み項目の形式を確認してください。',node.id)
+      for(const problem of richErrors(node.rich,node.body))add(problem,node.id)
       if(node.tagGuard&&(flow.purpose!=='recruitment'||typeof node.tagGuard.tag!=='string'||!node.tagGuard.tag.trim()||!Array.isArray(node.tagGuard.exclude)||node.tagGuard.exclude.includes(node.tagGuard.tag)||new Set(node.tagGuard.exclude).size!==node.tagGuard.exclude.length||node.tagGuard.booked!==undefined&&typeof node.tagGuard.booked!=='boolean'))add('送信直前の採用タグ条件を確認してください。',node.id)
       if (flow.purpose==='recruitment' && node.category==='marketing') add('採用シナリオに顧客向け販促は追加できません。',node.id)
       if (flow.purpose!=='recruitment' && /\{\{\s*interview_link\s*\}\}/.test(node.body)) add('面談予約 URLの差し込みは採用シナリオでのみ使えます。',node.id)
@@ -247,8 +254,8 @@ export function simulate(flow, person) {
       line.at=new Date(at).toISOString()
       line.detail='この時刻まで待機'
     } else if (node.type==='branch') {
-      const passed = node.condition==='tag' ? tags.has(node.tag) : yes[node.condition]
-      line.detail=conditions[node.condition]+' → '+(passed?'はい':'いいえ')
+      const passed = evaluateBranch(node,yes,[...tags])
+      line.detail=(conditions[node.condition]??(node.condition==='all'?'すべての条件':'いずれかの条件'))+' → '+(passed?'はい':'いいえ')
       id=passed?node.yes:node.no
     } else if (node.type==='tag') {
       if(node.action==='remove')tags.delete(node.tag)
@@ -279,6 +286,7 @@ export function simulate(flow, person) {
         line.at=new Date(at).toISOString()
         line.detail=adjusts?'配信可能時間へ調整':'送信予定'
         line.message=rendered.message
+        if(node.rich)line.rich=node.rich
         count++
         if (marketing) recent.push(at)
       }

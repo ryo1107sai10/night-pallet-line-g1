@@ -1,3 +1,4 @@
+import {resolveRichButtons} from '../public/studio/message-format.mjs'
 import type pg from 'pg'
 import { type Actor, type Config, type DB, type Route, audit, automationForStore, conflict, scope, seal, tx, unseal } from './core.js'
 import { automaticRelationshipReady, channel, channelCredentials, channelTestReady, evidence, testDeliveryConfirmed, LineAPI, userKey } from './line.js'
@@ -158,7 +159,7 @@ async function resolveScenarioInterviewLink(db: DB,cfg:Config,c:Awaited<ReturnTy
   await audit(db,c.tenant_id,c.store_id,null,'interview_link.issue',link.id,null,
     {channel_id:c.id,source:'scenario_test',scenario_id:job.scenario_id})
   const resolved=message.split(INTERVIEW_LINK_MARKER).join(link.url)
-  return resolved.length<=5000?resolved:null
+  return resolved.length<=5000?{body:resolved,url:link.url}:null
 }
 
 // フローD（顧客版）: シナリオのテスト送信に含まれる来店予約・設定URLマーカーを、送信直前に受信者ごとの実URLへ置き換える。
@@ -174,7 +175,7 @@ async function resolveScenarioCustomerLink(db: DB,cfg:Config,c:Awaited<ReturnTyp
   await audit(db,c.tenant_id,c.store_id,null,'customer_link.issue',link.id,null,
     {channel_id:c.id,source:'scenario_test',scenario_id:job.scenario_id})
   const resolved=message.split(CUSTOMER_LINK_MARKER).join(link.url)
-  return resolved.length<=5000?resolved:null
+  return resolved.length<=5000?{body:resolved,url:link.url}:null
 }
 
 async function sourceTestMessage(db:DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,job:{id:string;source_id:string;tester_id:string;generation:number;test_body:string|null},user:string){
@@ -280,6 +281,7 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
         return
       }
       const to = unseal(cfg,'tester:' + current.code_hash,current.recipient)
+      const richLinks:Record<string,string>={}
       let message = current.test_body ? unseal(cfg,'test-body:' + job.id,current.test_body) : undefined
       if(current.source_id){
         const body=await sourceTestMessage(db,cfg,fresh,current,to)
@@ -295,7 +297,8 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
           await audit(db,r.tenant_id,r.store_id,null,'interview_link.scenario_held',job.id,null,{channel_id:r.id})
           return
         }
-        message = resolved
+        message = resolved.body
+        richLinks[INTERVIEW_LINK_MARKER]=resolved.url
       }
       if (message?.includes(CUSTOMER_LINK_MARKER)) {
         // 来店予約・設定URLも送信直前に受信者ごとに発行する。条件を満たさない場合はURLを送らず送信を取りやめる。
@@ -306,9 +309,10 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
           await audit(db,r.tenant_id,r.store_id,null,'customer_link.scenario_held',job.id,null,{channel_id:r.id})
           return
         }
-        message = resolved
+        message = resolved.body
+        richLinks[CUSTOMER_LINK_MARKER]=resolved.url
       }
-      return { promise: api.push(channelCredentials(cfg,fresh),to,job.id,message)
+      return { promise: api.push(channelCredentials(cfg,fresh),to,job.id,message,resolveRichButtons(current.test_rich_box?JSON.parse(unseal(cfg,'test-rich:'+job.id,current.test_rich_box)):undefined,richLinks))
         .catch(()=>({ status:'unknown',requestId:null,authError:false })) }
     })
     if (!submission) continue

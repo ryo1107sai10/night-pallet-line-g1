@@ -21,7 +21,7 @@ import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, modul
   moduleStart, rememberModuleBot, requireModule} from './line-module.js'
 import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboarding, markOnboardingRegistered,
   onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
-import { createScenario, saveScenario, saveScenarioFolder, publicationReview, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
+import { createScenario, saveScenario, saveScenarioFolder, scenarioMetrics, studioPresence, publicationReview, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop, workOnce } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, authenticateCustomer,
   customerSessionCookie, setPreferences, customerById, selfPreferenceInput, emitDelivery } from './customer.js'
@@ -114,7 +114,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     res.locals.correlation = newId()
     res.set({ 'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer',
       'Cache-Control':'no-store', 'X-Frame-Options':'DENY', 'X-Request-ID':res.locals.correlation,
-      'Content-Security-Policy':"default-src 'self'; img-src 'self' data:; connect-src 'self' https://*.line.me https://*.line-apps.com https://*.line-scdn.net; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      'Content-Security-Policy':"default-src 'self'; img-src 'self' data:"+(/(?:^|\/)studio(?:\/|$)/.test(req.path)?" https:":"")+"; connect-src 'self' https://*.line.me https://*.line-apps.com https://*.line-scdn.net; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     })
     if (cfg.origin.startsWith('https:')) res.set('Strict-Transport-Security','max-age=31536000')
     next()
@@ -909,7 +909,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const settings=await locationOf(db,idOf(req,'store'))
     const {rows:jobs}=await db.query(`SELECT j.id,j.status,j.reason,j.line_request_id,j.first_attempt_at,
       j.node_id,j.category FROM automatic_send j ORDER BY first_attempt_at DESC LIMIT 60`)
-    const {rows:notes}=await db.query(`SELECT kind,node_id,detail,occurred_at FROM delivery_note ORDER BY id DESC LIMIT 60`)
+    const {rows:notes}=await db.query(`SELECT kind,node_id,detail,occurred_at FROM delivery_note WHERE kind<>'studio_visit' ORDER BY id DESC LIMIT 60`)
     return {...settings,process_enabled:automationForStore(cfg,settings.id,_actor.tenant_id),jobs,notes}
   }))
   api.patch('/stores/:store/automation',inStore(async(db,actor,req)=>{
@@ -952,6 +952,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(scenario,inStore((db,actor,req)=>scenarioDetail(scenarioContext(db,actor,req),idOf(req,'scenario'))))
   api.patch(scenario,inStore((db,actor,req)=>saveScenario(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
   api.patch(scenario+'/folder',inStore((db,actor,req)=>saveScenarioFolder(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
+  api.get(scenario+'/metrics',inStore((db,actor,req)=>scenarioMetrics(scenarioContext(db,actor,req),idOf(req,'scenario'),req.query.version===undefined?undefined:z.coerce.number().int().positive().parse(req.query.version))))
+  api.post(scenario+'/presence',inStore((db,actor,req)=>studioPresence(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
   api.get(scenario+'/publication-review',inStore((db,actor,req)=>publicationReview(scenarioContext(db,actor,req),idOf(req,'scenario'))))
   api.get(scenario+'/versions/:version',inStore((db,actor,req)=>versionDetail(scenarioContext(db,actor,req),
     idOf(req,'scenario'),z.coerce.number().int().positive().parse(req.params.version))))

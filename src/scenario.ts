@@ -13,12 +13,14 @@ const nodeId = z.string().regex(/^[a-zA-Z0-9_-]{1,50}$/)
 const base = { id:nodeId, name:z.string().max(100) }
 const next = nodeId.or(z.literal(''))
 const clock = z.string().max(16)
+const rule=z.strictObject({condition:z.enum(['booked','consent','adult','responded','tag','assigned']),tag:z.string().max(80).optional(),negated:z.boolean().optional()})
+const rich=z.strictObject({kind:z.enum(['image','buttons','card']),title:z.string().max(60).optional(),imageUrl:z.string().max(2000).optional(),buttons:z.array(z.strictObject({label:z.string().max(20),url:z.string().max(2000)})).max(3)})
 const nodes = z.discriminatedUnion('type',[
-  z.strictObject({...base,type:z.literal('message'),category:z.enum(['service','marketing']),body:z.string().max(5000),tagGuard:z.strictObject({tag:text(80),exclude:z.array(text(80)).max(30),booked:z.boolean().optional()}).optional(),next}),
+  z.strictObject({...base,type:z.literal('message'),category:z.enum(['service','marketing']),body:z.string().max(5000),rich:rich.optional(),tagGuard:z.strictObject({tag:text(80),exclude:z.array(text(80)).max(30),booked:z.boolean().optional()}).optional(),next}),
   z.strictObject({...base,type:z.literal('wait'),mode:z.enum(['delay','fixed','business','booking']),minutes:z.int().optional(),
     days:z.int().optional(),time:clock.optional(),next}),
-  z.strictObject({...base,type:z.literal('branch'),condition:z.enum(['booked','consent','adult','responded','tag','assigned']),
-    tag:z.string().max(80).optional(),yes:next,no:next}),
+  z.strictObject({...base,type:z.literal('branch'),condition:z.enum(['booked','consent','adult','responded','tag','assigned','all','any']),
+    rules:z.array(rule).max(8).optional(),tag:z.string().max(80).optional(),yes:next,no:next}),
   z.strictObject({...base,type:z.literal('tag'),tag:z.string().max(80),action:z.enum(['add','remove']).optional(),next}),
   z.strictObject({...base,type:z.literal('task'),note:z.string().max(400),next}),
   z.strictObject({...base,type:z.literal('end')}),
@@ -109,6 +111,45 @@ export async function saveScenarioFolder({db,actor,store}:Context,id:string,inpu
   if(!result.rowCount)throw conflict()
   await audit(db,actor.tenant_id,store,actor.id,'scenario.folder',id)
   return scenarioDetail({db,actor,store},id)
+}
+
+// Metrics are per immutable published version and actual enrolments, never draft guesses.
+export async function scenarioMetrics(context:Context,id:string,requested?:number){
+  const {db}=context,current=await record(db,id)
+  const version=requested??current.published_version
+  if(!version)return {version:null,total:0,completed:0,active:0,ended:0,nodes:[]}
+  const v=await versionDetail(context,id,version)
+  const published=v.graph as Graph
+  const customer=published.purpose==='customer'
+  const e=customer?'enrollment':'applicant_enrollment',n=customer?'delivery_note':'applicant_note',s=customer?'automatic_send':'applicant_send',events=customer?'delivery_event':'applicant_event',subject=customer?'customer_id':'applicant_key',booking=customer?'booking_created':'interview_booked'
+  const {rows:[summary]}=await db.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE ended_at IS NULL)::int AS active,
+    count(*) FILTER(WHERE end_reason='完了')::int AS completed,count(*) FILTER(WHERE ended_at IS NOT NULL AND end_reason IS DISTINCT FROM '完了')::int AS ended
+    FROM ${e} WHERE scenario_id=$1 AND version=$2 AND starts_at>=now()-interval '30 days'`,[id,version])
+  const {rows}=await db.query(`WITH runs AS (SELECT * FROM ${e} WHERE scenario_id=$1 AND version=$2 AND starts_at>=now()-interval '30 days'),
+    observed AS (SELECT r.id AS run_id,r.node_id,least(r.due_at,now()) AS at FROM runs r WHERE r.node_id IS NOT NULL
+     UNION ALL SELECT r.id,n.node_id,n.occurred_at FROM runs r JOIN ${n} n ON n.enrollment_id=r.id WHERE n.node_id IS NOT NULL
+     UNION ALL SELECT r.id,j.node_id,j.first_attempt_at FROM runs r JOIN ${s} j ON j.enrollment_id=r.id
+     UNION ALL SELECT r.id,$3::text,r.starts_at FROM runs r),
+    reach AS (SELECT run_id,node_id,min(at) at FROM observed GROUP BY run_id,node_id),
+    metrics AS (SELECT q.node_id,count(*)::int AS reached,
+      count(*) FILTER(WHERE r.node_id=q.node_id AND r.ended_at IS NULL)::int AS waiting,
+      count(*) FILTER(WHERE r.node_id=q.node_id AND r.ended_at IS NOT NULL AND r.end_reason IS DISTINCT FROM '完了')::int AS ended,
+      count(*) FILTER(WHERE EXISTS(SELECT 1 FROM ${events} ev WHERE ev.channel_id=r.channel_id AND ev.${subject}=r.${subject} AND ev.kind=$4 AND ev.happened_at>=q.at AND ev.happened_at<=now()))::int AS booked_after
+      FROM reach q JOIN runs r ON r.id=q.run_id GROUP BY q.node_id),
+    delivery AS (SELECT j.node_id,count(*) FILTER(WHERE j.status='accepted')::int AS accepted,
+      count(*) FILTER(WHERE j.status IN ('failed','unknown','cancelled'))::int AS not_accepted FROM ${s} j JOIN runs r ON r.id=j.enrollment_id GROUP BY j.node_id)
+    SELECT metrics.*,coalesce(delivery.accepted,0) AS accepted,coalesce(delivery.not_accepted,0) AS not_accepted FROM metrics LEFT JOIN delivery USING(node_id)`,[id,version,v.graph.entry,booking])
+  return {version,...summary,nodes:published.nodes.map(node=>({node_id:node.id,name:node.name,type:node.type,reached:0,waiting:0,ended:0,accepted:0,not_accepted:0,booked_after:0,...rows.find(r=>r.node_id===node.id)}))}
+}
+export async function studioPresence(context:Context,id:string,input:unknown){
+  const {db,actor,store}=context,current=await record(db,id)
+  const {client,leave}=z.strictObject({client:uuid,leave:z.boolean().optional()}).parse(input)
+  await db.query("DELETE FROM studio_editor WHERE scenario_id=$1 AND (seen_at<now()-interval '2 minutes' OR (staff_id=$2 AND client_id=$3 AND $4::boolean))",[id,actor.id,client,!!leave])
+  if(!leave)await db.query(`INSERT INTO studio_editor(tenant_id,store_id,scenario_id,staff_id,client_id) VALUES($1,$2,$3,$4,$5)
+    ON CONFLICT(scenario_id,staff_id,client_id) DO UPDATE SET seen_at=now()`,[actor.tenant_id,store,id,actor.id,client])
+  const {rows:[r]}=await db.query(`SELECT count(DISTINCT staff_id) FILTER(WHERE staff_id<>$2)::int AS other_people,count(*) FILTER(WHERE staff_id=$2 AND client_id<>$3)::int AS other_tabs FROM studio_editor
+    WHERE scenario_id=$1 AND seen_at>=now()-interval '2 minutes'`,[id,actor.id,client])
+  return {...r,revision:current.revision}
 }
 
 export async function publicationReview(context:Context,id:string){
@@ -263,9 +304,9 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
     if (marked.length>5000) throw new Fault(422,'MESSAGE_TOO_LONG','テストの表示を含めて5000文字以内にしてください。')
     const job=newId()
     await db.query(`INSERT INTO test_send
-      (id,tenant_id,store_id,channel_id,tester_id,actor_id,operation_key,generation,scenario_id,scenario_revision,test_body,tag_test_guard)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[job,actor.tenant_id,store,c.id,proof.id,actor.id,
-      keyed(cfg,'scenario-test:'+id+':'+key),c.generation,id,current.revision,seal(cfg,'test-body:'+job,marked),guard===null?null:JSON.stringify(guard)])
+      (id,tenant_id,store_id,channel_id,tester_id,actor_id,operation_key,generation,scenario_id,scenario_revision,test_body,tag_test_guard,test_rich_box)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,[job,actor.tenant_id,store,c.id,proof.id,actor.id,
+      keyed(cfg,'scenario-test:'+id+':'+key),c.generation,id,current.revision,seal(cfg,'test-body:'+job,marked),guard===null?null:JSON.stringify(guard),selected?.type==='message'&&selected.rich?seal(cfg,'test-rich:'+job,JSON.stringify(selected.rich)):null])
     await audit(db,actor.tenant_id,store,actor.id,'scenario.test_queue',id,null,{job,node:data.node})
     return {id:job,status:'queued'}
   })

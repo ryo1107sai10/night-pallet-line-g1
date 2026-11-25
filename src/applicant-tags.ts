@@ -1,3 +1,4 @@
+import {branchRules} from '../public/studio/engine.mjs'
 import { z } from 'zod'
 import { audit, automationForStore, conflict, digest, Fault, missing, newId, once, revision, text, unseal, uuid, type Actor, type Config, type DB } from './core.js'
 import { lockDispatch } from './dispatch-lock.js'
@@ -179,8 +180,8 @@ export async function resolveTag(db:DB,store:string,value:string){
   const {rows:[entry]}=await db.query<{tag_key:string}>(`SELECT tag_key FROM applicant_tag WHERE store_id=$1 AND active AND (tag_key=$2 OR label=$2) ORDER BY (tag_key=$2) DESC LIMIT 1`,[store,value])
   return entry?.tag_key??null
 }
-export function graphUsesApplicantTags(graph:Graph){return ['tag_added','tag_campaign'].includes(graph.trigger)||graph.nodes.some(n=>n.type==='tag'||n.type==='branch'&&n.condition==='tag'||n.type==='message'&&!!n.tagGuard)}
-function applicantGraphTagRefs(graph:Graph){return [...(graph.trigger==='tag_added'?[graph.triggerTag??'']:[]),...graph.nodes.flatMap(n=>n.type==='tag'||n.type==='branch'&&n.condition==='tag'?[n.tag??'']:n.type==='message'&&n.tagGuard?[n.tagGuard.tag,...n.tagGuard.exclude]:[])]}
+export function graphUsesApplicantTags(graph:Graph){return ['tag_added','tag_campaign'].includes(graph.trigger)||graph.nodes.some(n=>n.type==='tag'||n.type==='branch'&&branchRules(n).some(r=>r.condition==='tag')||n.type==='message'&&!!n.tagGuard)}
+function applicantGraphTagRefs(graph:Graph){return [...(graph.trigger==='tag_added'?[graph.triggerTag??'']:[]),...graph.nodes.flatMap(n=>n.type==='tag'?[n.tag??'']:n.type==='branch'?branchRules(n).filter(r=>r.condition==='tag').map(r=>r.tag??''):n.type==='message'&&n.tagGuard?[n.tagGuard.tag,...n.tagGuard.exclude]:[])]}
 export async function allowApplicantTagGraph(db:DB,actor:Actor,store:string,graph:Graph){
   if(graph.purpose!=='recruitment'||!graphUsesApplicantTags(graph))return
   await requireTags(db,store);await seedApplicantTags(db,actor.tenant_id,store)
@@ -190,6 +191,7 @@ export async function allowApplicantTagGraph(db:DB,actor:Actor,store:string,grap
   if(graph.trigger==='tag_added')graph.triggerTag=(await resolveTag(db,store,graph.triggerTag!))!
   for(const node of graph.nodes){
     if(node.type==='tag'||node.type==='branch'&&node.condition==='tag')node.tag=(await resolveTag(db,store,node.tag!))!
+    if(node.type==='branch'&&node.rules)for(const rule of node.rules)if(rule.condition==='tag')rule.tag=(await resolveTag(db,store,rule.tag!))!
     if(node.type==='message'&&node.tagGuard){node.tagGuard.tag=(await resolveTag(db,store,node.tagGuard.tag))!;node.tagGuard.exclude=[...new Set(await Promise.all(node.tagGuard.exclude.map(async k=>(await resolveTag(db,store,k))!)))];if(node.tagGuard.exclude.includes(node.tagGuard.tag))throw new Fault(422,'TAG_GUARD_CONFLICT','必要なタグを除外タグにも設定できません。')}
   }
 }

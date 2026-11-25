@@ -1,5 +1,6 @@
+import {resolveRichButtons} from '../public/studio/message-format.mjs'
 import type pg from 'pg'
-import { renderMessage, waitUntil } from '../public/studio/engine.mjs'
+import { renderMessage, waitUntil, branchRules, evaluateBranch } from '../public/studio/engine.mjs'
 import { audit, keyed, newId, scope, seal, tx, unseal, type Config, type DB, type Route } from './core.js'
 import { automaticRelationshipReady, channel, channelCredentials, channelReady, type Channel, type LineAPI } from './line.js'
 import { locationOf } from './automation.js'
@@ -9,7 +10,7 @@ import { messageBudget } from './delivery-budget.js'
 import { INTERVIEW_LINK_MARKER, interviewLinkEligible, issueInterviewLinkToken } from './interview-link.js'
 import { contactAddress, rememberContact } from './rich-menus.js'
 import { emitApplicantEvent } from './applicant-events.js'
-import { applicantTags, applicantHasTag, applyApplicantTagRules, setScenarioTag, tagCampaignForRun, validApplicantTagsForRun } from './applicant-tags.js'
+import { applicantTags, applyApplicantTagRules, setScenarioTag, tagCampaignForRun, validApplicantTagsForRun } from './applicant-tags.js'
 import { deliveryScope } from './delivery-budget.js'
 export { emitApplicantEvent } from './applicant-events.js'
 
@@ -263,6 +264,7 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
     await end(db,run,'配信停止または旧予約版')
     return null
   }
+  await db.query(`INSERT INTO applicant_note(tenant_id,store_id,channel_id,enrollment_id,kind,node_id,detail) VALUES($1,$2,$3,$4,'studio_visit',$5,'ステップ到達') ON CONFLICT DO NOTHING`,[run.tenant_id,run.store_id,run.channel_id,run.id,node.id])
   if (node.type==='end') {await end(db,run,'完了');return null}
   if (node.type==='wait') {
     if (run.wait_node===node.id) await advance(db,run,node.next,run.due_at)
@@ -280,16 +282,16 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
   }
   if (node.type==='branch') {
     let responded=false
-    if (contact && node.condition==='responded') {
+    if (contact && branchRules(node).some(r=>r.condition==='responded')) {
       const reply=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind='message' LIMIT 1`,
         [c.id,contact.user_key])
       responded=!!reply.rowCount
     }
-    const tagged=node.condition==='tag'&&node.tag?await applicantHasTag(db,run,node.tag):false
+    const tags=branchRules(node).some(r=>r.condition==='tag')?await applicantTags(db,run):[]
     const states={booked:booking?.status==='confirmed',consent:!!contact?.notices,adult:false,
-      responded,assigned:false,tag:tagged}
-    await advance(db,run,states[node.condition]?node.yes:node.no,run.due_at,
-      {kind:'branch',detail:states[node.condition]?'はい':'いいえ'})
+      responded,assigned:false}
+    const passed=evaluateBranch(node,states,tags)
+    await advance(db,run,passed?node.yes:node.no,run.due_at,{kind:'branch',detail:passed?'はい':'いいえ'})
     return null
   }
   if (node.type==='tag'||node.type==='task') {
@@ -413,6 +415,7 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
     }
     const to=contactAddress(cfg,contact!)
     let sendBody=body
+    const richLinks:Record<string,string>={}
     if (body.includes(interviewLinkPlaceholder(job.id))) {
       // 面談予約URLは送信の直前に受信者ごと発行する（トークンの3時間期限は送信時点から数える）。
       // 発行条件を満たさなくなっていた場合は、プレースホルダのまま送らず送信を取りやめる。
@@ -428,10 +431,11 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
       const link=await issueInterviewLinkToken(db,cfg,c,to)
       await audit(db,c.tenant_id,c.store_id,null,'interview_link.issue',link.id,null,
         {channel_id:c.id,source:'scenario_auto',enrollment_id:run.id})
+      richLinks[INTERVIEW_LINK_MARKER]=link.url
       sendBody=body.split(interviewLinkPlaceholder(job.id)).join(link.url)
       if (sendBody.length>5000) return abort('差し込み後に5000文字を超えています')
     }
-    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody)
+    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody,resolveRichButtons(current?.type==='message'?current.rich:undefined,richLinks))
       .catch(()=>({status:'unknown',requestId:null,authError:false}))}
   })
   if (!submitted) return true

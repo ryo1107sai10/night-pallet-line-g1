@@ -1,4 +1,4 @@
-import { kinds, links, simulate } from './engine.mjs'
+import { kinds, links, simulate, starter, branchRules } from './engine.mjs'
 
 export const edgeTarget=(flow,edge)=>edge.owner===null?flow.entry:flow.nodes.find(n=>n.id===edge.owner)?.[edge.key]
 export function incomingEdges(flow,id){
@@ -43,7 +43,7 @@ export function timeUnit(minutes){
 }
 export function tagKeys(flow){
   return [...new Set([flow.triggerTag,...flow.nodes.flatMap(n=>[
-    n.type==='tag'||n.type==='branch'&&n.condition==='tag'?n.tag:null,n.tagGuard?.tag,...(n.tagGuard?.exclude??[]),
+    n.type==='tag'?n.tag:null,...(n.type==='branch'?branchRules(n).filter(r=>r.condition==='tag').map(r=>r.tag):[]),n.tagGuard?.tag,...(n.tagGuard?.exclude??[]),
   ])].filter(Boolean))]
 }
 export function copyFlow(flow,{name,channel,sourceName,targetName,tagMap={},origin}){
@@ -54,9 +54,10 @@ export function copyFlow(flow,{name,channel,sourceName,targetName,tagMap={},orig
   if(draft.triggerTag)draft.triggerTag=mapped(draft.triggerTag)
   for(const n of draft.nodes){
     if((n.type==='tag'||n.type==='branch'&&n.condition==='tag')&&n.tag)n.tag=mapped(n.tag)
+    if(n.type==='branch'&&n.rules)for(const rule of n.rules)if(rule.condition==='tag'&&rule.tag)rule.tag=mapped(rule.tag)
     if(n.tagGuard){n.tagGuard.tag=mapped(n.tagGuard.tag);n.tagGuard.exclude=[...new Set(n.tagGuard.exclude.map(mapped))].filter(x=>x!==n.tagGuard.tag)}
     if(n.type==='message'){
-      if(sourceName&&targetName&&sourceName!==targetName)n.body=n.body.split(sourceName).join('{{store}}')
+      if(sourceName&&targetName&&sourceName!==targetName){n.body=n.body.split(sourceName).join('{{store}}');if(n.rich?.title?.includes(sourceName))n.rich.title=n.rich.title.split(sourceName).join(targetName).slice(0,60);for(const b of n.rich?.buttons??[])try{const url=new URL(b.url);if(url.origin===origin&&/^\/(?:reserve|book|interview-link|liff|account|customer-link)\//.test(url.pathname))b.url=''}catch{}}
       // Convert only known app reservation links, not arbitrary external URLs.
       if(origin)n.body=n.body.replace(/https?:\/\/[^\s<>"'、。]+/g,raw=>{
         try{const url=new URL(raw);if(url.origin===origin&&draft.purpose==='recruitment'&&/^\/(?:reserve|book|interview-link|liff)\//.test(url.pathname))return '{{interview_link}}'
@@ -114,4 +115,42 @@ export function routeSteps(flow,id,limit=100){
     seen.add(key);queue.push(...links(step))
   }
   return seen.size
+}
+
+// A copied block must have one entry and be internally connected. External exits are
+// reconnected to the insertion target; existing graph edges are never removed.
+export function stepBlock(flow,selected){
+  const ids=new Set(selected),all=new Map(flow.nodes.map(n=>[n.id,n]))
+  if(!ids.size||[...ids].some(id=>!all.has(id)))return null
+  const roots=[...ids].filter(id=>!flow.nodes.some(n=>ids.has(n.id)&&links(n).includes(id)))
+  if(roots.length!==1)return null
+  const visited=new Set(),stack=[roots[0]]
+  while(stack.length){const id=stack.pop();if(!ids.has(id)||visited.has(id))continue;visited.add(id);stack.push(...links(all.get(id)))}
+  if(visited.size!==ids.size)return null
+  return {entry:roots[0],nodes:structuredClone(flow.nodes.filter(n=>ids.has(n.id)))}
+}
+export function pasteBlock(flow,edge,block,idFactory){
+  if(!block||flow.nodes.length+block.nodes.length>100)return null
+  const parent=edge.owner===null?flow:flow.nodes.find(n=>n.id===edge.owner)
+  if(!parent||(edge.owner===null?edge.key!=='entry':!['next','yes','no'].includes(edge.key)||!Object.hasOwn(parent,edge.key)))return null
+  const target=parent[edge.key];if(target&&block.nodes.some(n=>n.type==='end'))return null
+  const draft=structuredClone(flow),map=new Map(block.nodes.map(n=>[n.id,idFactory()]))
+  if(new Set(map.values()).size!==map.size||[...map.values()].some(id=>flow.nodes.some(n=>n.id===id)))return null
+  const cloned=block.nodes.map(n=>{const copy=structuredClone(n);copy.id=map.get(n.id);copy.name=(copy.name+'（コピー）').slice(0,100);for(const key of n.type==='branch'?['yes','no']:n.type==='end'?[]:['next'])copy[key]=map.get(n[key])??target??'';return copy})
+  const entry=map.get(block.entry);const dest=edge.owner===null?draft:draft.nodes.find(n=>n.id===edge.owner)
+  dest[edge.key]=entry
+  const at=draft.nodes.findIndex(n=>n.id===target);draft.nodes.splice(at<0?draft.nodes.length:at,0,...cloned)
+  return {flow:draft,entry,ids:cloned.map(n=>n.id)}
+}
+// Ordered graph overview and the branch disclosures that must open to reach a card.
+export function stepOutline(flow){
+  const seen=new Set(),map=new Map(flow.nodes.map(n=>[n.id,n])),result=[]
+  function walk(id,path=[],depth=0){if(!map.has(id)||seen.has(id))return;seen.add(id);const n=map.get(id);result.push({id,name:n.name,type:n.type,path,depth});if(n.type==='branch'){walk(n.yes,[...path,n.id+':yes'],depth+1);walk(n.no,[...path,n.id+':no'],depth+1)}else if(n.type!=='end')walk(n.next,path,depth)}
+  walk(flow.entry);for(const n of flow.nodes)if(!seen.has(n.id))walk(n.id);return result
+}
+export function wizardFlow({purpose='recruitment',name,channel,trigger,triggerTag,first,follow='',minutes=1440,skipBooked=true}){
+  const flow=starter(purpose);Object.assign(flow,{name,channel,trigger,entry:'welcome'});if(trigger==='tag_added')flow.triggerTag=triggerTag
+  flow.nodes=[{id:'welcome',type:'message',name:'初回案内',category:'service',body:first,next:follow?'wait':'end'}]
+  if(follow){flow.nodes.push({id:'wait',type:'wait',name:'再案内まで待機',mode:'delay',minutes,next:skipBooked?'check':'remind'});if(skipBooked)flow.nodes.push({id:'check',type:'branch',name:'予約済みか確認',condition:'booked',yes:'end',no:'remind'});flow.nodes.push({id:'remind',type:'message',name:'再案内',category:'service',body:follow,next:'end'})}
+  flow.nodes.push({id:'end',type:'end',name:'終了'});return flow
 }
