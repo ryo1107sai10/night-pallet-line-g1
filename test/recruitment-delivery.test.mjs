@@ -542,3 +542,122 @@ test('採用: 応募フォーム送信から同意済みの応募者へ一度だ
   await worker()
   assert.equal(await ready(),false,'明示的なブロックをメッセージからの推定で上書きしない')
 })
+
+const tagsRoot=()=>'/stores/'+storeId+'/workflows/recruitment/tags'
+const overview=async(query='')=>expect(await request(tagsRoot()+query,{cookie:admin}),200)
+const personByName=async name=>(await overview()).subjects.find(p=>p.applicant_name===name)
+const assign=async(person,tags)=>expect(await patch(tagsRoot()+'/subjects/'+person.id,admin,{revision:person.revision,tags:[...new Set(tags)]}),200)
+let tagUser,tagCookie,tagOther,tagOtherCookie,customTag
+
+test('採用タグ: 初期ルール、応募前の友だち、フォーム送信、予約・取消、手動設定を分離して保存する',async()=>{
+  const initial=await overview()
+  assert.ok(initial.enabled)
+  assert.ok(initial.definitions.length>=20)
+  const user='U'+'0a'.repeat(16);tagUser=user
+  tagCookie=await optInApplicant(user,'tags-first')
+  const personKey=applicantKeyOf(user)
+  const friendTags=await tx(pool,async db=>{await scope(db,tenant,storeId);return (await db.query(`SELECT a.tag_key FROM applicant_tag_assignment a JOIN applicant_tag_subject s ON s.id=a.subject_id WHERE s.applicant_key=$1 AND a.active`,[personKey])).rows.map(r=>r.tag_key)})
+  assert.ok(friendTags.includes('new_friend'));assert.ok(friendTags.includes('unanswered'))
+  const form=expect(await request('/stores/'+storeId+'/workflows/recruitment/forms',{cookie:admin}),200).forms[0]
+  expect(await post('/interview/form',tagCookie,{form:form.id,revision:form.revision,answers:{name:'タグ検証A'}}),201)
+  await flush(4)
+  let person=await personByName('タグ検証A');assert.ok(person)
+  assert.ok(person.tags.includes('new_application'));assert.ok(person.tags.includes('interview_pending'))
+  assert.ok(!person.tags.includes('new_friend'));assert.ok(!person.tags.includes('unanswered'))
+  const date=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(Date.now()+5*86400000))
+  const slot=expect(await post('/stores/'+storeId+'/interviews/slots',admin,{channel:recruitCh,starts_at:date+'T19:00:00+09:00',ends_at:date+'T19:30:00+09:00',instructions:'タグ動作確認',published:true},idempotency()),201).id
+  const booking=expect(await post('/interview/bookings',tagCookie,{slot,name:'タグ検証A'}),201)
+  person=await personByName('タグ検証A');assert.ok(person.tags.includes('interview_booked'));assert.ok(!person.tags.includes('interview_pending'))
+  expect(await patch('/interview/bookings/'+booking.id,tagCookie,{action:'cancel',revision:booking.revision}),200)
+  person=await personByName('タグ検証A');assert.ok(person.tags.includes('interview_cancelled'));assert.ok(!person.tags.includes('interview_booked'));assert.ok(person.tags.includes('interview_pending'))
+  // New labels are store-local, not customer tags. Renaming preserves the stable reference.
+  const created=expect(await request(tagsRoot()+'/definitions',{method:'PUT',cookie:admin,data:{revision:0,label:'優先対応',category:'対応',add_events:[],remove_events:[],active:true}}),200)
+  customTag=created.tag_key
+  expect(await request(tagsRoot()+'/definitions',{method:'PUT',cookie:admin,data:{key:customTag,revision:created.revision,label:'優先フォロー',category:'対応',add_events:[],remove_events:[],active:true}}),200)
+  const updated=await overview();assert.equal(updated.definitions.find(t=>t.tag_key===customTag).label,'優先フォロー')
+  assert.equal((await read('SELECT 1 FROM customer WHERE tags @> ARRAY[$1]::text[]',[customTag])).rowCount,0)
+})
+
+test('採用タグ: タグ付与でシナリオを開始し、実タグによる分岐とステップ付与・解除を反映する',async()=>{
+  await publishScenario({...bookedGraph,name:'採用タグ自動配信',trigger:'tag_added',triggerTag:customTag,entry:'branch',nodes:[
+    {id:'branch',type:'branch',name:'優先フォローか',condition:'tag',tag:customTag,yes:'add',no:'end'},
+    {id:'add',type:'tag',name:'再連絡予定を付ける',tag:'follow_up',action:'add',next:'remove'},
+    {id:'remove',type:'tag',name:'新規応募を外す',tag:'new_application',action:'remove',next:'notice'},
+    {id:'notice',type:'message',name:'フォロー案内',category:'service',body:'採用タグ動作確認',next:'end'},
+    {id:'end',type:'end',name:'終了'}]})
+  let p=await personByName('タグ検証A')
+  await assign(p,[...p.tags,customTag]);await flush(8)
+  p=await personByName('タグ検証A');assert.ok(p.tags.includes(customTag));assert.ok(p.tags.includes('follow_up'));assert.ok(!p.tags.includes('new_application'))
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='採用タグ動作確認').length,1)
+  await assign(p,p.tags);await flush(3);assert.equal(pushesTo(tagUser).filter(x=>x.text==='採用タグ動作確認').length,1,'既に持っているタグからは重複起動しない')
+})
+
+test('採用タグ: 店長引き継ぎで付与し、終了と自動期限で解除する',async()=>{
+  await inbound(recruitCh,botR,[eventFor('tags-handoff-message','message',tagUser,{message:{id:'tags-handoff-msg',type:'text',text:'面談について'}})])
+  await worker()
+  const getThread=async()=>(await read("SELECT id,revision FROM inbox_thread WHERE channel_id=$1 AND user_key=$2 AND purpose='recruitment'",[recruitCh,userKey(cfg,{id:recruitCh},tagUser)])).rows[0]
+  let thread=await getThread()
+  const root='/stores/'+storeId+'/workflows/recruitment/inbox/'+thread.id+'/handoff'
+  expect(await patch(root,admin,{revision:thread.revision,minutes:15}),200)
+  assert.ok((await personByName('タグ検証A')).tags.includes('handoff'))
+  await read("UPDATE applicant_tag_assignment SET expires_at=now()-interval '1 second' WHERE tag_key='handoff'")
+  assert.ok(!(await personByName('タグ検証A')).tags.includes('handoff'),'期限を過ぎた状態は絞り込みに含めない')
+  thread=await getThread();expect(await patch(root,admin,{revision:thread.revision,minutes:null}),200)
+  assert.ok(!(await personByName('タグ検証A')).tags.includes('handoff'))
+})
+
+test('採用タグ: 複数条件・除外・同意で配信対象を確定し、変更・停止を直前に再判定する',async()=>{
+  tagOther='U'+'0b'.repeat(16);tagOtherCookie=await optInApplicant(tagOther,'tags-second')
+  expect(await request('/interview/notices',{method:'PUT',cookie:tagOtherCookie,data:{enabled:false}}),200)
+  const form=expect(await request('/stores/'+storeId+'/workflows/recruitment/forms',{cookie:admin}),200).forms[0]
+  expect(await post('/interview/form',tagOtherCookie,{form:form.id,revision:form.revision,answers:{name:'タグ検証B'}}),201)
+  const other=await personByName('タグ検証B');await assign(other,[...other.tags,customTag,'follow_up'])
+  // A tag trigger is not created for a recipient without consent, even if they later opt in before the worker.
+  assert.equal((await read("SELECT 1 FROM applicant_event WHERE applicant_key=$1 AND kind='tag_added'",[applicantKeyOf(tagOther)])).rowCount,0)
+  let a=await personByName('タグ検証A');await assign(a,[...a.tags,'follow_up'])
+  const graph={...bookedGraph,name:'採用タグ絞り込み',trigger:'tag_campaign',nodes:[{id:'notice',type:'message',name:'通知',category:'service',body:'タグ絞り込み検証',next:'end'},{id:'end',type:'end',name:'終了'}]}
+  const scenario=await publishScenario(graph)
+  const criteria={include:[customTag,'follow_up'],exclude:['withdrawn'],match:'all'}
+  const filtered=await overview('?include='+customTag+',follow_up&exclude=withdrawn&match=all')
+  assert.equal(filtered.total,2)
+  const input={scenario:scenario.id,criteria}
+  const preview=()=>post(tagsRoot()+'/campaigns/preview',admin,input)
+  const send=proof=>post(tagsRoot()+'/campaigns',admin,{...input,fingerprint:proof.fingerprint},idempotency())
+  let check=expect(await preview(),200);assert.equal(check.eligible,1);assert.equal(check.excluded,1)
+  a=await personByName('タグ検証A');await assign(a,[...a.tags,'withdrawn'])
+  expect(await send(check),409)
+  a=await personByName('タグ検証A');await assign(a,a.tags.filter(k=>k!=='withdrawn'))
+  check=expect(await preview(),200);expect(await send(check),201)
+  a=await personByName('タグ検証A');await assign(a,[...a.tags,'withdrawn']);await flush(5)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグ絞り込み検証').length,0)
+  a=await personByName('タグ検証A');await assign(a,a.tags.filter(k=>k!=='withdrawn'))
+  check=expect(await preview(),200);const campaign=expect(await send(check),201);await flush(5)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグ絞り込み検証').length,1)
+  assert.equal(pushesTo(tagOther).filter(x=>x.text==='タグ絞り込み検証').length,0)
+  assert.ok((await overview()).campaigns.find(x=>x.id===campaign.id).accepted>=1)
+  check=expect(await preview(),200);const stop=expect(await send(check),201)
+  expect(await post(tagsRoot()+'/campaigns/'+stop.id+'/stop',admin,{}),200);await flush(5)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグ絞り込み検証').length,1)
+})
+
+test('採用タグ: 店舗機能を停止・再開してもタグを維持し、停止中は操作・配信を拒否する',async()=>{
+  const before=await overview();expect(await patch(tagsRoot()+'/settings',admin,{revision:before.revision,enabled:false}),200)
+  const off=await overview();assert.equal(off.enabled,false);assert.deepEqual(off.subjects,[])
+  const p=before.subjects.find(x=>x.applicant_name==='タグ検証A');expect(await patch(tagsRoot()+'/subjects/'+p.id,admin,{revision:p.revision,tags:[]}),409)
+  expect(await patch(tagsRoot()+'/settings',admin,{revision:off.revision,enabled:true}),200)
+  assert.deepEqual((await personByName('タグ検証A')).tags,p.tags)
+})
+
+test('採用タグ: 同じ法人でも別店舗のタグ定義・応募者は利用できない',async()=>{
+  const other=expect(await post('/stores',admin,{name:'別店舗タグ検証',address:'東京都',business_type:'接客飲食',responsible:'担当者',timezone:'Asia/Tokyo',cutoff:'06:00'},idempotency()),201).id
+  const featurePath='/stores/'+other+'/features'
+  const features=expect(await request(featurePath,{cookie:admin}),200)
+  expect(await patch(featurePath,admin,{...features,recruitment_enabled:true}),200)
+  const newPath='/stores/'+other+'/workflows/recruitment/tags'
+  const otherTags=expect(await request(newPath,{cookie:admin}),200)
+  assert.ok(!otherTags.definitions.some(t=>t.tag_key===customTag));assert.equal(otherTags.total,0)
+  const p=await personByName('タグ検証A')
+  expect(await patch(newPath+'/subjects/'+p.id,admin,{revision:p.revision,tags:[]}),404)
+  expect(await request(newPath+'/definitions',{method:'PUT',cookie:admin,data:{key:customTag,revision:1,label:'他店舗変更',category:'その他',add_events:[],remove_events:[],active:true}}),409)
+  assert.equal((await overview()).definitions.find(t=>t.tag_key===customTag).label,'優先フォロー')
+})

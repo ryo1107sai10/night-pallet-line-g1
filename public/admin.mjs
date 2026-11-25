@@ -19,7 +19,7 @@ const featureNames = {
   token_interviews_enabled:'LINEトークからの面談予約',
   token_customers_enabled:'LINEトークからの来店予約・設定',
   interviews_enabled:'面談予約', google_calendar_enabled:'面談時にGoogleカレンダーを照合',
-  forms_enabled:'回答フォーム', recruitment_enabled:'応募・選考管理', sources_enabled:'流入分析',
+  forms_enabled:'回答フォーム', recruitment_enabled:'応募・選考管理', recruitment_tags_enabled:'採用タグ・絞り込み配信', sources_enabled:'流入分析',
   campaigns_enabled:'絞り込み配信',
   rich_menus_enabled:'リッチメニュー切り替え', reminders_enabled:'面談リマインド', waitlist_enabled:'面談のキャンセル待ち',
   inbox_enabled:'LINE受信箱',
@@ -32,6 +32,7 @@ const featureGuides = {
   google_calendar_enabled:'面談枠の空き判定に、Googleカレンダーの予定を照合します。',
   forms_enabled:'応募・来店の前後で必要な情報をフォームで集めます。',
   recruitment_enabled:'応募者の選考状況を店舗で管理します。',
+  recruitment_tags_enabled:'応募者をタグで分類し、タグ条件による採用ステップや絞り込み配信を実行します。',
   sources_enabled:'どの経路から友だち追加や応募があったかを記録します。',
   campaigns_enabled:'タグなどの条件で対象を絞って配信します。',
   rich_menus_enabled:'予約の有無などに応じてリッチメニューを切り替えます。',
@@ -899,6 +900,7 @@ async function render() {
   $('#manage-interviews').href = workspacePath('/interview/staff.html'+storeQuery)
   $('#manage-operations').href = workspacePath('/operations/'+storeQuery)
   $('#manage-workflows').href = workspacePath('/workflows/'+storeQuery)
+  $('#manage-tags').href = workspacePath('/workflows/'+storeQuery+(storeQuery?'&':'?')+'use=recruitment&tab=tags')
   $('#manage-studio').href = workspacePath('/studio/'+storeQuery)
   const layout = el('div',null,'controls')
   const main = el('div')

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type pg from 'pg'
 import { z } from 'zod'
 import {
-  type Actor, type Config, type DB, Fault, audit, automationForStore, conflict, email, newId, once, purpose, revision,
+  type Actor, type Config, type DB, Fault, audit, automationForStore, conflict, forbidden, email, newId, once, purpose, revision,
   route, scope, text, tx, uuid,
 } from './core.js'
 import { accept, authenticate, createInvite, disableStaff, gate, login, logout, memberRole,
@@ -40,6 +40,7 @@ import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, t
 import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
   type WorkflowSubject } from './forms.js'
 import { saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInput, sourceStatus } from './sources.js'
+import { applicantTagCatalog, tagOverview, tagListQuery, saveApplicantTagSettings, tagSettingsInput, saveApplicantTag, tagDefinitionInput, saveSubjectTags, subjectTagsInput, tagCampaignInput, tagCampaignConfirm, previewTagCampaign, queueTagCampaign, stopTagCampaign } from './applicant-tags.js'
 import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepareCampaign, stopCampaign } from './campaigns.js'
 import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
 import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitlistInput } from './interview-notices.js'
@@ -557,6 +558,19 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     })
     res.json(await tx(pool,async db=>saveMenus(db,await authorized(db),store,use,data,generation)))
   })
+  const tags=workflow+'/tags'
+  const tagStaff=(action:Action,status=200)=>inStore((db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    return action(db,actor,req)
+  },true,status)
+  api.get(tags,tagStaff((db,actor,req)=>tagOverview(db,cfg,actor,idOf(req,'store'),tagListQuery.parse(req.query))))
+  api.get(tags+'/catalog',tagStaff((db,actor,req)=>applicantTagCatalog(db,actor,idOf(req,'store'))))
+  api.patch(tags+'/settings',tagStaff((db,actor,req)=>saveApplicantTagSettings(db,actor,idOf(req,'store'),tagSettingsInput.parse(req.body))))
+  api.put(tags+'/definitions',tagStaff((db,actor,req)=>saveApplicantTag(db,actor,idOf(req,'store'),tagDefinitionInput.parse(req.body))))
+  api.patch(tags+'/subjects/:subject',tagStaff((db,actor,req)=>saveSubjectTags(db,actor,idOf(req,'store'),idOf(req,'subject'),subjectTagsInput.parse(req.body))))
+  api.post(tags+'/campaigns/preview',tagStaff((db,actor,req)=>previewTagCampaign(db,cfg,actor,idOf(req,'store'),tagCampaignInput.parse(req.body))))
+  api.post(tags+'/campaigns',tagStaff((db,actor,req)=>queueTagCampaign(db,cfg,actor,idOf(req,'store'),keyOf(req),tagCampaignConfirm.parse(req.body)),201))
+  api.post(tags+'/campaigns/:campaign/stop',tagStaff((db,actor,req)=>stopTagCampaign(db,actor,idOf(req,'store'),idOf(req,'campaign'))))
   api.get('/stores/:store/recruitment',interviewStaff((db,_actor,req)=>listRecruitment(db,cfg,idOf(req,'store'))))
   api.patch('/stores/:store/recruitment/:case',interviewStaff((db,actor,req)=>
     updateCase(db,actor,idOf(req,'store'),idOf(req,'case'),caseInput.parse(req.body))))

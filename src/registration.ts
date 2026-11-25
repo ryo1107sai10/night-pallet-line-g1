@@ -93,7 +93,7 @@ type ProfileValues = { name: string; address: string; business_type: string; res
 const profileDigest = (p: ProfileValues) =>
   digest(JSON.stringify([p.name, p.address, p.business_type, p.responsible, p.timezone, p.cutoff]))
 const featuresDigest = (features: Record<string, unknown>) => digest(JSON.stringify(
-  Object.keys(features).filter(key => key !== 'revision').sort().map(key => [key, !!features[key]])))
+  Object.keys(features).filter(key => key !== 'revision' && key !== 'recruitment_tags_enabled').sort().map(key => [key, !!features[key]])))
 const hoursDigest = (start: number, end: number) => digest(JSON.stringify([start, end]))
 
 async function tenantProgress(db: DB, tenantId: string) {

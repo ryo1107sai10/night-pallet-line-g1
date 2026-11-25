@@ -4,7 +4,8 @@ import { audit, conflict, Fault, missing, newId, once, purpose, revision, seal, 
 import { channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
-import { emitApplicantEvent } from './recruitment-automation.js'
+import { emitApplicantEvent } from './applicant-events.js'
+import { applyApplicantTagRules, type tagEvents } from './applicant-tags.js'
 
 export type WorkflowSubject = {tenant_id:string;store_id:string;channel_id:string;purpose:z.infer<typeof purpose>;subject:string}
 const fieldKey=z.string().regex(/^[A-Za-z0-9_-]{1,40}$/)
@@ -100,6 +101,10 @@ export async function submitForm(db:DB,cfg:Config,identity:WorkflowSubject,data:
     const display=name&&Object.hasOwn(data.answers,name.key)?data.answers[name.key].slice(0,80):''
     if(display)await db.query(`UPDATE recruitment_case SET display_name_box=$3 WHERE channel_id=$1 AND applicant_key=$2`,
       [identity.channel_id,identity.subject,seal(cfg,'recruitment-name:'+identity.channel_id+':'+identity.subject,display)])
+    const tagIdentity={...identity,applicant_key:identity.subject}
+    await applyApplicantTagRules(db,tagIdentity,'form')
+    if(!(await db.query(`SELECT 1 FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id WHERE b.channel_id=$1 AND b.applicant_key=$2 AND b.status='confirmed' AND s.starts_at>now()`,[identity.channel_id,identity.subject])).rowCount)
+      await applyApplicantTagRules(db,tagIdentity,'form_unbooked')
     // A submitted form may start a recruitment flow only when the applicant had
     // explicitly enabled LINE notices at submission. The dispatch worker checks
     // the current consent again, so a subsequent opt-out also prevents sending.
@@ -151,8 +156,8 @@ export async function listRecruitment(db:DB,cfg:Config,store:string) {
 export async function updateCase(db:DB,actor:Actor,store:string,id:string,data:z.infer<typeof caseInput>) {
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'recruitment_enabled')
-  const {rows:[previous]}=await db.query<{revision:number;stage:Stage;trial_at:Date|null}>(`
-    SELECT revision,stage,trial_at FROM recruitment_case WHERE id=$1 FOR UPDATE`,[id])
+  const {rows:[previous]}=await db.query<{revision:number;stage:Stage;trial_at:Date|null;tenant_id:string;store_id:string;channel_id:string;applicant_key:string}>(`
+    SELECT revision,stage,trial_at,tenant_id,store_id,channel_id,applicant_key FROM recruitment_case WHERE id=$1 FOR UPDATE`,[id])
   if(!previous)throw missing()
   if(previous.revision!==data.revision||!moves[previous.stage].includes(data.stage))throw conflict()
   if(data.stage==='trial_scheduled'&&(!data.trial_at||Date.parse(data.trial_at)<=Date.now())) {
@@ -164,6 +169,7 @@ export async function updateCase(db:DB,actor:Actor,store:string,id:string,data:z
     trial_done_at=CASE WHEN $2='trial_done' THEN now() ELSE trial_done_at END,
     hired_at=CASE WHEN $2='hired' THEN now() ELSE hired_at END
     WHERE id=$1 RETURNING id,revision,stage,trial_at`,[id,data.stage,data.trial_at])
+  if(data.stage!=='applied')await applyApplicantTagRules(db,previous,('stage_'+data.stage) as keyof typeof tagEvents)
   await audit(db,actor.tenant_id,store,actor.id,'recruitment.stage',id,null,{from:previous.stage,to:data.stage})
   return saved
 }

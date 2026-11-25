@@ -225,11 +225,14 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
     if (r.module_channel_id && (!cfg.external || r.module_channel_id!==cfg.lineModule?.id)) continue
     await processChannelEvents(pool,cfg,r)
     await runAutomation(pool,storeCfg,api,r)
-    await runRecruitmentAutomation(pool,storeCfg,api,r)
+    const campaignProgress=await runRecruitmentAutomation(pool,storeCfg,api,r)
     await deliverCampaign(pool,storeCfg,api,r)
     await updateRichMenu(pool,storeCfg,api,r)
     await runGoogleSync(pool,google,r)
     await deliverService(pool,storeCfg,api,r)
+    // A small bounded batch keeps a manual tag distribution moving, without
+    // delaying LINE inbox replies and booking notices or spinning when idle.
+    if(campaignProgress)for(let i=0;i<4;i++){if(!await runRecruitmentAutomation(pool,storeCfg,api,r,true))break}
     if (!cfg.external) continue
     const pending = await tx(pool, async db => { await scope(db,r.tenant_id,r.store_id); return claim(db,r) })
     if (!pending) continue

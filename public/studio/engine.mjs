@@ -2,12 +2,12 @@ export const triggers = {
   follow:'友だち追加', form:'フォーム送信', consent:'明示同意', booking_created:'予約作成',
   booking_changed:'予約変更', booking_cancelled:'予約取消', visit:'来店登録',
   interview_booked:'面談予約', interview_changed:'面談変更', interview_cancelled:'面談取消',
-  application:'応募状態変更', link:'リンク反応', manual:'手動登録',
+  application:'応募状態変更', tag_added:'採用タグが付いたとき',tag_campaign:'タグ絞り込み配信（手動）', link:'リンク反応', manual:'手動登録',
 }
 // Keep the editor and server publication gate on the same supported events.
 export const liveTriggers = Object.freeze({
   customer:Object.freeze(Object.fromEntries(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'].map(key=>[key,triggers[key]]))),
-  recruitment:Object.freeze(Object.fromEntries(['follow','form','interview_booked','interview_changed','interview_cancelled'].map(key=>[key,triggers[key]]))),
+  recruitment:Object.freeze(Object.fromEntries(['follow','form','interview_booked','interview_changed','interview_cancelled','tag_added','tag_campaign'].map(key=>[key,triggers[key]]))),
 })
 export const kinds = { message:'メッセージ',wait:'待機',branch:'条件分岐',tag:'タグ更新',task:'担当タスク',end:'終了' }
 export const conditions = { booked:'予約がある',consent:'目的別の同意がある',adult:'20歳以上の確認済み',
@@ -65,9 +65,10 @@ export function validate(flow, publish=false) {
   if (!flow.channel && publish) add('配信先の公式アカウントを選択してください。')
   if (!Object.hasOwn(triggers,flow.trigger) || (flow.trigger==='application' && flow.purpose!=='recruitment') ||
     (['booking_created','booking_changed','booking_cancelled','visit'].includes(flow.trigger) && flow.purpose!=='customer') ||
-    (['interview_booked','interview_changed','interview_cancelled'].includes(flow.trigger) && flow.purpose!=='recruitment')) {
+    (['interview_booked','interview_changed','interview_cancelled','tag_added','tag_campaign'].includes(flow.trigger) && flow.purpose!=='recruitment')) {
     add('この開始イベントはシナリオの用途と一致しません。')
   }
+  if(flow.trigger==='tag_added'&&!flow.triggerTag?.trim())add('開始条件の採用タグを選択してください。')
   if (!timeFormat.test(flow.windowStart) || !timeFormat.test(flow.windowEnd) || flow.windowStart>=flow.windowEnd) {
     add('配信可能時間は同じ日付内で、終了を開始より後に設定してください。')
   }

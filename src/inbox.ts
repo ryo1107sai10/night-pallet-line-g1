@@ -6,6 +6,7 @@ import { lockDispatch } from './dispatch-lock.js'
 import { interruptService,queueService } from './service-delivery.js'
 import { handoffUntil } from './line-handoff.js'
 import { requireFeature } from './store-features.js'
+import { applyHandoffTags } from './applicant-tags.js'
 
 type Use='customer'|'recruitment'|'unclassified'
 type Incoming={kind:string;messageId?:string;messageType?:string;body?:string;unsent?:string;when:Date}
@@ -196,6 +197,7 @@ export async function changeHandoff(db:DB,actor:Actor,store:string,use:Use,id:st
     await db.query('DELETE FROM line_handoff WHERE channel_id=$1 AND user_key=$2',[thread.channel_id,thread.user_key])
     await db.query('UPDATE inbox_thread SET revision=revision+1 WHERE channel_id=$1 AND user_key=$2',[thread.channel_id,thread.user_key])
   }
+  if(use!=='customer')await applyHandoffTags(db,store,thread.channel_id,thread.user_key,until)
   await audit(db,actor.tenant_id,store,actor.id,until?'inbox.handoff_started':'inbox.handoff_ended',id,null,{until})
   return {handoff_until:until}
 }

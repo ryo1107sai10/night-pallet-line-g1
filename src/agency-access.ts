@@ -16,11 +16,13 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   if(route==='/agency-master'||route==='/agency-master/invite'||route==='/agency-master/promote')return
   if(includesRoute(interviews,route)||includesRoute(scenarios,route))return
   if(includesRoute('/stores/:store/intake',route)&&['admin','manager'].includes(actor.role))return
+  if(['admin','manager'].includes(actor.role)&&includesRoute('/stores/:store/recruitment',route))return
   if(req.params.purpose?.toString().toLowerCase()==='recruitment'){
     if(reads&&['settings','delivery'].some(page=>route===workflow+'/'+page))return
     // 採用応募フォームはエールのマスターと店舗担当マネージャーが管理する。
     // workflowAccess の店舗割当と storeFeatures の有効化判定は引き続き適用する。
     if(['admin','manager'].includes(actor.role)){
+      if(includesRoute(workflow+'/tags',route))return
       if(route===workflow+'/forms'&&(reads||req.method==='PUT'))return
       if(route===workflow+'/responses'&&reads)return
     }

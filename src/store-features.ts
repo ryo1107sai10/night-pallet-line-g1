@@ -5,7 +5,7 @@ import { lockDispatch } from './dispatch-lock.js'
 export const featureInput = z.strictObject({
   revision, tags_enabled:z.boolean(), visits_enabled:z.boolean(),
   interviews_enabled:z.boolean(), google_calendar_enabled:z.boolean(),
-  forms_enabled:z.boolean().optional(),recruitment_enabled:z.boolean().optional(),sources_enabled:z.boolean().optional(),
+  forms_enabled:z.boolean().optional(),recruitment_enabled:z.boolean().optional(),recruitment_tags_enabled:z.boolean().optional(),sources_enabled:z.boolean().optional(),
   campaigns_enabled:z.boolean().optional(),
   rich_menus_enabled:z.boolean().optional(),reminders_enabled:z.boolean().optional(),waitlist_enabled:z.boolean().optional(),
   inbox_enabled:z.boolean().optional(),
@@ -20,7 +20,7 @@ type Feature = Exclude<keyof StoreFeatures,'revision'>
 const labels:Record<Feature,string> = {
   tags_enabled:'顧客タグ',visits_enabled:'来店予約',interviews_enabled:'面談予約',
   google_calendar_enabled:'Googleカレンダーの照合',
-  forms_enabled:'回答フォーム',recruitment_enabled:'応募・選考管理',sources_enabled:'流入分析',
+  forms_enabled:'回答フォーム',recruitment_enabled:'応募・選考管理',recruitment_tags_enabled:'採用タグ・絞り込み配信',sources_enabled:'流入分析',
   campaigns_enabled:'絞り込み配信',
   rich_menus_enabled:'リッチメニュー切り替え',reminders_enabled:'面談リマインド',waitlist_enabled:'面談のキャンセル待ち',
   inbox_enabled:'LINE受信箱',
@@ -49,9 +49,12 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
   await lockDispatch(db,actor.tenant_id)
   const {revision,...features}=input
   const updates=newFeatures.map((key,index)=>key+'=coalesce($'+(index+7)+','+key+')')
+  const recruitmentTagsParam='$'+(newFeatures.indexOf('recruitment_tags_enabled')+7)
+  const recruitmentParam='$'+(newFeatures.indexOf('recruitment_enabled')+7)
   const {rows:[settings]}=await db.query<StoreFeatures>(`UPDATE store SET tags_enabled=$2,visits_enabled=$3,
     tags_enabled_at=CASE WHEN tags_enabled<>$2 THEN clock_timestamp() ELSE tags_enabled_at END,
     visits_enabled_at=CASE WHEN visits_enabled<>$3 THEN clock_timestamp() ELSE visits_enabled_at END,
+    recruitment_tags_enabled_at=CASE WHEN recruitment_tags_enabled<>${recruitmentTagsParam} OR recruitment_enabled<>${recruitmentParam} THEN clock_timestamp() ELSE recruitment_tags_enabled_at END,
     interviews_enabled=$4,google_calendar_enabled=$5,${updates.join(',')},revision=revision+1
     WHERE id=$1 AND revision=$6 RETURNING ${columns}`,
   [store,features.tags_enabled,features.visits_enabled,features.interviews_enabled,features.google_calendar_enabled,revision,

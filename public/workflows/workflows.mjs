@@ -85,6 +85,7 @@ let onlyFailures=initialQuery.get('failures')==='1'
 let onlyUnanswered=initialQuery.get('unanswered')==='1'
 const replyDrafts=new Map()
 let actor
+let tagFilters={include:[],exclude:[],match:'all',page:1,store:null}
 
 function formEditor(root,data,path,refresh,use){
   root.append(el('h2',use==='recruitment'?'応募フォーム':'回答フォーム'))
@@ -200,6 +201,76 @@ function recruitment(root,records,store,path,refresh){
     root.append(row)
   }
   if(!records.length)root.append(el('p','応募はまだありません。'))
+}
+
+function checkedGroup(title,entries,prefix,selected=[]){
+  const group=el('fieldset',null,'tag-check-grid')
+  group.append(el('legend',title))
+  for(const [key,label] of entries)group.append(field(label,prefix+key,'checkbox',selected.includes(key)))
+  return group
+}
+const selectedKeys=(values,prefix)=>Object.keys(values).filter(k=>k.startsWith(prefix)).map(k=>k.slice(prefix.length))
+function tagManager(root,data,store,path,refresh){
+  root.append(el('h2','採用タグ・絞り込み配信'),el('p',store.name+'専用。顧客タグや他店舗の応募者とは分かれています。'))
+  const toggle=button(data.enabled?'この店舗の採用タグ機能を停止':'採用タグ機能を有効にする',async()=>{
+    if(data.enabled&&!confirm('タグを使う自動配信と絞り込み配信を停止します。タグの記録は保持します。よろしいですか？'))return
+    await api(path+'/settings','PATCH',{revision:data.revision,enabled:!data.enabled})
+    tagFilters={...tagFilters,include:[],exclude:[],page:1}
+    await refresh(data.enabled?'採用タグ機能を停止しました。':'採用タグ機能を有効にしました。')
+  })
+  root.append(controls(toggle))
+  if(!data.enabled){root.append(el('p','現在は停止中です。既存のタグ・配信履歴は保存されています。','muted'));return}
+  const active=data.definitions.filter(t=>t.active), options=active.map(t=>[t.tag_key,t.label]), labels=Object.fromEntries(options), events=Object.entries(data.events)
+  const ruleForm=entry=>form([
+    field('タグ名','label','text',entry?.label??''),field('分類','category','',entry?.category??'その他',data.categories.map(c=>[c,c])),
+    checkedGroup('自動的に付けるタイミング',events,'add_',entry?.add_events??[]),checkedGroup('自動的に外すタイミング',events,'remove_',entry?.remove_events??[]),
+    field('タグを有効にする','active','checkbox',entry?.active??true)
+  ],entry?'設定を保存':'タグを追加',async values=>{
+    await api(path+'/definitions','PUT',{...(entry?{key:entry.tag_key}:{}),revision:entry?.revision??0,label:values.label,category:values.category,
+      add_events:selectedKeys(values,'add_'),remove_events:selectedKeys(values,'remove_'),active:!!values.active})
+    tagFilters={...tagFilters,include:[],exclude:[],page:1}
+    await refresh('タグ設定を保存しました。')
+  })
+  const catalog=el('section',null,'record');catalog.append(el('h3','タグの登録・自動ルール'),el('p','標準タグは自由に名称・分類・付与条件を変更できます。無効化すると新規配信の条件から外れます。'),details('新しいタグを追加',ruleForm(null)))
+  for(const category of data.categories){
+    const list=el('div')
+    for(const t of data.definitions.filter(t=>t.category===category)){
+      const item=el('div',null,'tag-rule-item')
+      item.append(el('p',[t.add_events.length?'自動付与：'+t.add_events.map(e=>data.events[e]).join('、'):'手動・ステップで付与',t.remove_events.length?'自動解除：'+t.remove_events.map(e=>data.events[e]).join('、'):''].filter(Boolean).join(' · '),'muted'),details('ルールを編集',ruleForm(t)))
+      list.append(details(t.label+(t.active?'':'（無効）'),item))
+    }
+    catalog.append(details(category+'（'+data.definitions.filter(t=>t.category===category).length+'件）',list))
+  }
+  root.append(catalog)
+  const filters=el('section',null,'record');filters.append(el('h3','応募者を絞り込む'),form([
+    field('タグ条件','match','',tagFilters.match,[['all','すべてのタグを持つ（AND）'],['any','いずれかのタグを持つ（OR）']]),
+    details('含めるタグ（'+tagFilters.include.length+'件選択）',checkedGroup('含めるタグ',options,'inc_',tagFilters.include)),details('除外するタグ（'+tagFilters.exclude.length+'件選択）',checkedGroup('除外するタグ',options,'exc_',tagFilters.exclude))
+  ],'絞り込む',async values=>{tagFilters={...tagFilters,include:selectedKeys(values,'inc_'),exclude:selectedKeys(values,'exc_'),match:values.match,page:1};await refresh('対象を絞り込みました。')}),
+    button('条件をクリア',async()=>{tagFilters={...tagFilters,include:[],exclude:[],page:1};await refresh()}))
+  root.append(filters)
+  const subjects=el('section',null,'record');subjects.append(el('h3','応募者・採用友だち '+data.total+'件'),el('p','LINE通知の同意がある応募者だけが自動配信の対象です。公開予約の応募者もタグで整理でき、LINE未接続の場合は送信されません。','muted'))
+  for(const person of data.subjects){
+    const card=el('article',null,'tag-subject');card.append(el('h4',person.applicant_name||'採用友だち '+person.id.slice(0,8)),el('p',person.channel_label+' · '+(person.stage?stages[person.stage]:person.interview_status==='confirmed'?'面談予約':person.interview_status==='cancelled'?'面談取消':'未応募')+' · '+(person.notices?'LINE通知同意あり':'LINE通知未同意・連携なし'),'muted'))
+    const pills=el('div',null,'tag-pills');for(const key of person.tags)pills.append(el('span',labels[key]??key,'tag-pill'));if(!person.tags.length)pills.append(el('span','タグなし','muted'));card.append(pills)
+    card.append(details('タグを編集',form([checkedGroup('付与するタグ',options,'tag_',person.tags)],'タグを保存',async values=>{await api(path+'/subjects/'+person.id,'PATCH',{revision:person.revision,tags:selectedKeys(values,'tag_')});await refresh('応募者のタグを保存しました。')})))
+    subjects.append(card)
+  }
+  const pages=controls(button('前のページ',async()=>{if(tagFilters.page>1){tagFilters.page--;await refresh()}}),el('span',data.page+' / '+Math.max(1,Math.ceil(data.total/60))),button('次のページ',async()=>{if(tagFilters.page*60<data.total){tagFilters.page++;await refresh()}}));pages.firstChild.disabled=data.page===1;pages.lastChild.disabled=data.page*60>=data.total;subjects.append(pages);root.append(subjects)
+  const send=el('section',null,'record');send.append(el('h3','タグ絞り込み配信'),el('p','ステップ配信で開始イベント「タグ絞り込み配信（手動）」を選んで公開したシナリオを使います。選択中のタグ条件を使い、対象人数を確認してから開始します。'))
+  if(!data.scenarios.length){const link=el('a','ステップ配信を開く','studio-link');link.href=workspacePath('/studio/?store='+encodeURIComponent(store.id));send.append(link)}
+  else{
+    const confirmation=el('div')
+    send.append(form([field('公開済みシナリオ','scenario','',data.scenarios[0].id,data.scenarios.map(s=>[s.id,s.name+' / '+s.channel_label+' (版 '+s.published_version+')']))], '配信対象を確認',async values=>{
+      confirmation.replaceChildren();const criteria={include:[...tagFilters.include],exclude:[...tagFilters.exclude],match:tagFilters.match};const input={scenario:values.scenario,criteria}
+      const result=await api(path+'/campaigns/preview','POST',input)
+      confirmation.append(el('p',result.name+' · 版 '+result.version+'：配信対象 '+result.eligible+'人、同意・友だち・対応状態などで除外 '+result.excluded+'人'))
+      const sendKey=crypto.randomUUID()
+      if(result.eligible)confirmation.append(button(result.eligible+'人への配信を開始',async()=>{if(!confirm('表示の対象へ実際のLINEメッセージを配信します。開始しますか？'))return;const queued=await api(path+'/campaigns','POST',{...input,fingerprint:result.fingerprint},sendKey);await refresh(queued.queued+'人への配信を受け付けました。')}))
+    }),confirmation)
+  }
+  for(const campaign of data.campaigns){const card=el('article',null,'tag-subject');card.append(el('h4',campaign.title),el('p',dateLabel(campaign.created_at,store.timezone)+' · 対象 '+campaign.recipients+'人 · 未処理 '+campaign.pending+' · 実行中 '+campaign.running+' · 終了 '+campaign.finished+' · LINE受付 '+campaign.accepted+'通'+(campaign.stopped?' · 停止済':'')))
+    if(!campaign.stopped&&(campaign.pending||campaign.running))card.append(button('配信を停止',async()=>{if(!confirm('この絞り込み配信の残りを停止しますか？'))return;await api(path+'/campaigns/'+campaign.id+'/stop','POST',{});await refresh('配信を停止しました。')}));send.append(card)}
+  root.append(send)
 }
 
 function sources(root,report,path,refresh,use){
@@ -592,8 +663,8 @@ async function render(){
   const sections=[]
   if(settings.forms_enabled&&(!agency||use==='recruitment'&&['admin','manager'].includes(actor.role)))
     sections.push(['forms',use==='recruitment'?'応募フォーム':'回答フォーム'],['responses','フォーム回答'])
+  if(use==='recruitment'&&settings.recruitment_enabled&&['admin','manager'].includes(actor.role))sections.push(['recruitment','応募・選考'],['tags','採用タグ・配信'])
   if(!agency){
-    if(use==='recruitment'&&settings.recruitment_enabled)sections.push(['recruitment','応募・選考'])
     if(settings.sources_enabled)sections.push(['sources','流入分析'])
     if(use==='customer'&&settings.campaigns_enabled)sections.push(['campaigns','絞り込み配信'])
     if(settings.rich_menus_enabled)sections.push(['rich-menus','リッチメニュー'])
@@ -606,22 +677,27 @@ async function render(){
   // The dedicated shortcut must explain an unavailable feature instead of
   // silently taking the manager to an unrelated inbox tab.
   const formDisabled=agency&&['forms','responses'].includes(current)&&!settings.forms_enabled
+  const tagsDisabled=use==='recruitment'&&current==='tags'&&!settings.recruitment_enabled
   if(!sections.some(([id])=>id===current))current=sections[0][0]
   for(const [key,label] of sections){
     const tab=button(label,async()=>{current=key;notice();await render()})
     if(current===key)tab.setAttribute('aria-current','page')
     tabs.append(tab)
   }
+  if(tagsDisabled){content.replaceChildren(el('p','この店舗の応募・選考管理が無効です。北村さんの管理画面で有効にすると採用タグを利用できます。'));return}
   if(formDisabled){content.replaceChildren(el('p','この店舗の応募フォーム機能は無効です。北村さんの管理画面で有効にすると、エールがフォームを管理できます。'));return}
   const key=current
   const endpoint=['recruitment','campaigns','intake'].includes(key)?base+'/'+key:path+'/'+key
-  const data=await api(endpoint+(key==='delivery'&&onlyFailures?'?failures=1':''))
+  if(tagFilters.store!==store.id)tagFilters={include:[],exclude:[],match:'all',page:1,store:store.id}
+  const tagQuery=new URLSearchParams({include:tagFilters.include.join(','),exclude:tagFilters.exclude.join(','),match:tagFilters.match,page:String(tagFilters.page)})
+  const data=await api(endpoint+(key==='tags'?'?'+tagQuery:key==='delivery'&&onlyFailures?'?failures=1':''))
   if(key==='inbox')data.templates=await api(endpoint+'/templates')
   if(marker!==view)return
   const panel=el('div')
   const refresh=async message=>{if(marker===view){await render();notice(message)}}
   if(key==='forms')formEditor(panel,data,path,refresh,use)
   if(key==='responses')answersPanel(panel,data,store)
+  if(key==='tags')tagManager(panel,data,store,path+'/tags',refresh)
   if(key==='recruitment')recruitment(panel,data,store,base+'/recruitment',refresh)
   if(key==='sources')sources(panel,data,path,refresh,use)
   if(key==='campaigns')campaigns(panel,data,store,base+'/campaigns',refresh)

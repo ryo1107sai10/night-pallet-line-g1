@@ -7,6 +7,7 @@ import { channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { INTERVIEW_LINK_MARKER } from './interview-link.js'
 import { CUSTOMER_LINK_MARKER } from './customer-link.js'
+import { allowApplicantTagGraph } from './applicant-tags.js'
 
 const nodeId = z.string().regex(/^[a-zA-Z0-9_-]{1,50}$/)
 const base = { id:nodeId, name:z.string().max(100) }
@@ -23,7 +24,7 @@ const nodes = z.discriminatedUnion('type',[
   z.strictObject({...base,type:z.literal('end')}),
 ])
 const graph = z.strictObject({
-  name:z.string().max(100),purpose,trigger:z.string().max(30),channel:uuid,windowStart:clock,windowEnd:clock,
+  name:z.string().max(100),purpose,trigger:z.string().max(30),triggerTag:z.string().max(80).optional(),channel:uuid,windowStart:clock,windowEnd:clock,
   daily:z.int(),weekly:z.int(),cooldownDays:z.int(),rejoin:z.boolean(),missingAssignee:z.enum(['manager','hold']),
   holidays:z.array(z.int().min(0).max(6)).max(6),entry:next,nodes:z.array(nodes).max(100),
 })
@@ -123,6 +124,7 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
       canPublish(current.graph)
       complete(current.graph)
       await allowedChannel(db,current.graph)
+      await allowApplicantTagGraph(db,actor,store,current.graph)
       version=(version??0)+1
       await db.query(`INSERT INTO scenario_version(tenant_id,store_id,scenario_id,version,graph,published_by)
         VALUES ($1,$2,$3,$4,$5,$6)`,[actor.tenant_id,store,id,version,JSON.stringify(current.graph),actor.id])

@@ -40,11 +40,14 @@ try{
       $('agency-calendar').href='/interview/staff.html'+query
       $('agency-inbox').href='/workflows/'+query+'&use=recruitment'
       $('agency-form-editor').href='/workflows/'+query+'&use=recruitment&tab=forms'
+      $('agency-tag-manager').href='/workflows/'+query+'&use=recruitment&tab=tags'
+      $('agency-recruitment').href='/workflows/'+query+'&use=recruitment&tab=recruitment'
       $('agency-form-responses').href='/workflows/'+query+'&use=recruitment&tab=responses'
     }
     store.onchange=renderLinks
     renderLinks()
     $('agency-steps').hidden=!['admin','manager'].includes(session.actor.role)
+    $('agency-tags').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-forms').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-interview').hidden=!['admin','manager','recruiter'].includes(session.actor.role)
     $('agency-stores').hidden=false
