@@ -1,5 +1,7 @@
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
 import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
+import {reorderGroups,reorderStep,adjacentMove} from './step-order.mjs'
+import {installStepDrag} from './step-drag.mjs'
 
 scopeWorkspaceLinks()
 
@@ -19,6 +21,7 @@ let person={...defaults,values:{name:'水城あおい',store:'銀座店（サン
 let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,original='',dirty=false,tab='edit',part='workspace',simulation
 let busy=false, ready=false, preset='unbooked', localCreateKey
 const sessionDemo={
+  actor:{role:'admin',agency:false,platform:false},
   stores:[
     {id:'ginza',name:'銀座店（サンプル）',timezone:'Asia/Tokyo',cutoff:'06:00'},
     {id:'yokohama',name:'横浜店（サンプル）',timezone:'Asia/Tokyo',cutoff:'06:00'},
@@ -295,6 +298,19 @@ const selectStep = id=>{
 }
 const nameOf = id=>graph.nodes.find(item=>item.id===id)?.name??'接続なし'
 
+function applyStepOrder(next,id,focus=false) {
+  if (!next || busy) return false
+  update(()=>{graph=next;selection=id;tab='edit'})
+  choosePiece('workspace')
+  announce('「'+nameOf(id)+'」の順番を変更しました。変更を保存すると下書きに反映されます。')
+  if(focus) requestAnimationFrame(()=>{
+    const card=[...$('#workspace').querySelectorAll('[data-step-id]')].find(item=>item.dataset.stepId===id)
+    card?.focus({preventScroll:true})
+    card?.scrollIntoView({block:'nearest'})
+  })
+  return true
+}
+
 function addStep() {
   if (graph.nodes.length>=100) return announce('ステップ数は100件までです。',true)
   const menu=node('div',null,'controls')
@@ -354,12 +370,15 @@ function flowView() {
   saved.disabled=!!scenario&&!dirty
   bar.append(saved)
   const board=node('div',null,'canvas')
+  const help=node('p','ステップを長押しして移動、またはドラッグ。分岐・終了は固定し、同じ配信経路内の順番を安全に変更できます。','reorder-help')
+  help.id='reorder-help'
   const trigger=node('div',null,'trigger')
   const triggerText=node('span')
   triggerText.append(node('small','開始条件'),node('strong',triggers[graph.trigger]??'未設定'))
   trigger.append(node('span','↳','icon'),triggerText)
   const list=node('div',null,'node-list')
   const map=new Map(graph.nodes.map(item=>[item.id,item]))
+  const groups=reorderGroups(graph)
   const seen=new Set()
   function drawPath(id,parent,depth=0) {
     const item=map.get(id)
@@ -367,19 +386,35 @@ function flowView() {
       parent.append(node('p','接続なし','path-ref'))
       return
     }
-    if (seen.has(id) || depth>20) {
+    if (seen.has(id) || depth>100) {
       parent.append(button('↪ '+nameOf(id),()=>selectStep(id),'path-ref'))
       return
     }
     seen.add(id)
     const card=button('',()=>selectStep(item.id),'node'+(item.id===selection?' selected':''))
     card.setAttribute('aria-pressed',String(item.id===selection))
+    card.dataset.stepId=item.id
     const copy=node('span',null,'node-content')
     copy.append(node('strong',item.name||kinds[item.type]),node('small',
       kinds[item.type]+(item.type==='wait'?' · '+(item.mode==='delay'?item.minutes+'分':waitTypes[item.mode]):'')+
       (item.type==='message'?' · '+(item.category==='marketing'?'販促':'業務案内'):'')+(item.id===graph.entry?' · 開始':'')))
     if (item.type==='message') copy.append(node('small',item.body.replace(/\s+/g,' '),'excerpt'))
     card.append(node('span',icons[item.type],'icon '+item.type),copy)
+    if((groups.get(item.id)?.length??0)>1){
+      card.dataset.reorderable='true'
+      card.setAttribute('aria-describedby','reorder-help')
+      card.setAttribute('aria-keyshortcuts','Alt+ArrowUp Alt+ArrowDown')
+      const grip=node('span','⠿','step-grip')
+      grip.setAttribute('aria-hidden','true')
+      grip.title='長押しして並べ替え'
+      card.append(grip)
+      card.addEventListener('keydown',event=>{
+        if(!event.altKey||!['ArrowUp','ArrowDown'].includes(event.key))return
+        event.preventDefault()
+        const direction=event.key==='ArrowUp'?-1:1
+        applyStepOrder(adjacentMove(graph,item.id,direction),item.id,true)
+      })
+    }
     parent.append(card)
     if (item.type==='branch') {
       const lanes=node('div',null,'branch-lanes')
@@ -404,7 +439,9 @@ function flowView() {
     for (const item of disconnected) extra.append(button(item.name||kinds[item.type],()=>selectStep(item.id),'path-ref'))
     list.append(extra)
   }
-  board.append(trigger,list)
+  board.append(help,trigger,list)
+  installStepDrag(board,{groups,canMove:()=>!busy&&board.isConnected,onMove:(source,target,position)=>
+    applyStepOrder(reorderStep(graph,source,target,position),source)})
   root.replaceChildren(title,bar,board)
 }
 
@@ -415,6 +452,18 @@ function editStep() {
   const set=(key,full=true)=>value=>update(()=>{item[key]=value},full)
   const destinations=Object.fromEntries([['','接続なし'],...graph.nodes.filter(choice=>choice.id!==item.id).map(choice=>[choice.id,choice.name])])
   wrap.append(field('ステップ名',item.name,set('name',false),{event:'input',attributes:{maxlength:'100'}}))
+  const group=reorderGroups(graph).get(item.id)
+  if(group&&group.length>1){
+    const position=group.indexOf(item.id)
+    const controls=node('div',null,'step-move-controls')
+    controls.append(node('span',`${position+1} / ${group.length} · この経路内の順番`,'field-hint'))
+    const up=button('↑ 上へ',()=>applyStepOrder(adjacentMove(graph,item.id,-1),item.id))
+    const down=button('↓ 下へ',()=>applyStepOrder(adjacentMove(graph,item.id,1),item.id))
+    up.disabled=position===0
+    down.disabled=position===group.length-1
+    controls.append(up,down)
+    wrap.append(controls)
+  }
   if (item.type==='message') {
     wrap.append(field('連絡の用途',item.category,set('category'),{items:graph.purpose==='customer'?{service:'業務案内',marketing:'顧客向け販促'}:{service:'採用連絡'}}))
     const preview=node('div',null,'preview')
