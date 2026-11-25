@@ -1,3 +1,4 @@
+import sharp from 'sharp'
 import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
@@ -527,6 +528,7 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   const draft=expect(await patch(url,admin,{revision:published.revision,graph:{...reordered,name:'新しい下書き'}}),200)
   assert.equal(draft.state,'draft')
   assert.equal(draft.published_version,1)
+  assert.equal(published.draft_matches_published,true);assert.equal(draft.draft_matches_published,false);assert.equal(draft.published_channel,c)
   assert.equal(draft.graph.entry,'wait')
   assert.equal(draft.graph.nodes.find(node=>node.id==='wait').next,'welcome')
   const saved=expect(await request(url,{cookie:admin}),200)
@@ -563,6 +565,29 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
 })
 
 
+test('スタジオ: 画像アップロードは管理権限・店舗範囲と形式を検証し公開画像だけを返す',async()=>{
+  const media='/stores/'+storeId+'/scenarios/media',png=await sharp({create:{width:24,height:18,channels:3,background:'#abcef0'}}).png().toBuffer()
+  async function upload(cookie,body=png,from=origin){return send('/api/v1'+media,{method:'POST',headers:{Origin:from,'Content-Type':'image/png',...(cookie?{Cookie:cookie}:{})},body})}
+  assert.equal((await upload(null)).status,401)
+  assert.equal((await upload(other)).status,404)
+  assert.equal((await upload(admin,png,'https://wrong.example.test')).status,403)
+  assert.equal((await upload(admin,Buffer.from('not image'))).status,422)
+  const first=await upload(admin);assert.equal(first.status,201);const item=await first.json()
+  const duplicate=await upload(admin);assert.equal(duplicate.status,201);assert.equal((await duplicate.json()).id,item.id)
+  const list=expect(await request(media,{cookie:admin}),200);assert.equal(list.length,1);assert.equal(list[0].id,item.id)
+  expect(await request(media,{cookie:other}),404)
+  const img=await send(new URL(item.url).pathname);assert.equal(img.status,200);assert.equal(img.headers.get('content-type'),'image/jpeg');assert.equal((await sharp(Buffer.from(await img.arrayBuffer())).metadata()).format,'jpeg')
+  assert.equal((await send('/line-media/'+randomUUID()+'.jpg')).status,404)
+})
+test('スタジオ: 32KBを超える100ステップ下書きを店舗の管理者だけが保存できる',async()=>{
+  const root='/stores/'+storeId+'/scenarios',graph=starter();graph.channel=c;graph.name='長い下書き・検証';graph.entry='n0';graph.nodes=Array.from({length:100},(_,i)=>i===99?{id:'n99',name:'終了',type:'end'}:{id:'n'+i,name:'案内'+i,type:'message',category:'service',body:'検証'.repeat(350),next:'n'+(i+1)})
+  assert.ok(Buffer.byteLength(JSON.stringify(graph))>32768)
+  expect(await post(root,other,graph,idempotency()),404)
+  const item=expect(await post(root,admin,graph,idempotency()),201);assert.equal(item.graph.nodes.length,100);assert.equal(item.published_version,null)
+  graph.nodes[0].body+='編集';const saved=expect(await patch(root+'/'+item.id,admin,{revision:item.revision,graph}),200);assert.equal(saved.graph.nodes[0].body,graph.nodes[0].body)
+  const list=expect(await request(root+'?summary=1',{cookie:admin}),200),summary=list.find(s=>s.id===item.id);assert.equal(summary.graph.node_count,100);assert.equal(summary.graph.nodes,undefined)
+  expect(await request(root+'?summary=1',{cookie:other}),404)
+})
 test('AT34 適合するテスト利用者にだけ差し込み済み本文を1通送る',async ()=>{
   const base='/stores/'+storeId+'/scenarios'
   const graph=starter()

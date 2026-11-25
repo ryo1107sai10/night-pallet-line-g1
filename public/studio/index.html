@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101025">
   <title>シナリオスタジオ | Night PRO LINE</title>
-  <link rel="stylesheet" href="./studio.css?v=pro-20261126-final">
-  <script type="module" src="./studio.mjs?v=pro-20261126-final"></script>
+  <link rel="stylesheet" href="./studio.css?v=workspace-20261126-r5">
+  <script type="module" src="./studio.mjs?v=workspace-20261126-r5"></script>
 </head>
 <body>
   <a class="skip" href="#work">編集画面へ移動</a>
@@ -28,11 +28,14 @@
     <nav class="mobile glass" aria-label="作業画面"><button data-part="library">シナリオ</button><button data-part="workspace" aria-current="true">フロー</button><button data-part="inspector">編集・テスト</button></nav>
     <div id="layout" class="layout" data-part="workspace">
       <aside id="library" class="panel glass" aria-label="シナリオ一覧"></aside>
+      <div id="library-resize" class="panel-resize" role="separator" aria-label="一覧の幅" aria-orientation="vertical" tabindex="0"></div>
       <section id="workspace" class="panel glass" aria-label="配信フロー"></section>
+      <div id="inspector-resize" class="panel-resize" role="separator" aria-label="設定欄の幅" aria-orientation="vertical" tabindex="0"></div>
       <aside id="inspector" class="panel glass" aria-label="編集と配信確認"></aside>
     </div>
     <footer><span>Night PRO LINE</span><span id="foot"></span></footer>
   </main>
+  <button id="sheet-backdrop" type="button" aria-hidden="true" tabindex="-1" hidden></button>
   <dialog id="dialog" class="glass"></dialog>
 </body>
 </html>

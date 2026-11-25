@@ -224,7 +224,9 @@ export function waitUntil(node,at,zone,cutoff,bookingAt) {
   return null
 }
 
+export const timelineActions={reply:'返信あり',book:'面談・来店予約',cancel:'予約取消・辞退',consent_on:'通知同意',consent_off:'同意撤回',handoff_start:'店長対応開始',handoff_end:'店長対応終了',block:'LINEブロック',tag_add:'タグ追加',tag_remove:'タグ解除'}
 export function simulate(flow, person) {
+  person={...person,values:{...person.values}}
   const errors = validate(flow)
   if (errors.length) return {errors,events:[],count:0}
   const events = []
@@ -234,13 +236,23 @@ export function simulate(flow, person) {
   if (![person.dayCount,person.weekCount].every(count=>Number.isInteger(count)&&count>=0) || person.dayCount>person.weekCount) {
     return {errors:[{message:'直近の配信通数を確認してください。'}],events,count:0}
   }
-  const bookingAt = person.bookingAt ? localInstant(person.bookingAt,person.zone) : null
+  let bookingAt = person.bookingAt ? localInstant(person.bookingAt,person.zone) : null
   let count=0
   const recent=[]
   const tags=new Set(person.tags ?? [])
-  const yes = { booked:person.booked,consent:person.consent,adult:person.adult,responded:person.responded,assigned:person.assigned }
+  const startAt=at,changes=(person.timeline??[]).map((e,i)=>({...e,i,when:startAt+e.afterMinutes*60000})).sort((a,b)=>a.when-b.when||a.i-b.i)
+  if(changes.length>20||changes.some(e=>!Number.isInteger(e.afterMinutes)||e.afterMinutes<0||e.afterMinutes>525600||!Object.hasOwn(timelineActions,e.action)||['tag_add','tag_remove'].includes(e.action)&&!e.tag?.trim()||e.bookingAt&&localInstant(e.bookingAt,person.zone)===null))return {errors:[{message:'時系列イベントの時刻・タグ・予約日時を確認してください。'}],events,count:0}
+  function applyChanges(until){
+    while(changes.length&&changes[0].when<=until){const e=changes.shift();let detail=timelineActions[e.action];switch(e.action){
+      case 'reply':person.responded=true;break;case 'book':person.booked=true;person.cancelled=false;if(e.bookingAt){bookingAt=localInstant(e.bookingAt,person.zone);person.values.booking=e.bookingAt.replace('T',' ')}break;
+      case 'cancel':person.booked=false;person.cancelled=true;bookingAt=null;break;case 'consent_on':person.consent=true;break;case 'consent_off':person.consent=false;break;
+      case 'handoff_start':person.human=true;break;case 'handoff_end':person.human=false;break;case 'block':person.blocked=true;break;
+      case 'tag_add':tags.add(e.tag);detail+='：'+e.tag;break;case 'tag_remove':tags.delete(e.tag);detail+='：'+e.tag;break;
+    }events.push({id:'timeline-'+e.i,type:'event',name:detail,at:new Date(e.when).toISOString(),state:'ok',detail:'仮想利用者の状態が変化'})}
+  }
   let id = flow.entry
   while (id) {
+    applyChanges(at)
     const node = byId.get(id)
     const line = { id,type:node.type,name:node.name,at:new Date(at).toISOString(),state:'ok',detail:'' }
     events.push(line)
@@ -250,12 +262,13 @@ export function simulate(flow, person) {
       if (next===null || next<at) {
         line.state='held'; line.detail='待機時刻が無効か、基準時刻を過ぎています。'; break
       }
-      at=next
-      line.at=new Date(at).toISOString()
+      // The wait card records its ending time while state events in the interval are applied in order.
+      events.pop();applyChanges(next);at=next
+      line.at=new Date(at).toISOString();events.push(line)
       line.detail='この時刻まで待機'
     } else if (node.type==='branch') {
-      const passed = evaluateBranch(node,yes,[...tags])
-      line.detail=(conditions[node.condition]??(node.condition==='all'?'すべての条件':'いずれかの条件'))+' → '+(passed?'はい':'いいえ')
+      const passed = evaluateBranch(node,{booked:person.booked,consent:person.consent,adult:person.adult,responded:person.responded,assigned:person.assigned},[...tags])
+      line.detail=(conditions[node.condition]??(node.condition==='all'?'すべての条件':'いずれかの条件'))+' → '+(passed?'はい':'いいえ');line.branch=passed?'yes':'no'
       id=passed?node.yes:node.no
     } else if (node.type==='tag') {
       if(node.action==='remove')tags.delete(node.tag)
@@ -267,6 +280,7 @@ export function simulate(flow, person) {
       const marketing=node.category==='marketing'
       const due=marketing ? nextWindow(at,flow,person.zone) : at
       const adjusts=due!==null && due!==at
+      if(adjusts&&changes[0]?.when<=due){events.pop();applyChanges(due);events.push(line);at=due;line.at=new Date(at).toISOString()}
       const guard=node.tagGuard
       const guardMismatch=guard&&(!tags.has(guard.tag)||guard.exclude.some(key=>tags.has(key))||guard.booked!==undefined&&guard.booked!==!!person.booked)
       const rejected=guardMismatch?'送信直前のタグ・面談予約条件に一致しません':person.stopped?'全配信停止':person.blocked?'LINEでブロックされています':!person.consent?'目的別の同意なし':

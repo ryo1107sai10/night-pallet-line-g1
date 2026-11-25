@@ -32,7 +32,9 @@ const graph = z.strictObject({
 })
 const folder=z.string().trim().max(50)
 const libraryInput=z.strictObject({graph,folder:folder.optional(),is_template:z.boolean().optional()})
+const timelineEvent=z.strictObject({afterMinutes:z.int().min(0).max(525600),action:z.enum(['reply','book','cancel','consent_on','consent_off','handoff_start','handoff_end','block','tag_add','tag_remove']),tag:z.string().max(80).optional(),bookingAt:z.string().max(16).optional()})
 const fixture = z.strictObject({
+  timeline:z.array(timelineEvent).max(20).optional(),
   start:z.string().max(16),bookingAt:z.string().max(16),dayCount:z.int().min(0).max(10000),weekCount:z.int().min(0).max(10000),
   booked:z.boolean(),consent:z.boolean(),adult:z.boolean(),responded:z.boolean(),assigned:z.boolean(),
   stopped:z.boolean(),marketingStopped:z.boolean(),blocked:z.boolean(),human:z.boolean(),cancelled:z.boolean(),
@@ -51,32 +53,39 @@ function canPublish(graph:Graph) {
 }
 
 type Scenario = { id:string; channel_id:string; graph:Graph; revision:number; state:string;
-  published_version:number|null; stopped:boolean; updated_at:Date; folder:string; is_template:boolean }
+  published_version:number|null; stopped:boolean; updated_at:Date; folder:string; is_template:boolean; draft_matches_published:boolean; published_channel:string|null; published_name:string|null }
 type Context = { db:DB; actor:Actor; store:string }
 
-const record = async (db:DB,id:string,lock=false) => {
-  const result = await db.query<Scenario>('SELECT * FROM scenario WHERE id=$1'+(lock?' FOR UPDATE':''),[id])
+const scenarioProjection=`SELECT s.*,coalesce(s.graph=v.graph,false) AS draft_matches_published,v.graph->>'channel' AS published_channel,v.graph->>'name' AS published_name
+  FROM scenario s LEFT JOIN scenario_version v ON v.scenario_id=s.id AND v.version=s.published_version`
+const record = async (db:DB,store:string,id:string,lock=false) => {
+  const result = await db.query<Scenario>(scenarioProjection+' WHERE s.store_id=$1 AND s.id=$2'+(lock?' FOR UPDATE OF s':''),[store,id])
   if (!result.rowCount) throw missing()
   return result.rows[0]
 }
-const allowedChannel = async (db:DB,data:Graph) => {
-  const result = await db.query("SELECT id FROM channel WHERE id=$1 AND (purpose=$2 OR purpose='shared')",[data.channel,data.purpose])
+const allowedChannel = async (db:DB,store:string,data:Graph) => {
+  const result = await db.query("SELECT id FROM channel WHERE id=$1 AND (purpose=$2 OR purpose='shared') AND store_id=$3",[data.channel,data.purpose,store])
   if (!result.rowCount) throw missing()
 }
 const complete = (data:Graph) => {
   const errors = validate(data,true)
   if (errors.length) throw new Fault(422,'INVALID_SCENARIO',errors[0].message)
 }
-export const scenarioList = async ({db}:Context) =>
-  (await db.query<Scenario>('SELECT * FROM scenario ORDER BY updated_at DESC,id LIMIT 100')).rows
-export const scenarioDetail = async ({db}:Context,id:string) => {
-  const item = await record(db,id)
+export const scenarioList = async ({db,store}:Context,summary=false) => {
+  const projection=summary?`SELECT s.id,s.channel_id,s.revision,s.state,s.published_version,s.stopped,s.updated_at,s.folder,s.is_template,
+    jsonb_build_object('name',s.graph->>'name','purpose',s.graph->>'purpose','channel',s.graph->>'channel','node_count',jsonb_array_length(s.graph->'nodes')) AS graph,
+    coalesce(s.graph=v.graph,false) AS draft_matches_published,v.graph->>'channel' AS published_channel,v.graph->>'name' AS published_name
+    FROM scenario s LEFT JOIN scenario_version v ON v.scenario_id=s.id AND v.version=s.published_version`:scenarioProjection
+  return (await db.query<Scenario>(projection+' WHERE s.store_id=$1 ORDER BY s.updated_at DESC,s.id LIMIT 100',[store])).rows
+}
+export const scenarioDetail = async ({db,store}:Context,id:string) => {
+  const item = await record(db,store,id)
   const { rows } = await db.query(`SELECT version,published_at FROM scenario_version
-    WHERE scenario_id=$1 ORDER BY version DESC LIMIT 50`,[id])
+    WHERE scenario_id=$1 AND store_id=$2 ORDER BY version DESC LIMIT 50`,[id,store])
   return {...item, versions:rows}
 }
-export const versionDetail = async ({db}:Context,id:string,version:number) => {
-  const { rows:[item] } = await db.query('SELECT version,graph,published_at FROM scenario_version WHERE scenario_id=$1 AND version=$2',[id,version])
+export const versionDetail = async ({db,store}:Context,id:string,version:number) => {
+  const { rows:[item] } = await db.query('SELECT version,graph,published_at FROM scenario_version WHERE scenario_id=$1 AND version=$2 AND store_id=$3',[id,version,store])
   if (!item) throw missing()
   return item
 }
@@ -84,30 +93,30 @@ export async function createScenario({db,actor,store}:Context,cfg:Config,req:Req
   const wrapped=libraryInput.safeParse(req.body)
   const data=wrapped.success?wrapped.data.graph:graph.parse(req.body)
   const settings=wrapped.success?{folder:wrapped.data.folder??'',is_template:wrapped.data.is_template??false}:{folder:'',is_template:false}
-  await allowedChannel(db,data)
+  await allowedChannel(db,store,data)
   return once(db,cfg,actor,'scenario.create',key,wrapped.success?{store,data,settings}:{store,data},async()=>{
     const id = newId()
     await db.query(`INSERT INTO scenario(id,tenant_id,store_id,channel_id,created_by,graph,folder,is_template)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,[id,actor.tenant_id,store,data.channel,actor.id,JSON.stringify(data),settings.folder,settings.is_template])
     await audit(db,actor.tenant_id,store,actor.id,'scenario.create',id)
-    return record(db,id)
+    return record(db,store,id)
   })
 }
 export async function saveScenario({db,actor,store}:Context,id:string,input:unknown) {
   const data = z.strictObject({revision,graph}).parse(input)
   await lockDispatch(db,actor.tenant_id)
-  const current = await record(db,id,true)
+  const current = await record(db,store,id,true)
   if (current.revision!==data.revision) throw conflict()
-  await allowedChannel(db,data.graph)
+  await allowedChannel(db,store,data.graph)
   await db.query(`UPDATE scenario SET graph=$2,channel_id=$3,revision=revision+1,state='draft',
     updated_at=now() WHERE id=$1`,[id,JSON.stringify(data.graph),data.graph.channel])
   await audit(db,actor.tenant_id,store,actor.id,'scenario.save',id)
-  return record(db,id)
+  return record(db,store,id)
 }
 export async function saveScenarioFolder({db,actor,store}:Context,id:string,input:unknown){
   const data=z.strictObject({revision,folder}).parse(input)
   await lockDispatch(db,actor.tenant_id)
-  const result=await db.query('UPDATE scenario SET folder=$2,revision=revision+1 WHERE id=$1 AND revision=$3 RETURNING id',[id,data.folder,data.revision])
+  const result=await db.query('UPDATE scenario SET folder=$2,revision=revision+1 WHERE id=$1 AND revision=$3 AND store_id=$4 RETURNING id',[id,data.folder,data.revision,store])
   if(!result.rowCount)throw conflict()
   await audit(db,actor.tenant_id,store,actor.id,'scenario.folder',id)
   return scenarioDetail({db,actor,store},id)
@@ -115,7 +124,7 @@ export async function saveScenarioFolder({db,actor,store}:Context,id:string,inpu
 
 // Metrics are per immutable published version and actual enrolments, never draft guesses.
 export async function scenarioMetrics(context:Context,id:string,requested?:number){
-  const {db}=context,current=await record(db,id)
+  const {db,store}=context,current=await record(db,store,id)
   const version=requested??current.published_version
   if(!version)return {version:null,total:0,completed:0,active:0,ended:0,nodes:[]}
   const v=await versionDetail(context,id,version)
@@ -142,7 +151,7 @@ export async function scenarioMetrics(context:Context,id:string,requested?:numbe
   return {version,...summary,nodes:published.nodes.map(node=>({node_id:node.id,name:node.name,type:node.type,reached:0,waiting:0,ended:0,accepted:0,not_accepted:0,booked_after:0,...rows.find(r=>r.node_id===node.id)}))}
 }
 export async function studioPresence(context:Context,id:string,input:unknown){
-  const {db,actor,store}=context,current=await record(db,id)
+  const {db,actor,store}=context,current=await record(db,store,id)
   const {client,leave}=z.strictObject({client:uuid,leave:z.boolean().optional()}).parse(input)
   await db.query("DELETE FROM studio_editor WHERE scenario_id=$1 AND (seen_at<now()-interval '2 minutes' OR (staff_id=$2 AND client_id=$3 AND $4::boolean))",[id,actor.id,client,!!leave])
   if(!leave)await db.query(`INSERT INTO studio_editor(tenant_id,store_id,scenario_id,staff_id,client_id) VALUES($1,$2,$3,$4,$5)
@@ -153,7 +162,7 @@ export async function studioPresence(context:Context,id:string,input:unknown){
 }
 
 export async function publicationReview(context:Context,id:string){
-  const {db}=context,current=await record(db,id)
+  const {db,store}=context,current=await record(db,store,id)
   const published=current.published_version?await versionDetail(context,id,current.published_version):null
   // Compare immutable live graphs, rather than the editable drafts.
   const {rows:related}=await db.query<{id:string;name:string;version:number}>(`SELECT s.id,v.graph->>'name' AS name,v.version
@@ -167,7 +176,7 @@ export async function publicationReview(context:Context,id:string){
 export async function transitionScenario({db,actor,store}:Context,id:string,input:unknown) {
   const data = z.strictObject({ revision, action:z.enum(['test','approve','publish','stop','resume']), reason:text(200).optional(),fixture:fixture.optional() }).parse(input)
   await lockDispatch(db,actor.tenant_id)
-  const current = await record(db,id,true)
+  const current = await record(db,store,id,true)
   if (current.revision!==data.revision) throw conflict()
   let { state, stopped, published_version:version } = current
   let evidence: { planned:number; held:number } | undefined
@@ -190,7 +199,7 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
       if (state!=='approved') throw conflict()
       canPublish(current.graph)
       complete(current.graph)
-      await allowedChannel(db,current.graph)
+      await allowedChannel(db,store,current.graph)
       await allowApplicantTagGraph(db,actor,store,current.graph)
       version=(version??0)+1
       await db.query(`INSERT INTO scenario_version(tenant_id,store_id,scenario_id,version,graph,published_by)
@@ -230,8 +239,8 @@ async function preview(db:DB,store:string,graph:Graph,sample:z.infer<typeof fixt
   return result
 }
 
-export async function scenarioTesters({db}:Context,id:string) {
-  const current=await record(db,id)
+export async function scenarioTesters({db,store}:Context,id:string) {
+  const current=await record(db,store,id)
   const c=await channel(db,current.channel_id)
   const { rows } = await db.query(`SELECT t.id,t.verified_at,t.expires_at FROM tester t
     WHERE t.channel_id=$1 AND t.purpose=$2 AND t.generation=$3 AND t.verified_at IS NOT NULL AND t.expires_at>now()
@@ -243,8 +252,8 @@ export async function scenarioTesters({db}:Context,id:string) {
   return rows
 }
 
-export async function scenarioTestStatus({db}:Context,id:string) {
-  await record(db,id)
+export async function scenarioTestStatus({db,store}:Context,id:string) {
+  await record(db,store,id)
   const { rows }=await db.query(`SELECT id,status,created_at,line_request_id FROM test_send
     WHERE scenario_id=$1 ORDER BY created_at DESC LIMIT 20`,[id])
   return rows
@@ -253,10 +262,11 @@ export async function scenarioTestStatus({db}:Context,id:string) {
 export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:string,input:unknown) {
   const {db,actor,store}=ctx
   const data=z.strictObject({revision,node:nodeId,tester:uuid,fixture,actual_tags:z.boolean().optional()}).parse(input)
+  if(data.fixture.timeline?.length)throw new Fault(422,'TIMELINE_SIMULATION_ONLY','時系列イベント付きテストは模擬専用です。実LINEテストはイベントを空にして実行してください。')
   if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境でテスト送信してください。')
   await lockDispatch(db,actor.tenant_id)
   return once(db,cfg,actor,'scenario.test_send',key,{id,...data},async()=>{
-    const current=await record(db,id,true)
+    const current=await record(db,store,id,true)
     if (current.revision!==data.revision || current.stopped) throw conflict()
     complete(current.graph)
     const c=await channel(db,current.channel_id)

@@ -154,3 +154,32 @@ export function wizardFlow({purpose='recruitment',name,channel,trigger,triggerTa
   if(follow){flow.nodes.push({id:'wait',type:'wait',name:'再案内まで待機',mode:'delay',minutes,next:skipBooked?'check':'remind'});if(skipBooked)flow.nodes.push({id:'check',type:'branch',name:'予約済みか確認',condition:'booked',yes:'end',no:'remind'});flow.nodes.push({id:'remind',type:'message',name:'再案内',category:'service',body:follow,next:'end'})}
   flow.nodes.push({id:'end',type:'end',name:'終了'});return flow
 }
+
+// Editing operations never change the source graph. A reconnect may deliberately
+// leave an unused route in the draft, but a cycle is never introduced.
+function reachableIds(flow){const map=new Map(flow.nodes.map(n=>[n.id,n])),seen=new Set(),pending=[flow.entry];while(pending.length){const id=pending.pop();if(!map.has(id)||seen.has(id))continue;seen.add(id);pending.push(...links(map.get(id)))}return seen}
+function hasCycle(flow){const map=new Map(flow.nodes.map(n=>[n.id,n])),visiting=new Set(),visited=new Set();function visit(id){if(visiting.has(id))return true;if(visited.has(id)||!map.has(id))return false;visiting.add(id);if(links(map.get(id)).some(visit))return true;visiting.delete(id);visited.add(id);return false}return flow.nodes.some(n=>visit(n.id))}
+function setEdge(flow,edge,target){const owner=edge.owner===null?flow:flow.nodes.find(n=>n.id===edge.owner);if(!owner||!(edge.owner===null?edge.key==='entry':(owner.type==='branch'?['yes','no']:owner.type==='end'?[]:['next']).includes(edge.key)))return false;owner[edge.key]=target;return true}
+export function reconnectEdge(flow,edge,target){
+  if(!flow.nodes.some(n=>n.id===target)||edgeTarget(flow,edge)===target)return null
+  const draft=structuredClone(flow);if(!setEdge(draft,edge,target)||hasCycle(draft))return null
+  const before=reachableIds(flow),after=reachableIds(draft)
+  return {flow:draft,detached:flow.nodes.filter(n=>before.has(n.id)&&!after.has(n.id)).map(n=>n.name)}
+}
+export function moveStepBlock(flow,selected,edge){
+  const block=stepBlock(flow,selected);if(!block||block.nodes.some(n=>n.type==='end'))return null
+  const ids=new Set(selected),entryEdges=incomingEdges(flow,block.entry).filter(e=>!ids.has(e.owner))
+  if(entryEdges.length!==1||ids.has(edge.owner)||edgeTarget(flow,edge)===block.entry)return null
+  // A single ingress is required for the selected range; shared downstream nodes stay put.
+  if(block.nodes.some(n=>n.id!==block.entry&&incomingEdges(flow,n.id).some(e=>!ids.has(e.owner))))return null
+  const exits=[]
+  for(const n of block.nodes)for(const key of n.type==='branch'?['yes','no']:['next'])if(!ids.has(n[key]))exits.push({owner:n.id,key,target:n[key]})
+  if(!exits.length||new Set(exits.map(e=>e.target)).size!==1)return null
+  const target=edgeTarget(flow,edge);if(target===undefined||ids.has(target))return null
+  const draft=structuredClone(flow);if(!setEdge(draft,entryEdges[0],exits[0].target??'')||!setEdge(draft,edge,block.entry))return null
+  for(const exit of exits)if(!setEdge(draft,exit,target))return null
+  if(hasCycle(draft))return null
+  const before=reachableIds(flow),after=reachableIds(draft);if([...before].some(id=>!after.has(id)))return null
+  return {flow:draft,entry:block.entry,ids:[...ids]}
+}
+export function selectOutlineRange(flow,from,to){const order=stepOutline(flow).map(n=>n.id),a=order.indexOf(from),b=order.indexOf(to);return a<0||b<0?[to]:order.slice(Math.min(a,b),Math.max(a,b)+1)}

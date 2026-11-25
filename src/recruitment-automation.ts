@@ -435,7 +435,13 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
       sendBody=body.split(interviewLinkPlaceholder(job.id)).join(link.url)
       if (sendBody.length>5000) return abort('差し込み後に5000文字を超えています')
     }
-    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody,resolveRichButtons(current?.type==='message'?current.rich:undefined,richLinks))
+    let richFormat
+    try{richFormat=resolveRichButtons(current?.type==='message'?current.rich:undefined,richLinks)}catch{
+      const reason='予約ボタンのURLを確認できません'
+      await db.query(`UPDATE applicant_send SET status=$2,reason=$3,next_at='infinity',body_box=NULL WHERE id=$1`,[job.id,job.attempt===1?'cancelled':'unknown',reason])
+      await end(db,run,reason);return null
+    }
+    return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody,richFormat)
       .catch(()=>({status:'unknown',requestId:null,authError:false}))}
   })
   if (!submitted) return true

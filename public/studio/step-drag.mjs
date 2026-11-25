@@ -150,7 +150,7 @@ export function installStepDrag(board,{groups,canMove,onMove}) {
   })
   board.addEventListener('touchstart',event=>{
     const card=cardFor(event.target)
-    if(!card||event.touches.length!==1)return
+    if(!card||!event.target.closest?.('.step-grip')||event.touches.length!==1)return
     const finger=event.changedTouches[0]
     if(!begin(card,finger.clientX,finger.clientY,'touch',finger.identifier))return
     const {signal}=drag.controller

@@ -312,7 +312,13 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
         message = resolved.body
         richLinks[CUSTOMER_LINK_MARKER]=resolved.url
       }
-      return { promise: api.push(channelCredentials(cfg,fresh),to,job.id,message,resolveRichButtons(current.test_rich_box?JSON.parse(unseal(cfg,'test-rich:'+job.id,current.test_rich_box)):undefined,richLinks))
+      let richFormat
+      try{richFormat=resolveRichButtons(current.test_rich_box?JSON.parse(unseal(cfg,'test-rich:'+job.id,current.test_rich_box)):undefined,richLinks)}catch{
+        await db.query(`UPDATE test_send SET status=$2,next_at='infinity' WHERE id=$1`,[job.id,attempt===1?'cancelled':'unknown'])
+        await audit(db,r.tenant_id,r.store_id,null,'scenario.rich_test_held',job.id,null,{channel_id:r.id})
+        return
+      }
+      return { promise: api.push(channelCredentials(cfg,fresh),to,job.id,message,richFormat)
         .catch(()=>({ status:'unknown',requestId:null,authError:false })) }
     })
     if (!submission) continue

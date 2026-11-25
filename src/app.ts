@@ -21,6 +21,7 @@ import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, modul
   moduleStart, rememberModuleBot, requireModule} from './line-module.js'
 import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboarding, markOnboardingRegistered,
   onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
+import {uploadStudioImage,listStudioImages,publicStudioImage,imageInputLimit} from './studio-media.js'
 import { createScenario, saveScenario, saveScenarioFolder, scenarioMetrics, studioPresence, publicationReview, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop, workOnce } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, authenticateCustomer,
@@ -241,6 +242,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     }else if (staticAssets.has(asset)) res.sendFile(here('../public/'+asset))
     else next()
   })
+  app.get('/line-media/:file',async(req,res)=>{
+    const id=z.string().regex(/^[0-9a-f-]{36}\.jpg$/i).parse(req.params.file).slice(0,-4)
+    const content=await publicStudioImage(pool,uuid.parse(id))
+    res.set({'Content-Type':'image/jpeg','Cache-Control':'public,max-age=86400,immutable','Content-Security-Policy':"default-src 'none'; sandbox"}).send(content)
+  })
   app.use('/assets',express.static(here('./assets'),{index:false}))
   app.post(lineDispatchPath,express.json({limit:'1kb',strict:true}),async(req,res)=>{
     if (!dispatch || !await dispatch.verify(req.get('Authorization') ?? '')) {
@@ -280,12 +286,24 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     if (mutable && req.get('Origin') !== cfg.origin) {
       throw new Fault(403,'INVALID_ORIGIN','操作元を確認できません。')
     }
-    if (mutable && !req.is('application/json')) {
+    const media=req.method==='POST'&&/^\/stores\/[0-9a-f-]{36}\/scenarios\/media$/i.test(req.path)
+    if (mutable && !req.is('application/json') && !(media&&(req.is('image/jpeg')||req.is('image/png')))) {
       throw new Fault(415,'INVALID_CONTENT_TYPE','JSON形式で送信してください。')
     }
     next()
   })
-  api.use(express.json({ limit:'32kb',strict:true }))
+  const normalJSON=express.json({limit:'32kb',strict:true}),scenarioJSON=express.json({limit:'2mb',strict:true,inflate:false})
+  api.use(async(req,res,next)=>{
+    const large=/^\/stores\/([0-9a-f-]{36})\/scenarios(?:\/[0-9a-f-]{36})?$/i.exec(req.path)
+    const media=/^\/stores\/([0-9a-f-]{36})\/scenarios\/media$/i.exec(req.path)
+    if((large&&['POST','PATCH'].includes(req.method))||(media&&req.method==='POST')){
+      // Authenticate before accepting larger request bodies, then apply the regular endpoint checks too.
+      await tx(pool,async db=>{const actor=await requestActor(db,req);await storeAccess(db,actor,uuid.parse((large??media)![1]),true)})
+      if(media)return next()
+      return scenarioJSON(req,res,next)
+    }
+    return normalJSON(req,res,next)
+  })
   for (const [path,mode] of [
     ['/auth/login','staff'],['/auth/master/login','master'],['/auth/platform/login','platform'],
   ] as const) {
@@ -947,7 +965,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   const scenarios = '/stores/:store/scenarios'
   const scenario = scenarios+'/:scenario'
   const scenarioContext = (db:DB,actor:Actor,req:Request) => ({db,actor,store:idOf(req,'store')})
-  api.get(scenarios,inStore((db,actor,req)=>scenarioList(scenarioContext(db,actor,req))))
+  api.post(scenarios+'/media',express.raw({type:['image/jpeg','image/png'],limit:imageInputLimit,inflate:false}),inStore((db,actor,req)=>uploadStudioImage(db,cfg,actor,idOf(req,'store'),req.body),true,201))
+  api.get(scenarios+'/media',inStore((db,actor,req)=>listStudioImages(db,cfg,idOf(req,'store'))))
+  api.get(scenarios,inStore((db,actor,req)=>scenarioList(scenarioContext(db,actor,req),req.query.summary==='1')))
   api.post(scenarios,inStore((db,actor,req)=>createScenario(scenarioContext(db,actor,req),cfg,req,keyOf(req)),true,201))
   api.get(scenario,inStore((db,actor,req)=>scenarioDetail(scenarioContext(db,actor,req),idOf(req,'scenario'))))
   api.patch(scenario,inStore((db,actor,req)=>saveScenario(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))

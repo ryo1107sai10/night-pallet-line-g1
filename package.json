@@ -21,6 +21,7 @@
     "otpauth": "9.6.0",
     "pg": "8.23.1",
     "qrcode": "1.5.4",
+    "sharp": "0.35.5",
     "zod": "4.6.7"
   },
   "devDependencies": {

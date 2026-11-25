@@ -1,7 +1,7 @@
 // A rich step is one LINE Flex message, keeping frequency/budget accounting unchanged.
 export function publicHttps(value){
   if(typeof value!=='string'||value.length>2000||/\s|[{}]/.test(value))return false
-  try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&u.hostname.includes('.')&&!u.hostname.endsWith('.local')&&!/^\d+\./.test(u.hostname)}catch{return false}
+  try{const u=new URL(value),host=u.hostname.toLowerCase().replace(/\.$/,'');return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&host.includes('.')&&!['.local','.localhost','.internal'].some(s=>host.endsWith(s))&&!/^\d+(?:\.\d+){3}$/.test(host)}catch{return false}
 }
 export const dynamicButtonUrls=['{{interview_link}}','{{customer_link}}']
 export function richErrors(rich,body){

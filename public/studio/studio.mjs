@@ -1,8 +1,8 @@
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
-import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links,branchRules} from './engine.mjs'
+import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links,branchRules,timelineActions} from './engine.mjs'
 import {reorderGroups,reorderStep,adjacentMove} from './step-order.mjs'
 import {installStepDrag} from './step-drag.mjs'
-import {edgeTarget,incomingEdges,outgoingEdges,insertStep,formatMinutes,timeUnit,tagKeys,copyFlow,bodyReplacement,compareFlows,simulationCases,routeSteps,stepBlock,pasteBlock,stepOutline,wizardFlow} from './studio-tools.mjs'
+import {edgeTarget,incomingEdges,outgoingEdges,insertStep,formatMinutes,timeUnit,tagKeys,copyFlow,bodyReplacement,compareFlows,simulationCases,routeSteps,stepBlock,pasteBlock,stepOutline,wizardFlow,reconnectEdge,moveStepBlock,selectOutlineRange} from './studio-tools.mjs'
 import {publicHttps} from './message-format.mjs'
 import {tagStepTemplates,recommendedTagTemplate,buildTagTemplate} from './tag-templates.mjs'
 
@@ -18,7 +18,7 @@ const waitTypes={delay:'相対時間',fixed:'実日付',business:'営業日・�
 const steps={draft:'下書き',tested:'テスト済み',approved:'承認済み'}
 const defaults={zone:'Asia/Tokyo',cutoff:'06:00',start:'',bookingAt:'',booked:false,consent:true,adult:true,responded:false,
   assigned:true,stopped:false,marketingStopped:false,blocked:false,human:false,cancelled:false,
-  dayCount:0,weekCount:0,tags:[],bookingLinkValid:true,eligible:true,contractActive:true,budgetAvailable:true,bookingCurrent:true}
+  dayCount:0,weekCount:0,tags:[],timeline:[],bookingLinkValid:true,eligible:true,contractActive:true,budgetAvailable:true,bookingCurrent:true}
 let person={...defaults,values:{name:'水城あおい',store:'銀座店（サンプル）',staff:'橘',booking:'11月16日 23:00',
   price:'60分 8,000円（税込）',booking_url:'https://example.test/reservations/sample',interview_link:'https://example.test/reserve/sample',customer_link:'https://example.test/account/sample'}}
 let applicantCatalog={enabled:false,definitions:[]}
@@ -26,20 +26,24 @@ let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,origina
 let busy=false, ready=false, preset='unbooked', localCreateKey
 let currentSession, viewMode='basic', zoom=1, autosave=true, saveTimer, savePromise=null, saveIssue='', historyKey='', historyTime=0
 let undoStack=[],redoStack=[],searchText='',folderFilter='',libraryKind='all',matrix=null,branchOpen=new Map(),pendingMeta={folder:'',is_template:false},recoveryAvailable=true
-let hideLibrary=false,hideInspector=false,focusMode=false,minimapOpen=false,stepClipboard=null,metrics=null,metricsBusy=false,presenceInfo=null,presenceSequence=0
+let hideLibrary=true,hideInspector=false,focusMode=false,minimapOpen=false,stepClipboard=null,metrics=null,metricsBusy=false,presenceInfo=null,presenceSequence=0
+let selectedSteps=new Set(),multiSelect=false,moveIntent=null,connectIntent=null,navLoading=false,navigationBusy=false,validationFrame=0,libraryWidth=220,inspectorWidth=355,theme='dark',sheetFocus=null
 const editorClient=crypto.randomUUID()
-const recoveryKey=()=>store&&currentSession?'npl-studio-recovery-v2:'+currentSession.actor.id+':'+store.id:null
-function recoverRead(){try{const k=recoveryKey();return k?JSON.parse(localStorage.getItem(k)):null}catch{return null}}
-function recoverWrite(){
-  const k=recoveryKey()
-  if(!k||demo)return
-  try{
-    if(dirty&&graph)localStorage.setItem(k,JSON.stringify({id:scenario?.id??null,key:localCreateKey??null,revision:scenario?.revision??null,graph,meta:pendingMeta,at:Date.now()}))
-    else{const existing=recoverRead();if(!existing||existing.id===(scenario?.id??null)||localCreateKey&&existing.key===localCreateKey)localStorage.removeItem(k)}
-    recoveryAvailable=true
-  }catch{recoveryAvailable=false}
+const mobileUI=()=>matchMedia('(max-width:950px)').matches
+const prefKey=()=>currentSession?'npl-studio-ui-v3:'+currentSession.actor.id:null
+const recoveryPrefix=()=>store&&currentSession?'npl-studio-recovery-v3:'+currentSession.actor.id+':'+store.id+':':null
+const recoveryKey=()=>recoveryPrefix()?recoveryPrefix()+editorClient:null
+function recoveryCandidates(){
+  const prefix=recoveryPrefix();if(!prefix||demo)return []
+  try{const keys=Array.from({length:localStorage.length},(_,i)=>localStorage.key(i)).filter(k=>k?.startsWith(prefix)||k==='npl-studio-recovery-v2:'+currentSession.actor.id+':'+store.id);const out=[]
+    for(const key of keys){let r;try{r=JSON.parse(localStorage.getItem(key))}catch{}if(!r?.graph||Date.now()-r.at>=7*86400000){localStorage.removeItem(key);continue}out.push({...r,storageKey:key})}return out.sort((a,b)=>b.at-a.at)
+  }catch{return []}
 }
-function clearRecovery(){try{const k=recoveryKey();if(k)localStorage.removeItem(k)}catch{}}
+function recoverWrite(){
+  const k=recoveryKey();if(!k||demo)return
+  try{if(dirty&&graph)localStorage.setItem(k,JSON.stringify({id:scenario?.id??null,key:localCreateKey??null,revision:scenario?.revision??null,graph,meta:pendingMeta,at:Date.now()}));else localStorage.removeItem(k);recoveryAvailable=true}catch{recoveryAvailable=false}
+}
+function clearRecovery(key=recoveryKey()){try{if(key)localStorage.removeItem(key)}catch{}}
 function recordHistory(key=''){
   if(!graph)return
   const now=Date.now()
@@ -56,11 +60,11 @@ function historyMove(direction){
   historyKey='';dirty=JSON.stringify(graph)!==original;simulation=null;matrix=null;saveIssue=''
   show();scheduleSave();recoverWrite()
 }
-function resetEditorState(){metrics=null;metricsBusy=false;presenceInfo=null;presenceSequence++;minimapOpen=false;clearTimeout(saveTimer);undoStack=[];redoStack=[];historyKey='';historyTime=0;matrix=null;saveIssue='';branchOpen=new Map();const canvas=$('#workspace .canvas-scroll');if(canvas){canvas.scrollTop=0;canvas.scrollLeft=0}$('#inspector').scrollTop=0}
+function resetEditorState(){selectedSteps.clear();multiSelect=false;moveIntent=null;connectIntent=null;metrics=null;metricsBusy=false;presenceInfo=null;presenceSequence++;minimapOpen=false;clearTimeout(saveTimer);undoStack=[];redoStack=[];historyKey='';historyTime=0;matrix=null;saveIssue='';branchOpen=new Map();const canvas=$('#workspace .canvas-scroll');if(canvas){canvas.scrollTop=0;canvas.scrollLeft=0}$('#inspector').scrollTop=0}
 function scheduleSave(){
   clearTimeout(saveTimer)
   recoverWrite()
-  if(!autosave||!dirty||!graph||!graph.channel||!graph.name.trim()||busy)return
+  if(!autosave||!dirty||!graph||!graph.channel||!graph.name.trim()||busy||navLoading)return
   saveTimer=setTimeout(()=>{save(true).catch(()=>{})},1400)
 }
 function updateSaveIndicator(){
@@ -70,7 +74,7 @@ function updateSaveIndicator(){
   const u=$('#undo-work'),r=$('#redo-work')
   if(u)u.disabled=!undoStack.length||busy
   if(r)r.disabled=!redoStack.length||busy
-  updateValidation();renderPresence()
+  syncStatusUI();updateValidation();renderPresence()
 }
 function workbar(){
   const root=$('#workbar')
@@ -82,14 +86,14 @@ function workbar(){
   const undo=button('↶ 戻す',()=>historyMove('undo'));undo.id='undo-work';undo.title='取り消し（Ctrl/⌘+Z）'
   const redo=button('↷ やり直す',()=>historyMove('redo'));redo.id='redo-work';redo.title='やり直し（Ctrl/⌘+Shift+Z）'
   const saveBtn=button('下書き保存',()=>save(),'primary');saveBtn.dataset.saveAction='true'
-  const auto=button(autosave?'自動保存 ON':'自動保存 OFF',()=>{autosave=!autosave;try{localStorage.setItem('npl-studio-auto-v2:'+currentSession.actor.id,String(autosave))}catch{}workbar();scheduleSave()});auto.setAttribute('aria-pressed',String(autosave))
-  const view=button(viewMode==='basic'?'詳細フロー':'簡単編集',()=>{viewMode=viewMode==='basic'?'graph':'basic';show();choosePiece('workspace')});view.setAttribute('aria-pressed',String(viewMode==='graph'))
+  const auto=button(autosave?'自動保存 ON':'自動保存 OFF',toggleAuto);auto.classList.add('secondary-work');auto.setAttribute('aria-pressed',String(autosave))
+  const view=button(viewMode==='basic'?'詳細フロー':'簡単編集',()=>{viewMode=viewMode==='basic'?'graph':'basic';savePrefs();show();choosePiece('workspace')});view.setAttribute('aria-pressed',String(viewMode==='graph'))
   const guide=button('テスト',()=>{tab='test';show();choosePiece('inspector')})
   const publish=button('公開管理',()=>{tab='publish';show();choosePiece('inspector')},'primary')
-  const utility=button('その他 ▾',openUtilities)
-  const focus=button(focusMode?'集中モード終了':'集中モード',()=>{focusMode=!focusMode;hideLibrary=focusMode;hideInspector=focusMode;applyPanelMode();show()});focus.setAttribute('aria-pressed',String(focusMode));focus.classList.add('desktop-focus')
+  const utility=button('その他 ▾',openUtilities);utility.classList.add('utility-work')
+  const focus=button(focusMode?'集中モード終了':'集中モード',()=>{focusMode=!focusMode;hideLibrary=focusMode;hideInspector=focusMode;savePrefs();applyPanelMode();show()});focus.setAttribute('aria-pressed',String(focusMode));focus.classList.add('desktop-focus')
   if(graph)ops.append(status,undo,redo,auto,view,focus,utility,saveBtn,guide,publish)
-  const state=node('span','','presence-state');state.id='presence-state';context.append(state);root.replaceChildren(context,ops);root.hidden=!graph;updateSaveIndicator()
+  const state=node('span','','presence-state');state.id='presence-state';const live=node('span','','live-status');live.id='live-status';context.append(live,state);root.replaceChildren(context,ops);root.hidden=!graph;updateSaveIndicator()
 }
 async function finishBeforeLeave(){
   clearTimeout(saveTimer)
@@ -149,7 +153,7 @@ function saveLocal() {
 async function api(path,method='GET',body,key) {
   const response=await fetch(workspacePath('/api/v1'+path),{method,headers:{...(body?{'content-type':'application/json'}:{}),
     ...(key?{'Idempotency-Key':key}:{})},body:body?JSON.stringify(body):undefined})
-  const payload=await response.json()
+  let payload;try{payload=await response.json()}catch{throw Object.assign(new Error('サーバーと通信できませんでした。再度お試しください。'),{status:response.status})}
   if (!response.ok) throw Object.assign(new Error(payload.message??'処理できませんでした。'),{status:response.status})
   return payload
 }
@@ -177,20 +181,26 @@ function button(title,fn,cls='quiet') {
   return btn
 }
 function pill(text,cls='') { return node('span',text,'pill '+cls) }
-function announce(text,error=false) {
-  const el=$('#message')
-  el.textContent=text
-  el.hidden=!text
-  el.classList.toggle('error',error)
+let messageTimer
+function announce(text,error=false){
+  clearTimeout(messageTimer)
+  const modal=$('#dialog');if(modal?.open&&text&&error){let alert=modal.querySelector('.dialog-alert');if(!alert){alert=node('p',null,'dialog-alert');alert.setAttribute('role','alert');modal.querySelector('h2')?.after(alert)}alert.textContent=text;alert.scrollIntoView({block:'nearest'});return}
+  const el=$('#message');el.replaceChildren(node('span',text));el.hidden=!text;el.classList.toggle('error',error)
+  if(text){const close=button('×',()=>{el.hidden=true;clearTimeout(messageTimer)});close.setAttribute('aria-label','通知を閉じる');el.append(close);if(!error)messageTimer=setTimeout(()=>{el.hidden=true},3200)}
 }
-function choosePiece(value) {
-  if(value==='inspector'&&hideInspector){hideInspector=false;applyPanelMode()}
-  part=value
-  $('#layout').dataset.part=part
-  for (const btn of document.querySelectorAll('.mobile button')) {
-    if(btn.dataset.part===part) btn.setAttribute('aria-current','true')
-    else btn.removeAttribute('aria-current')
-  }
+function choosePiece(value){
+  const previous=part
+  if(value==='inspector'&&hideInspector&&!mobileUI()){hideInspector=false;applyPanelMode()}
+  if(value==='library'&&hideLibrary&&!mobileUI()){hideLibrary=false;applyPanelMode()}
+  part=value;const layout=$('#layout');layout.dataset.part=part
+  const sheet=mobileUI()&&part!=='workspace'
+  if(sheet&&previous==='workspace')sheetFocus=document.activeElement
+  document.body.classList.toggle('sheet-open',sheet);$('#sheet-backdrop').hidden=!sheet
+  for(const id of ['library','inspector']){const section=$('#'+id),active=sheet&&id===part;section.toggleAttribute('inert',sheet&&!active);if(active){section.setAttribute('role','dialog');section.setAttribute('aria-modal','true')}else{section.removeAttribute('role');section.removeAttribute('aria-modal')}}
+  $('#workspace').toggleAttribute('inert',sheet);for(const selector of ['.top','.hero','.mobile'])$(selector)?.toggleAttribute('inert',sheet)
+  for(const id of ['workbar'])$('#'+id).toggleAttribute('inert',sheet)
+  for (const btn of document.querySelectorAll('.mobile button')) {if(btn.dataset.part===part)btn.setAttribute('aria-current','true');else btn.removeAttribute('aria-current')}
+  if(sheet&&previous!==part)requestAnimationFrame(()=>{const panel=$('#'+part);panel.scrollTop=0;panel.querySelector('.sheet-close')?.focus({preventScroll:true})});else if(previous!=='workspace'&&part==='workspace'&&sheetFocus?.isConnected)sheetFocus.focus({preventScroll:true})
 }
 function applicantTagOptions(value){
   const fields={'':'タグを選択'}
@@ -214,13 +224,13 @@ function field(label,value,change,options={}) {
   else wrap.append(input)
   input.addEventListener(options.event??'change',()=>{
     const next=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value
-    try { change(next,input) } catch(error) { announce(error.message,true) }
+    try { Promise.resolve(change(next,input)).catch(error=>announce(error.message,true)) } catch(error) { announce(error.message,true) }
   })
   return wrap
 }
 function dialog(title,text,content) {
   const box=$('#dialog')
-  box.classList.remove('template-dialog')
+  box.classList.remove('template-dialog','composer-dialog')
   const heading=node('h2',title);heading.tabIndex=-1
   box.replaceChildren(heading,node('p',text),content,button('閉じる',()=>box.close()))
   box.showModal();heading.focus({preventScroll:true});box.scrollTop=0
@@ -235,24 +245,23 @@ function ask(question,description='現在の画面で保存していない内容
   })
 }
 function update(change,rerender=true,key='') {
-  if (busy) return
+  if (busy||navLoading) return
   const pushed=recordHistory(key)
   const before=JSON.stringify(graph)
   change()
   if(JSON.stringify(graph)===before){if(pushed)undoStack.pop();return}
   dirty=JSON.stringify(graph)!==original
-  simulation=null;matrix=null;saveIssue=''
+  const hadTrace=!!simulation;simulation=null;matrix=null;saveIssue=''
   if (rerender) show()
   else {
-    const title=$('#workspace .editor-head h2')
+    const title=$('#workbar .work-context strong')
     if (title) title.textContent=graph.name||'名称未設定'
     const selected=$('#workspace .node.selected .node-content strong')
     if(selected && currentNode()) selected.textContent=currentNode().name||kinds[currentNode().type]
     const excerpt=$('#workspace .node.selected .excerpt')
     if(excerpt && currentNode()?.type==='message') excerpt.textContent=currentNode().body.replace(/\s+/g,' ')
     const caption=$('#workspace .node.selected .node-content small');const step=currentNode();if(caption&&step?.type==='wait'&&['delay','booking'].includes(step.mode))caption.textContent='待機 · '+(step.mode==='booking'?'予約の':'')+formatMinutes(step.minutes)+(step.mode==='booking'?'前':'')
-    const context=$('#workbar .work-context strong');if(context)context.textContent=graph.name||'名称未設定'
-    updateSaveIndicator()
+    const context=$('#workbar .work-context strong');if(context)context.textContent=graph.name||'名称未設定';if(hadTrace)refreshCardSelection()
   }
   scheduleSave();updateSaveIndicator()
 }
@@ -260,7 +269,7 @@ function limits() { return validate(graph,true) }
 const currentNode=()=>graph?.nodes.find(item=>item.id===selection)
 function syncScenarioURL(){if(!store)return;const url=new URL(location.href);url.searchParams.set('store',store.id);if(scenario?.id)url.searchParams.set('scenario',scenario.id);else url.searchParams.delete('scenario');history.replaceState(null,'',url)}
 function setupFlow(data) {
-  resetEditorState()
+  resetEditorState();person={...person,timeline:[]}
   scenario=data??null
   localCreateKey=null
   pendingMeta={folder:scenario?.folder??'',is_template:scenario?.is_template??false}
@@ -273,47 +282,25 @@ function setupFlow(data) {
   syncScenarioURL();show();pollPresence()
 }
 
-async function refreshStore(next) {
-  store=next
-  person={...person,zone:store.timezone,cutoff:store.cutoff,values:{...person.values,store:store.name}}
-  channels=demo?channelDemo(store.id):await api('/stores/'+store.id+'/connections')
-  applicantCatalog=demo?{enabled:true,definitions:Object.entries(tagStepTemplates).filter(([key])=>key!=='generic').map(([tag_key,t])=>({tag_key,label:t.label,active:true}))}:await api('/stores/'+store.id+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]}))
-  scenarioList=demo?structuredClone(demoRecords()):await api(base())
-  const requested=new URLSearchParams(location.search).get('scenario')
-  const first=scenarioList.find(s=>s.id===requested)??scenarioList.find(s=>!s.is_template)??scenarioList[0]
-  setupFlow(first&&!demo?await api(base()+'/'+first.id):first)
-  const recovery=recoverRead()
-  if(recovery?.graph&&Date.now()-recovery.at<7*86400000){
-    const saved=scenarioList.find(s=>s.id===recovery.id)
-    if(recovery.id&&saved&&JSON.stringify(saved.graph)===JSON.stringify(recovery.graph)){clearRecovery();return}
-    const row=node('div')
-    const conflict=!!recovery.id&&(!saved||saved.revision!==recovery.revision)
-    row.append(node('p',conflict?'サーバー上の版が変わっています。復元する場合は別の新規下書きとして開きます。':'前回の未保存編集を復元できます。'))
-    row.append(button('下書きを復元',async()=>{
-      let latest
-      if(!conflict&&saved)latest=demo?saved:await api(base()+'/'+saved.id)
-      $('#dialog').close()
-      if(latest&&latest.revision===recovery.revision){
-        setupFlow(latest);graph=structuredClone(recovery.graph);dirty=true;selection=graph.entry;show();scheduleSave()
-      }else{
-        draftScenario(recovery.graph,null,recovery.meta,!recovery.id&&!conflict&&recovery.key?recovery.key:undefined)
-        if(recovery.id)announce('サーバー版を保護するため、復元内容は別の新規下書きとして開きました。')
-      }
-    },'primary'),button('復元しない',()=>{clearRecovery();$('#dialog').close()}))
-    dialog('未保存の下書きを復元',new Date(recovery.at).toLocaleString('ja-JP'),row)
-  }
+async function refreshStore(next){
+  if(!next)throw new Error('店舗を選択してください。')
+  const requested=new URLSearchParams(location.search).get('scenario'),root='/stores/'+next.id
+  let newChannels,newCatalog,newList
+  if(demo){if(!local){try{local=JSON.parse(localStorage.getItem(draftKey))}catch{}if(!local||!Array.isArray(local.ginza)||!Array.isArray(local.yokohama))local=fixtures()}newChannels=channelDemo(next.id);newCatalog={enabled:true,definitions:Object.entries(tagStepTemplates).filter(([k])=>k!=='generic').map(([tag_key,t])=>({tag_key,label:t.label,active:true}))};newList=structuredClone(local[next.id])}
+  else [newChannels,newCatalog,newList]=await Promise.all([api(root+'/connections'),api(root+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]})),api(root+'/scenarios?summary=1')])
+  const first=newList.find(s=>s.id===requested)??newList.find(s=>!s.is_template)??newList[0]
+  const selected=first&&!demo?await api(root+'/scenarios/'+first.id):first
+  store=next;channels=newChannels;applicantCatalog=newCatalog;scenarioList=newList
+  person={...person,zone:store.timezone,cutoff:store.cutoff,timeline:[],tags:[],values:{...person.values,store:store.name}};stepClipboard=null
+  setupFlow(selected)
+  const candidates=recoveryCandidates().filter(r=>{const saved=selected?.id===r.id?selected:null;if(saved&&JSON.stringify(saved.graph)===JSON.stringify(r.graph)){clearRecovery(r.storageKey);return false}return true})
+  if(candidates.length){const box=node('div',null,'insert-picker');for(const recovery of candidates.slice(0,15)){const saved=newList.find(s=>s.id===recovery.id),conflict=!!recovery.id&&(!saved||saved.revision!==recovery.revision);const row=node('section',null,'rule-row');row.append(node('strong',recovery.graph.name||'名称未設定'),node('p',new Date(recovery.at).toLocaleString('ja-JP')+(conflict?' · 別の下書きに復元':' · 復元可能'),'field-hint'));row.append(button('この下書きを復元',async()=>{let latest;if(!conflict&&saved)latest=demo?saved:await api(base()+'/'+saved.id);$('#dialog').close();if(latest&&latest.revision===recovery.revision){setupFlow(latest);graph=structuredClone(recovery.graph);dirty=true;selection=graph.entry;show();scheduleSave()}else draftScenario(recovery.graph,null,recovery.meta,!recovery.id&&!conflict&&recovery.key?recovery.key:undefined);recoverWrite();clearRecovery(recovery.storageKey);if(conflict)announce('別の新規下書きとして復元しました。')},'primary'),button('この復元候補を破棄',()=>{clearRecovery(recovery.storageKey);row.remove();if(!box.children.length)$('#dialog').close()}));box.append(row)}dialog('未保存の下書きを復元','別タブや前回の編集を選択できます。サーバー版を上書きしません。',box)}
 }
-
-async function openScenario(id) {
-  if (scenario?.id===id) return choosePiece('workspace')
-  if (!await finishBeforeLeave()) return
-  setupFlow(demo?structuredClone(demoRecords().find(item=>item.id===id)):await api(base()+'/'+id))
-  choosePiece('workspace')
-  announce('')
-}
+async function navigateSafely(action){if(navigationBusy||busy)return false;navigationBusy=true;$('#store').disabled=true;try{if(!await finishBeforeLeave())return false;navLoading=true;$('#layout').inert=true;$('#workbar').inert=true;await action();return true}finally{navLoading=false;navigationBusy=false;$('#store').disabled=false;$('#layout').inert=false;$('#workbar').inert=mobileUI()&&part!=='workspace';scheduleSave()}}
+async function openScenario(id){if(scenario?.id===id)return choosePiece('workspace');await navigateSafely(async()=>{const next=demo?structuredClone(demoRecords().find(item=>item.id===id)):await api(base()+'/'+id);setupFlow(next);choosePiece('workspace');announce('')})}
 
 function draftScenario(flow,templateInfo,meta={folder:'',is_template:false},createKey){
-  resetEditorState()
+  resetEditorState();person={...person,timeline:[]}
   scenario=null
   pendingMeta=meta
   localCreateKey=createKey??crypto.randomUUID()
@@ -465,7 +452,7 @@ async function openSavedTemplates(){
   let records=[]
   if(demo)records=stores.flatMap(s=>(local?.[s.id]??[]).filter(r=>r.is_template).map(r=>({item:r,source:s})))
   else{
-    const result=await Promise.allSettled(stores.map(async source=>(await api('/stores/'+source.id+'/scenarios')).filter(r=>r.is_template).map(item=>({source,item}))))
+    const result=await Promise.allSettled(stores.map(async source=>(await api('/stores/'+source.id+'/scenarios?summary=1')).filter(r=>r.is_template).map(item=>({source,item}))))
     records=result.flatMap(r=>r.status==='fulfilled'?r.value:[])
   }
   if(!$('#dialog').open||!box.isConnected)return
@@ -474,8 +461,8 @@ async function openSavedTemplates(){
   const filter=value=>{
     list.replaceChildren()
     for(const {item,source} of records.filter(r=>(r.item.graph.name+' '+r.source.name+' '+(r.item.folder??'')).toLowerCase().includes(value.toLowerCase()))){
-      const b=button('',()=>{$('#dialog').close();openCopy(item.graph,source,false,item.folder??'').catch(e=>announce(e.message,true))},'template-card')
-      b.append(node('strong',item.graph.name),node('small',source.name+' · '+(item.folder||'未分類')+' · '+item.graph.nodes.length+'ステップ'))
+      const b=button('',async()=>{const detail=demo?item:await api('/stores/'+source.id+'/scenarios/'+item.id);$('#dialog').close();await openCopy(detail.graph,source,false,item.folder??'')},'template-card')
+      b.append(node('strong',item.graph.name),node('small',source.name+' · '+(item.folder||'未分類')+' · '+(item.graph.node_count??item.graph.nodes?.length??0)+'ステップ'))
       list.append(b)
     }
     if(!list.children.length)list.append(node('p','該当する自社テンプレートがありません。「その他」から登録できます。','empty'))
@@ -486,7 +473,7 @@ function openUtilities(){
   if(!graph)return
   const menu=node('div',null,'insert-picker')
   const action=(label,fn)=>button(label,()=>{$('#dialog').close();return fn()})
-  menu.append(action('シナリオを複製・他店舗へコピー',()=>openCopy(graph,store,false,scenario?.folder??'')),
+  menu.append(action('店舗運用へ戻る',async()=>{if(await finishBeforeLeave())location.href=workspacePath(controlled)}),action(autosave?'自動保存をオフにする':'自動保存をオンにする',toggleAuto),action(theme==='dark'?'ライトモードにする':'ダークモードにする',toggleTheme),action('シナリオを複製・他店舗へコピー',()=>openCopy(graph,store,false,scenario?.folder??'')),
     action('複数店舗へ一括コピー',()=>openBatchCopy(graph)),
     action('ステップを選択してコピー',()=>openStepCopy()),
     action('自社テンプレートとして保存',()=>openCopy(graph,store,true)),
@@ -527,7 +514,7 @@ function openFolder(){
 }
 
 async function save(automatic=false) {
-  if (busy||!graph) return
+  if (busy||navLoading||!graph) return
   clearTimeout(saveTimer)
   if(savePromise){await savePromise;if(dirty&&!automatic)return save(false);return}
   if(!dirty&&scenario)return
@@ -558,7 +545,8 @@ async function save(automatic=false) {
       dirty=JSON.stringify(graph)!==original
       recoverWrite()
       library()
-      if(!automatic||tab==='publish'||tab==='test')show();else flowView()
+      // Saving must not replace the canvas while a pointer is dragging or a field is being edited.
+      if(tab!=='edit'&&!$('#dialog').open)inspector();syncStatusUI()
       if(!automatic)announce('下書きを保存しました。公開中の配信には反映されません。')
     }catch(error){
       saveIssue=error.status===409?'他の変更があります。端末の下書きを保持しています。':error.message
@@ -571,7 +559,7 @@ async function save(automatic=false) {
 }
 async function transition(action,reason) {
   if(savePromise)await savePromise
-  if (!scenario || busy || dirty) throw new Error('先に下書きを保存してください。')
+  if (!scenario || busy || navLoading || dirty) throw new Error('先に下書きを保存してください。')
   if (['test','publish'].includes(action) && limits().length) throw new Error(limits()[0].message)
   busy=true
   try {
@@ -595,7 +583,7 @@ async function transition(action,reason) {
       scenario=await api(base()+'/'+scenario.id+'/transition','POST',{
         action,reason,revision:scenario.revision,...(action==='test'?{fixture}:{}),
       })
-      scenarioList=await api(base())
+      scenarioList=await api(base()+'?summary=1')
     }
     const labels={test:'テスト結果を記録しました。',approve:'下書きを承認しました。',publish:'公開版を保存しました。',
       stop:'シナリオを停止しました。',resume:'シナリオを再開しました。'}
@@ -606,7 +594,7 @@ async function transition(action,reason) {
 }
 
 function library() {
-  const target=$('#library')
+  const target=$('#library'),active=document.activeElement,searchFocused=target.contains(active)&&active?.type==='search',caret=searchFocused?[active.selectionStart,active.selectionEnd]:null,oldTop=target.scrollTop
   const box=node('div',null,'panelbody')
   const rows=node('div',null,'library-list')
   const search=field('検索',searchText,value=>{searchText=value;filter()},{event:'input',attributes:{placeholder:'シナリオ名・フォルダ',type:'search'}})
@@ -631,25 +619,24 @@ function library() {
       const badges=node('div',null,'labels')
       badges.append(pill(purposes[item.graph.purpose]),pill(item.is_template?'テンプレート':item.stopped?'停止中':item.published_version?'公開 v'+item.published_version:steps[item.state],
         item.stopped?'warn':item.published_version?'good':''))
-      if(item.published_version&&selected&&dirty)badges.append(pill('編集中','warn'))
+      if(item.published_version&&((selected&&dirty)||item.draft_matches_published===false))badges.append(pill('未反映','warn'))
       entry.append(node('strong',item.graph.name),badges)
       rows.append(entry)
     }
     if(!shown.length)rows.append(node('p','一致するシナリオがありません。','empty'))
   }
   filter();box.append(search,picker,kind,rows)
-  target.replaceChildren(panelHead('シナリオ一覧',scenarioList.length+'件'),box)
+  const head=panelHead('シナリオ一覧',scenarioList.length+'件');head.append(sheetClose());target.replaceChildren(head,box);target.scrollTop=oldTop;if(searchFocused){const next=target.querySelector('input[type=search]');next?.focus({preventScroll:true});if(next&&caret)next.setSelectionRange(...caret)}
 }
 
-const selectStep = id=>{
-  for(const key of stepOutline(graph).find(n=>n.id===id)?.path??[])branchOpen.set(key,true)
-  if(hideInspector){hideInspector=false;applyPanelMode()}
-  selection=id
-  tab='edit'
-  show()
-  choosePiece(matchMedia('(max-width:950px)').matches?'inspector':'workspace')
-  $('#inspector').scrollTop=0
-  requestAnimationFrame(()=>{const card=[...$('#workspace').querySelectorAll('[data-step-id]')].find(c=>c.dataset.stepId===id);if(card&&matchMedia('(min-width:951px)').matches)card.scrollIntoView({block:'nearest',inline:'nearest'})})
+const selectStep=(id,{reveal=true,open=true}={})=>{
+  if(!graph?.nodes.some(n=>n.id===id)||navLoading)return
+  const path=stepOutline(graph).find(n=>n.id===id)?.path??[]
+  for(const key of path){branchOpen.set(key,true);for(const d of document.querySelectorAll('.branch-route'))if(d.dataset.route===key)d.open=true}
+  if(hideInspector&&!mobileUI()&&open){hideInspector=false;applyPanelMode()}
+  selection=id;tab='edit';refreshCardSelection();inspector();$('#inspector').scrollTop=0
+  if(open)choosePiece(mobileUI()?'inspector':'workspace')
+  if(reveal)requestAnimationFrame(()=>{const card=cardById(id);if(card&&(!mobileUI()||part==='workspace'))card.scrollIntoView({block:'nearest',inline:'nearest'})})
 }
 const nameOf = id=>graph.nodes.find(item=>item.id===id)?.name??'接続なし'
 
@@ -702,7 +689,7 @@ function addStep(edge){
   dialog('ステップを挿入',edgeDescription(edge)+(target?' · '+nameOf(target)+' の前':' · 新しい経路'),menu)
 }
 function edgeButton(edge,label='ステップを挿入'){
-  const b=button('＋',()=>addStep(edge),'edge-add')
+  const b=button('＋',()=>moveIntent?confirmMove(edge):addStep(edge),'edge-add');b.dataset.edgeOwner=edge.owner??'';b.dataset.edgeKey=edge.key
   b.setAttribute('aria-label',label+'：'+edgeDescription(edge));b.title=label+'：'+edgeDescription(edge)
   return b
 }
@@ -724,31 +711,31 @@ function flowView() {
   const priorScroll=root.querySelector('.canvas-scroll')
   const oldTop=priorScroll?.scrollTop??0,oldLeft=priorScroll?.scrollLeft??0
   const title=node('div',null,'panelhead editor-head')
-  title.append(panelHead(graph.name||'名称未設定',purposes[graph.purpose]+'  ·  '+(channels.find(item=>item.id===graph.channel)?.label??'公式LINE未選択')))
+  title.append(panelHead('配信フロー',graph.nodes.length+'ステップ'))
   const badges=node('div',null,'labels')
   if(scenario?.is_template||pendingMeta.is_template)badges.append(pill('テンプレート（配信なし）'))
   else if(scenario?.published_version)badges.append(pill(scenario.stopped?'公開停止中':'公開版 v'+scenario.published_version,scenario.stopped?'warn':'good'))
-  badges.append(pill(dirty?'未保存の下書き':steps[scenario?.state??'draft'],dirty?'warn':''))
+  const draftBadge=pill(dirty?'未保存の下書き':steps[scenario?.state??'draft'],dirty?'warn':'');draftBadge.id='draft-badge';badges.append(draftBadge)
   title.append(badges)
   const bar=node('div',null,'toolbar')
-  bar.append(button('＋ ステップ追加',()=>addStep()),button('ステップ検索',openStepSearch),button('コピー',openStepCopy),button(minimapOpen?'マップを閉じる':'ミニマップ',()=>{minimapOpen=!minimapOpen;show()}),button('実績',()=>{tab='metrics';show();choosePiece('inspector');loadMetrics()}),node('span',graph.nodes.length+'ステップ','field-hint'),node('span',null,'spacer'))
-  const left=button(hideLibrary?'一覧を表示':'一覧を隠す',()=>{hideLibrary=!hideLibrary;applyPanelMode();show()});left.classList.add('desktop-panel-toggle');bar.append(left)
-  const right=button(hideInspector?'設定を表示':'設定を隠す',()=>{hideInspector=!hideInspector;applyPanelMode();show()});right.classList.add('desktop-panel-toggle');bar.append(right)
+  bar.append(button('＋ ステップ追加',()=>addStep(),'primary'),button('検索',openStepSearch),Object.assign(button(multiSelect?'選択終了':'複数選択',toggleMultiSelect),{id:'multi-select-toggle'}),button('ツール ▾',openCanvasTools),node('span',null,'spacer'))
+  const left=button(hideLibrary?'一覧を表示':'一覧を隠す',()=>{hideLibrary=!hideLibrary;savePrefs();applyPanelMode();show()});left.classList.add('desktop-panel-toggle');bar.append(left)
+  const right=button(hideInspector?'設定を表示':'設定を隠す',()=>{hideInspector=!hideInspector;savePrefs();applyPanelMode();show()});right.classList.add('desktop-panel-toggle');bar.append(right)
   if(viewMode==='graph'){
-    const setZoom=value=>{zoom=Math.max(.35,Math.min(1.5,value));show()}
+    const setZoom=value=>zoomCanvas(value)
     const zoomOut=button('－',()=>setZoom(zoom-.1));zoomOut.setAttribute('aria-label','縮小')
     const zoomIn=button('＋',()=>setZoom(zoom+.1));zoomIn.setAttribute('aria-label','拡大')
-    bar.append(zoomOut,button(Math.round(zoom*100)+'%',()=>setZoom(1)),zoomIn,button('全体表示',()=>{
-      const list=root.querySelector('.node-list'),scroll=root.querySelector('.canvas-scroll')
-      if(list&&scroll)setZoom(Math.min(1,zoom*(scroll.clientWidth-32)/Math.max(list.getBoundingClientRect().width,1)))
+    const zoomLabel=button(Math.round(zoom*100)+'%',()=>setZoom(1));zoomLabel.id='zoom-level';bar.append(zoomOut,zoomLabel,zoomIn,button('全体表示',()=>{
+      const list=root.querySelector('.canvas'),scroll=root.querySelector('.canvas-scroll')
+      if(list&&scroll)setZoom(Math.min(1,zoom*Math.min((scroll.clientWidth-24)/Math.max(list.getBoundingClientRect().width,1),(scroll.clientHeight-24)/Math.max(list.getBoundingClientRect().height,1))))
     }))
   }else {
-    bar.append(button('全分岐を開く',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,true);show()}),button('折りたたむ',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,false);show()}))
+    const branches=node('div',null,'branch-tools');branches.append(button('全分岐を開く',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,true);show()}),button('折りたたむ',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,false);show()}));bar.append(branches)
   }
-  const scroll=node('div',null,'canvas-scroll '+(viewMode==='graph'?'graph-scroll':'basic-scroll'))
+  const scroll=node('div',null,'canvas-scroll '+(viewMode==='graph'?'graph-scroll':'basic-scroll'));scroll.tabIndex=0;scroll.setAttribute('role','region');scroll.setAttribute('aria-label','配信フローキャンバス')
   const board=node('div',null,'canvas '+(viewMode==='graph'?'graph-view':'basic-view'))
   if(viewMode==='graph')board.style.zoom=String(zoom)
-  const help=node('p','＋で途中に挿入。カードを選んで編集、長押し・ドラッグで同じ経路内の順番を変更できます。','reorder-help')
+  const help=node('p','＋で追加 · ステップを選択して編集 · ⋮でその他の操作','reorder-help')
   help.id='reorder-help'
   const trigger=button('',()=>{tab='settings';show();choosePiece('inspector')},'trigger')
   const triggerText=node('span')
@@ -760,15 +747,15 @@ function flowView() {
   const groups=reorderGroups(graph),seen=new Set()
   const connect=(edge,parent)=>{
     const connector=node('div',null,'connector insert-edge')
-    connector.append(edgeButton(edge));parent.append(connector)
+    const link=button('↪',()=>startConnect(edge),'edge-link');link.title='接続先を変更';link.setAttribute('aria-label','接続先を変更：'+edgeDescription(edge));installDirectDrag(link,'link',edge);connector.append(edgeButton(edge),link);parent.append(connector)
   }
   function drawPath(id,parent,depth=0) {
     const item=map.get(id)
     if(!item){parent.append(node('p','接続なし · ＋ から追加','path-ref'));return}
     if(seen.has(id)||depth>100){parent.append(button('↪ '+nameOf(id),()=>selectStep(id),'path-ref'));return}
     seen.add(id)
-    const card=button('',()=>selectStep(item.id),'node'+(item.id===selection?' selected':''))
-    card.setAttribute('aria-pressed',String(item.id===selection));card.dataset.stepId=item.id
+    const card=button('',null,'node'+(item.id===selection?' selected':''))
+    card.setAttribute('aria-pressed',String(item.id===selection));card.dataset.stepId=item.id;card.addEventListener('click',e=>cardClick(e,item.id));card.addEventListener('dblclick',e=>{if(!mobileUI()&&!e.shiftKey)renameInline(item.id)});card.addEventListener('contextmenu',e=>{e.preventDefault();openStepActions(item.id)});installCardHold(card,item.id)
     const copy=node('span',null,'node-content')
     let detail=kinds[item.type]
     if(item.type==='wait')detail+=' · '+(item.mode==='delay'?formatMinutes(item.minutes):item.mode==='booking'?'予約の'+formatMinutes(item.minutes)+'前':waitTypes[item.mode])
@@ -786,19 +773,19 @@ function flowView() {
       const grip=node('span','⠿','step-grip');grip.setAttribute('aria-hidden','true');grip.title='長押しして並べ替え';card.append(grip)
       card.addEventListener('keydown',event=>{if(event.altKey&&['ArrowUp','ArrowDown'].includes(event.key)){event.preventDefault();applyStepOrder(adjacentMove(graph,item.id,event.key==='ArrowUp'?-1:1),item.id,true)}})
     }
-    parent.append(card)
+    const shell=node('div',null,'node-shell');const actions=node('div',null,'card-actions');const move=button('↕',()=>startMove([item.id]),'move-handle');move.disabled=item.type==='end';move.setAttribute('aria-label','経路を移動：'+item.name);installDirectDrag(move,'move',[item.id]);const more=button('⋮',()=>openStepActions(item.id),'card-more');more.setAttribute('aria-label','ステップ操作：'+item.name);actions.append(move,more);shell.append(card,actions);parent.append(shell)
     if(item.type==='branch'){
       const lanes=node('div',null,'branch-lanes')
       for(const key of ['yes','no']){
         const next=item[key],label=key==='yes'?'はい':'いいえ',edge={owner:item.id,key}
         if(viewMode==='basic'){
           const lane=node('details',null,'branch-route branch-'+key)
-          lane.open=branchOpen.get(item.id+':'+key)??true
+          lane.dataset.route=item.id+':'+key;lane.open=branchOpen.get(item.id+':'+key)??true
           lane.addEventListener('toggle',()=>{if(lane.isConnected)branchOpen.set(item.id+':'+key,lane.open)})
           const summary=node('summary',label+' → '+nameOf(next)+'（'+routeSteps(graph,next)+'ステップ）','branch-summary')
           const body=node('div',null,'branch-body');lane.append(summary,body);connect(edge,body);drawPath(next,body,depth+1);lanes.append(lane)
         }else{
-          const lane=node('div',null,'branch-lane branch-'+key)
+          const lane=node('div',null,'branch-lane branch-'+key);lane.dataset.route=item.id+':'+key
           lane.append(node('span',label,'branch-label'));connect(edge,lane);drawPath(next,lane,depth+1);lanes.append(lane)
         }
       }
@@ -815,7 +802,7 @@ function flowView() {
   installStepDrag(board,{groups,canMove:()=>!busy&&board.isConnected,onMove:(source,target,position)=>applyStepOrder(reorderStep(graph,source,target,position),source)})
   const overview=minimapOpen?makeMinimap():null
   root.replaceChildren(title,bar,...(overview?[overview]:[]),scroll)
-  updateValidation()
+  installCanvasPan(scroll,board);refreshCardSelection();updateValidation()
   scroll.scrollTop=oldTop;scroll.scrollLeft=oldLeft
 }
 
@@ -839,6 +826,7 @@ function editStep() {
     wrap.append(controls)
   }
   if (item.type==='message') {
+    wrap.append(button('メッセージ専用編集を開く',()=>openMessageComposer(item.id),'primary composer-open'))
     if(graph.purpose==='customer')wrap.append(field('連絡の用途',item.category,set('category'),{items:{service:'業務案内',marketing:'顧客向け販促'}}))
     wrap.append(field('メッセージ形式',item.rich?.kind??'text',value=>update(()=>{if(value==='text')delete item.rich;else item.rich={kind:value,title:value==='card'?(item.rich?.title||'ご案内'):item.rich?.title??'',imageUrl:item.rich?.imageUrl??'',buttons:item.rich?.buttons?.length?item.rich.buttons:value==='buttons'?[{label:'詳細を見る',url:''}]:[]}}),{items:{text:'テキスト',image:'画像付きメッセージ',buttons:'リンクボタン付き',card:'カード'}}))
     if(item.rich)wrap.append(richEditor(item))
@@ -890,7 +878,7 @@ function editStep() {
     if(item.mode==='delay'||item.mode==='booking'){
       let {value,unit}=timeUnit(item.minutes)
       const row=node('div',null,'row'),label=item.mode==='delay'?'待機時間':'予約時刻の前'
-      const amount=field(label,value,v=>{value=v;update(()=>{item.minutes=v*unit},false,item.id+':minutes');description.textContent=formatMinutes(item.minutes)},{type:'number',attributes:{min:item.mode==='delay'?'1':'0',step:'1',max:'525600'}})
+      const amount=field(label,value,v=>{value=v;update(()=>{item.minutes=v*unit},false,item.id+':minutes');description.textContent=formatMinutes(item.minutes)},{type:'number',event:'input',attributes:{min:item.mode==='delay'?'1':'0',step:'1',max:'525600'}})
       const units=field('単位',String(unit),v=>{unit=Number(v);update(()=>{item.minutes=value*unit},false,item.id+':minutes');description.textContent=formatMinutes(item.minutes)},{items:{'1':'分','60':'時間','1440':'日'}})
       const description=node('p',formatMinutes(item.minutes),'field-hint')
       row.append(amount,units);wrap.append(row,description)
@@ -1026,7 +1014,7 @@ function resultView() {
     if (out) out.replaceChildren()
     const record=$('#mark-tested')
     if (record) record.disabled=true
-    $('#test-delivery')?.remove()
+    $('#test-delivery')?.remove();refreshCardSelection()
   }
   const presets=field('テスト条件',preset,value=>{
     preset=value
@@ -1051,7 +1039,7 @@ function resultView() {
   counts.append(field('直近1日の販促通数',person.dayCount,set('dayCount'),{type:'number',attributes:{min:'0'}}),
     field('直近7日の販促通数',person.weekCount,set('weekCount'),{type:'number',attributes:{min:'0'}}))
   more.append(counts)
-  box.append(more,button('シミュレーションを実行',()=>{
+  box.append(more,timelineEditor(),button('シミュレーションを実行',()=>{
     simulation=simulate(graph,person);matrix=simulationCases(graph,person)
     show()
   },'primary'))
@@ -1059,6 +1047,7 @@ function resultView() {
   const output=node('div')
   output.id='simulation-result'
   if (simulation) {
+    const trace=button('通過経路をフローで見る',()=>{choosePiece('workspace');refreshCardSelection();if(mobileUI())$('#workspace').scrollIntoView({block:'start'})});output.append(trace)
     const list=node('ol',null,'log')
     const formatter=new Intl.DateTimeFormat('ja-JP',{timeZone:person.zone,month:'numeric',day:'numeric',
       hour:'2-digit',minute:'2-digit',hourCycle:'h23'})
@@ -1066,7 +1055,7 @@ function resultView() {
       const row=node('li',null,event.state)
       const time=node('time',formatter.format(new Date(event.at)))
       time.dateTime=event.at
-      row.append(time,node('strong',event.name),node('p',(event.state==='held'?'保留・除外　':'')+event.detail))
+      row.append(time,node('strong',event.name),node('p',(event.state==='held'?'保留・除外　':'')+event.detail));if(event.type!=='event')row.append(button('ステップへ移動',()=>selectStep(event.id)))
       if (event.message) {
         const detail=node('details')
         detail.append(node('summary','送信内容'),messagePreview(event.message,event.rich))
@@ -1098,7 +1087,8 @@ function resultView() {
     }
   }
   wrap.append(matrixRoot)
-  if (!demo && scenario && !dirty && simulation?.count>0) {
+  if(person.timeline?.length&&simulation)wrap.append(node('p','時系列テストは模擬専用です。実LINEへテスト送信する場合は状態変化をすべて消して再実行してください。','field-hint'))
+  if (!demo && scenario && !dirty && simulation?.count>0 && !person.timeline?.length) {
     const send=button('実LINEテスト送信・履歴',testDelivery)
     send.id='test-delivery'
     wrap.append(send)
@@ -1263,7 +1253,7 @@ function publication() {
 
 function inspector() {
   const root=$('#inspector')
-  if (!graph) {root.replaceChildren(panelHead('設定・プレビュー'));return}
+  if (!graph) {const head=panelHead('設定・プレビュー');head.append(sheetClose());root.replaceChildren(head,node('p','シナリオを選択してください。','empty'));return}
   const tabs=node('nav',null,'tabs')
   tabs.setAttribute('aria-label','シナリオの設定')
   for (const [id,label] of Object.entries({edit:'ステップ',settings:'設定',test:'テスト',publish:'公開版',metrics:'実績'})) {
@@ -1274,7 +1264,7 @@ function inspector() {
   const panel=node('div',null,'panelbody')
   const chosen={edit:editStep,settings,test:resultView,publish:publication,metrics:metricsView}
   const validation=node('div',null,'validation-panel');validation.id='validation-panel';panel.append(validation,chosen[tab]())
-  root.replaceChildren(panelHead('設定・プレビュー'),tabs,panel);updateValidation()
+  const head=panelHead('設定・プレビュー');head.append(sheetClose());root.replaceChildren(head,tabs,panel);updateValidation()
 }
 
 function show() {
@@ -1283,11 +1273,11 @@ function show() {
 }
 
 function applyPanelMode(){
-  const layout=$('#layout');layout.classList.toggle('hide-library',hideLibrary);layout.classList.toggle('hide-inspector',hideInspector);layout.classList.toggle('focus-mode',focusMode)
+  const layout=$('#layout');layout.style.setProperty('--library-width',libraryWidth+'px');layout.style.setProperty('--inspector-width',inspectorWidth+'px');layout.classList.toggle('hide-library',hideLibrary);layout.classList.toggle('hide-inspector',hideInspector);layout.classList.toggle('focus-mode',focusMode)
 }
 function validationIssues(){
   if(!graph)return []
-  const errors=limits()
+  const errors=limits().filter(e=>e.message!=='開始ステップから到達できないステップがあります。')
   if(graph.entry){const seen=new Set(),map=new Map(graph.nodes.map(n=>[n.id,n])),stack=[graph.entry];while(stack.length){const id=stack.pop();if(seen.has(id)||!map.has(id))continue;seen.add(id);stack.push(...links(map.get(id)))}for(const n of graph.nodes)if(!seen.has(n.id))errors.push({message:'開始条件から到達できないステップ：'+n.name,nodeId:n.id})}
   if(!Object.hasOwn(liveTriggers[graph.purpose]??{},graph.trigger))errors.push({message:'この開始イベントは実配信に未対応です。',nodeId:null})
   const channel=channels.find(c=>c.id===graph.channel)
@@ -1298,12 +1288,14 @@ function validationIssues(){
   }
   return errors
 }
-function updateValidation(){
+function updateValidation(){if(validationFrame)return;validationFrame=requestAnimationFrame(()=>{validationFrame=0;paintValidation()})}
+function paintValidation(){
   if(!graph)return
   const issues=validationIssues(),byStep=new Map()
   for(const issue of issues)if(issue.nodeId&&!byStep.has(issue.nodeId))byStep.set(issue.nodeId,issue.message)
   for(const card of document.querySelectorAll('[data-step-id]')){const msg=byStep.get(card.dataset.stepId);card.classList.toggle('invalid-step',!!msg);const badge=card.querySelector('.step-error');if(badge){badge.hidden=!msg;badge.textContent=msg?'⚠ '+msg:''}}
   const panel=$('#validation-panel');if(!panel)return
+  const sig=JSON.stringify(issues);if(panel.dataset.signature===sig)return;panel.dataset.signature=sig
   const summary=node('details',null,'live-check '+(issues.length?'has-errors':'no-errors'))
   summary.append(node('summary',issues.length?'⚠ 設定の確認 '+issues.length+'件':'✓ フローの設定に問題なし'))
   const list=node('div',null,'validation-list')
@@ -1332,7 +1324,7 @@ function openStepSearch(){
 }
 function makeMinimap(){
   const area=node('section',null,'minimap'),head=node('div',null,'minimap-head');head.append(node('strong','フローの全体像'),node('small',graph.nodes.length+' ステップ'),button('閉じる',()=>{minimapOpen=false;show()}));area.append(head,miniGraph())
-  const map=node('div',null,'minimap-nodes');for(const n of stepOutline(graph)){const b=button('',()=>selectStep(n.id),'minimap-node '+n.type+(n.id===selection?' selected':''));b.append(node('span',icons[n.type]),node('small',n.name));b.title=n.name;b.setAttribute('aria-label','移動：'+n.name);b.dataset.depth=String(Math.min(n.depth,3));map.append(b)}area.append(map);return area
+  const map=node('div',null,'minimap-nodes');for(const n of stepOutline(graph)){const b=button('',()=>selectStep(n.id),'minimap-node '+n.type+(n.id===selection?' selected':''));b.append(node('span',icons[n.type]),node('small',n.name));b.dataset.mapId=n.id;b.title=n.name;b.setAttribute('aria-label','移動：'+n.name);b.dataset.depth=String(Math.min(n.depth,3));map.append(b)}area.append(map);return area
 }
 function miniGraph(){
   const ns='http://www.w3.org/2000/svg',make=(tag,attrs={})=>{const el=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))el.setAttribute(k,String(v));return el}
@@ -1346,12 +1338,12 @@ function miniGraph(){
   for(const [col,list] of columns)list.forEach((n,i)=>points.set(n.id,{x:col*54+38,y:height/2+(i-(list.length-1)/2)*27}))
   const svg=make('svg',{viewBox:`0 0 ${width} ${height}`,class:'mini-graph',role:'img','aria-label':'分岐と接続の縮小表示'})
   for(const n of graph.nodes){const a=points.get(n.id);if(!a)continue;for(const [i,target] of links(n).entries()){const b=points.get(target);if(!b)continue;svg.append(make('path',{d:`M${a.x+12} ${a.y} C${(a.x+b.x)/2} ${a.y},${(a.x+b.x)/2} ${b.y},${b.x-12} ${b.y}`,fill:'none',stroke:n.type==='branch'?(i===0?'#72d6b4':'#ffc17c'):'#a7a3cf','stroke-width':1.5}))}}
-  for(const n of outline){const {x,y}=points.get(n.id),g=make('g',{class:'mini-svg-node'});g.append(make('rect',{x:x-12,y:y-8,width:24,height:16,rx:5,fill:n.type==='branch'?'#845f38':n.type==='message'?'#285f58':n.type==='end'?'#394155':'#444071',stroke:n.id===selection?'#ebe2ff':'#9d9bc3','stroke-width':n.id===selection?3:1.2}));const title=make('title');title.textContent=n.name;g.append(title);g.addEventListener('click',()=>selectStep(n.id));svg.append(g)}return svg
+  for(const n of outline){const {x,y}=points.get(n.id),g=make('g',{class:'mini-svg-node','data-map-id':n.id});g.append(make('rect',{x:x-12,y:y-8,width:24,height:16,rx:5,fill:n.type==='branch'?'#845f38':n.type==='message'?'#285f58':n.type==='end'?'#394155':'#444071',stroke:n.id===selection?'#ebe2ff':'#9d9bc3','stroke-width':n.id===selection?3:1.2}));const title=make('title');title.textContent=n.name;g.append(title);g.addEventListener('click',()=>selectStep(n.id));svg.append(g)}return svg
 }
 function messagePreview(body,rich){
   if(!rich)return node('p',body,'bubble')
   const box=node('div',null,'line-card-preview')
-  if(rich.imageUrl){const img=node('div',null,'line-image-placeholder');img.append(node('strong','▧ 画像'),node('small',publicHttps(rich.imageUrl)?'LINE送信時に画像を表示':'画像URLが未設定'));if(publicHttps(rich.imageUrl)){const a=node('a','画像を別タブで確認');a.href=rich.imageUrl;a.target='_blank';a.rel='noopener noreferrer';img.append(a,button('画像をプレビュー',()=>{const photo=node('img');photo.alt='配信する画像';photo.referrerPolicy='no-referrer';photo.src=rich.imageUrl;photo.addEventListener('error',()=>{img.replaceChildren(node('p','画像を表示できません。公開URLを確認してください。'))});img.replaceChildren(photo)}))}box.append(img)}
+  if(rich.imageUrl){const img=node('div',null,'line-image-placeholder');let own=false;try{const u=new URL(rich.imageUrl,location.origin);own=u.origin===location.origin&&/^\/line-media\/[0-9a-f-]{36}\.jpg$/i.test(u.pathname)}catch{}if(own){const photo=node('img');photo.src=rich.imageUrl;photo.alt='配信用画像';photo.referrerPolicy='no-referrer';photo.addEventListener('error',()=>img.replaceChildren(node('p','画像を表示できません。')));img.append(photo);box.append(img)}else{img.append(node('strong','▧ 画像'),node('small',publicHttps(rich.imageUrl)?'LINE送信時に画像を表示':'画像URLが未設定'));if(publicHttps(rich.imageUrl)){const a=node('a','画像を別タブで確認');a.href=rich.imageUrl;a.target='_blank';a.rel='noopener noreferrer';img.append(a,button('画像をプレビュー',()=>{const photo=node('img');photo.alt='配信する画像';photo.referrerPolicy='no-referrer';photo.src=rich.imageUrl;photo.addEventListener('error',()=>{img.replaceChildren(node('p','画像を表示できません。公開URLを確認してください。'))});img.replaceChildren(photo)}))}box.append(img)}}
   if(rich.title)box.append(node('strong',rich.title,'line-card-title'))
   box.append(node('p',body,'line-card-body'))
   for(const b of rich.buttons??[]){const row=node('div',null,'line-action');row.append(node('strong',b.label||'ボタン名未設定'),node('small',b.url||'URL未設定'));box.append(row)}
@@ -1374,7 +1366,7 @@ function openWizard(empty=false){
   function candidate(){const flow=wizardFlow({purpose,name,channel,trigger,triggerTag:tag,first,follow,minutes,skipBooked});if(empty){flow.entry='end';flow.nodes=[{id:'end',type:'end',name:'終了'}]}return flow}
   function render(){box.replaceChildren();box.append(node('p','目的・開始条件 → メッセージ → 確認　 '+(stage+1)+'/3','wizard-progress'))
     if(stage===0){box.append(field('用途',purpose,v=>{purpose=v;defaults();render()},{items:choices}),field('シナリオ名',name,v=>{name=v},{event:'input',attributes:{maxlength:'100'}}),field('配信する公式LINE',channel,v=>{channel=v},{items:Object.fromEntries(channels.filter(c=>c.purpose===purpose||c.purpose==='shared').map(c=>[c.id,c.label]))}),field('何をきっかけに開始しますか？',trigger,v=>{trigger=v;render()},{items:Object.fromEntries(Object.entries(liveTriggers[purpose]).filter(([k])=>k!=='tag_campaign'&&(k!=='tag_added'||applicantCatalog.enabled)))}));if(trigger==='tag_added')box.append(field('きっかけのタグ',tag,v=>{tag=v},{items:applicantTagOptions(tag)}))}
-    if(stage===1&&!empty){box.append(field('最初に送るメッセージ',first,v=>{first=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内文（不要なら空欄）',follow,v=>{follow=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内までの時間',amount,v=>{amount=v;minutes=amount*unit},{type:'number',attributes:{min:'1',max:'525600'}}),field('時間の単位',String(unit),v=>{unit=Number(v);minutes=amount*unit},{items:{'1':'分','60':'時間','1440':'日'}}),field('予約した方には再案内しない',skipBooked,v=>{skipBooked=v},{type:'checkbox'}),node('p','同意・店長対応・停止など実際の送信直前条件も従来どおり確認します。','field-hint'))}
+    if(stage===1&&!empty){box.append(field('最初に送るメッセージ',first,v=>{first=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内文（不要なら空欄）',follow,v=>{follow=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内までの時間',amount,v=>{amount=v;minutes=amount*unit},{type:'number',event:'input',attributes:{min:'1',max:'525600'}}),field('時間の単位',String(unit),v=>{unit=Number(v);minutes=amount*unit},{items:{'1':'分','60':'時間','1440':'日'}}),field('予約した方には再案内しない',skipBooked,v=>{skipBooked=v},{type:'checkbox'}),node('p','同意・店長対応・停止など実際の送信直前条件も従来どおり確認します。','field-hint'))}
     if(stage===2){const flow=candidate(),errs=validate(flow,true);box.append(node('h3',flow.name),node('p','開始：'+triggers[trigger]+' ／ '+channels.find(c=>c.id===channel)?.label));for(const n of stepOutline(flow))box.append(node('p',icons[n.type]+' '+n.name,'wizard-step'));for(const err of errs)box.append(node('p',err.message,'held-note'));const create=button('この内容で下書きを作成',()=>{$('#dialog').close();draftScenario(flow)},'primary');create.disabled=!!errs.length;box.append(create)}
     const nav=node('div',null,'controls');if(stage>0)nav.append(button('戻る',()=>{stage=empty?0:stage-1;render()}));if(stage<2)nav.append(button('次へ',()=>{if(stage===0&&(!name.trim()||!channel||trigger==='tag_added'&&!tag))throw new Error('名称・LINE・開始条件を選択してください。');stage=empty?2:stage+1;render()},'primary'));box.append(nav)
   }
@@ -1424,20 +1416,95 @@ function renderPresence(){
   root.classList.toggle('conflict',!!conflict)
 }
 
+function toggleAuto(){autosave=!autosave;try{localStorage.setItem('npl-studio-auto-v2:'+currentSession.actor.id,String(autosave))}catch{}workbar();scheduleSave()}
+function savePrefs(){try{const k=prefKey();if(k)localStorage.setItem(k,JSON.stringify({theme,viewMode,zoom,hideLibrary,hideInspector,libraryWidth,inspectorWidth,focusMode}))}catch{}}
+function loadPrefs(){try{const p=JSON.parse(localStorage.getItem(prefKey()));if(p){theme=p.theme==='light'?'light':'dark';viewMode=p.viewMode==='graph'?'graph':'basic';zoom=Math.max(.35,Math.min(1.5,Number(p.zoom)||1));hideLibrary=p.hideLibrary!==false;hideInspector=p.hideInspector===true;focusMode=p.focusMode===true;libraryWidth=Math.max(175,Math.min(380,Number(p.libraryWidth)||220));inspectorWidth=Math.max(275,Math.min(600,Number(p.inspectorWidth)||355))}}catch{}document.documentElement.dataset.theme=theme;applyPanelMode()}
+function toggleTheme(){theme=theme==='dark'?'light':'dark';document.documentElement.dataset.theme=theme;savePrefs();announce(theme==='light'?'ライトモードに切り替えました。':'ダークモードに切り替えました。')}
+function syncStatusUI(){
+  if(!graph)return
+  const published=scenario?.published_version,stored=scenario?.draft_matches_published??(demo&&!!scenario?.versions?.find(v=>v.version===published&&JSON.stringify(v.graph)===JSON.stringify(graph))),match=!!stored&&!dirty
+  const live=$('#live-status');if(live){live.dataset.status=published?(scenario.stopped?'stopped':'live'):'unpublished';const liveLabel=scenario?.published_channel?channels.find(c=>c.id===scenario.published_channel)?.label:'';live.textContent=published?(scenario.stopped?'■ 公開停止中':'● 稼働中')+' v'+published+(liveLabel&&scenario.published_channel!==graph.channel?'（'+liveLabel+'）':'')+(match?' · 公開版と同じ':' · 下書きは未反映'):(scenario?.is_template?'テンプレート・配信なし':'○ 未公開のシナリオ')}
+  const badge=$('#draft-badge');if(badge){badge.textContent=dirty?'編集中・未保存':published?(match?'公開版と一致':'未反映の下書き'):steps[scenario?.state??'draft'];badge.classList.toggle('warn',dirty||!!published&&!match)}
+  const title=$('#workbar .work-context strong');if(title)title.textContent=graph.name||'名称未設定'
+}
+function sheetClose(){const b=button('閉じる ×',()=>choosePiece('workspace'),'sheet-close');b.setAttribute('aria-label','編集パネルを閉じる');return b}
+function installPanelResizers(){for(const [id,kind,sign] of [['library-resize','library',1],['inspector-resize','inspector',-1]]){const handle=$('#'+id);const set=value=>{const max=kind==='library'?Math.min(380,innerWidth*.3):Math.min(600,innerWidth*.49);const width=Math.round(Math.max(kind==='library'?175:275,Math.min(max,value)));if(kind==='library')libraryWidth=width;else inspectorWidth=width;applyPanelMode();handle.setAttribute('aria-valuenow',String(width))};handle.addEventListener('pointerdown',e=>{if(e.button!==0||mobileUI())return;e.preventDefault();const start=e.clientX,initial=kind==='library'?libraryWidth:inspectorWidth;handle.setPointerCapture(e.pointerId);const c=new AbortController(),{signal}=c;document.body.classList.add('resizing-panels');handle.addEventListener('pointermove',x=>set(initial+(x.clientX-start)*sign),{signal});const stop=()=>{c.abort();document.body.classList.remove('resizing-panels');savePrefs()};handle.addEventListener('pointerup',stop,{signal});handle.addEventListener('pointercancel',stop,{signal})});handle.addEventListener('keydown',e=>{if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();set((kind==='library'?libraryWidth:inspectorWidth)+(e.key==='ArrowRight'?16:-16)*sign);savePrefs()})}}
+function cardById(id){return [...document.querySelectorAll('#workspace [data-step-id]')].find(c=>c.dataset.stepId===id)}
+function refreshCardSelection(){
+  if(!graph)return
+  const traces=new Map((simulation?.events??[]).filter(e=>e.type!=='event').map(e=>[e.id,e]));for(const card of document.querySelectorAll('#workspace [data-step-id]')){const selected=card.dataset.stepId===selection,checked=selectedSteps.has(card.dataset.stepId),trace=traces.get(card.dataset.stepId);card.classList.toggle('selected',selected);card.classList.toggle('multi-selected',checked);card.classList.toggle('trace-passed',!!trace&&trace.state!=='held');card.classList.toggle('trace-held',trace?.state==='held');card.setAttribute('aria-pressed',String(multiSelect?checked:selected))}
+  for(const lane of document.querySelectorAll('[data-route]')){const [id,key]=lane.dataset.route.split(':');lane.classList.toggle('trace-route',traces.get(id)?.branch===key)}
+  for(const m of document.querySelectorAll('[data-map-id]'))m.classList.toggle('selected',m.dataset.mapId===selection)
+  let bar=$('#selection-bar');if(!bar){bar=node('div',null,'selection-bar');bar.id='selection-bar';$('#workspace .toolbar')?.after(bar)}
+  if(!bar)return;bar.replaceChildren();bar.hidden=!multiSelect&&!moveIntent&&!connectIntent&&!simulation
+  if(moveIntent||connectIntent){bar.append(node('strong',moveIntent?'移動先の＋を選択':'接続するステップを選択'),button('キャンセル',()=>{moveIntent=null;connectIntent=null;refreshCardSelection()}));return}
+  if(multiSelect){const ids=[...selectedSteps];bar.append(node('strong',ids.length+'ステップ選択中'),button('コピー',()=>copySelected(ids)),button('移動',()=>startMove(ids)),button('選択解除',()=>{selectedSteps.clear();refreshCardSelection()}));return}
+  if(simulation)bar.append(node('strong','模擬経路：緑＝通過／橙＝保留'),button('表示を解除',()=>{simulation=null;matrix=null;refreshCardSelection();if(tab==='test')inspector()}))
+}
+function toggleMultiSelect(){multiSelect=!multiSelect;selectedSteps=new Set(multiSelect&&selection?[selection]:[]);moveIntent=null;connectIntent=null;flowView();$('#multi-select-toggle')?.setAttribute('aria-pressed',String(multiSelect))}
+function cardClick(e,id){if(e.defaultPrevented||navLoading||busy||performance.now()<(holdSuppression??0))return;if(connectIntent){confirmReconnect(connectIntent,id).catch(err=>announce(err.message,true));return}if(moveIntent){announce('移動先の＋を選択してください。');return}if(multiSelect||e.shiftKey||e.metaKey||e.ctrlKey){if(!multiSelect)multiSelect=true;if(e.shiftKey){for(const key of selectOutlineRange(graph,selection,id))selectedSteps.add(key)}else if(selectedSteps.has(id))selectedSteps.delete(id);else selectedSteps.add(id);selection=id;refreshCardSelection();const toggle=$('#multi-select-toggle');if(toggle){toggle.textContent='選択終了';toggle.setAttribute('aria-pressed','true')};return}selectStep(id)}
+function startMove(ids){if(!ids.length||!stepBlock(graph,ids))throw new Error('一つにつながる範囲を選択してください。');if(ids.some(id=>graph.nodes.find(n=>n.id===id)?.type==='end'))throw new Error('終了ステップは移動対象から外してください。');moveIntent={ids:[...ids],source:JSON.stringify(graph)};connectIntent=null;choosePiece('workspace');refreshCardSelection()}
+function startConnect(edge){connectIntent=edge;moveIntent=null;choosePiece('workspace');refreshCardSelection()}
+async function confirmMove(edge,ids=moveIntent?.ids){if(!ids?.length)return;const result=moveStepBlock(graph,ids,edge);if(!result){announce('この位置には移動できません。共通経路・終了を含まない、入口と出口が一つの範囲を選択してください。',true);return}const before=JSON.stringify(graph);if(!await ask('選択範囲を別の経路へ移動しますか？',ids.length+'ステップを「'+edgeDescription(edge)+'」へ移動します。配信経路が変わります。公開前にテストしてください。'))return;if(JSON.stringify(graph)!==before)return announce('編集中の内容が変わりました。再操作してください。',true);moveIntent=null;multiSelect=false;selectedSteps.clear();update(()=>{graph=result.flow;selection=result.entry});selectStep(result.entry,{open:!mobileUI()});announce('経路を移動しました。取り消しできます。')}
+async function confirmReconnect(edge,target){
+  const candidate=reconnectEdge(graph,edge,target);if(!candidate){announce('循環する接続、同じ接続先、または無効な接続は設定できません。',true);return}
+  const before=JSON.stringify(graph);const description=edgeDescription(edge)+'：'+nameOf(edgeTarget(graph,edge))+' → '+nameOf(target)+(candidate.detached.length?'。未接続になる '+candidate.detached.length+'件は下書きに残り、公開前に修正が必要です。':'。既存のステップは維持します。')
+  if(!await ask('接続先を変更しますか？',description))return;if(JSON.stringify(graph)!==before)return announce('編集中の内容が変わりました。再操作してください。',true);connectIntent=null;update(()=>{graph=candidate.flow;selection=target});selectStep(target,{open:!mobileUI()});announce('接続先を変更しました。取り消しできます。')
+}
+function installDirectDrag(handle,kind,value){let suppress=false;handle.addEventListener('click',e=>{if(suppress){suppress=false;e.preventDefault();e.stopImmediatePropagation()}},true);handle.addEventListener('pointerdown',e=>{if(e.button!==0||navLoading||busy)return;const origin=[e.clientX,e.clientY],controller=new AbortController(),{signal}=controller;let active=false,target=null;function clean(){controller.abort();target?.classList.remove('direct-drop');document.body.classList.remove('direct-drag')}
+  document.addEventListener('pointermove',m=>{if(m.pointerId!==e.pointerId)return;if(!active&&Math.hypot(m.clientX-origin[0],m.clientY-origin[1])<8)return;active=true;m.preventDefault();document.body.classList.add('direct-drag');const elem=document.elementFromPoint(m.clientX,m.clientY);const next=elem?.closest(kind==='link'?'[data-step-id]':'.edge-add');if(next!==target){target?.classList.remove('direct-drop');target=next;target?.classList.add('direct-drop')}},{signal,passive:false});document.addEventListener('pointerup',m=>{if(m.pointerId!==e.pointerId)return;const destination=target;clean();if(!active)return;suppress=true;setTimeout(()=>suppress=false,450);if(!destination)return announce('目的の接続先へドラッグしてください。');if(kind==='link')confirmReconnect(value,destination.dataset.stepId).catch(err=>announce(err.message,true));else confirmMove({owner:destination.dataset.edgeOwner||null,key:destination.dataset.edgeKey},value).catch(err=>announce(err.message,true))},{signal});document.addEventListener('pointercancel',clean,{signal});window.addEventListener('blur',clean,{signal,once:true})})}
+let holdSuppression=0
+function installCardHold(card,id){let timer=null,start=null;const stop=()=>{clearTimeout(timer);timer=null;start=null};card.addEventListener('touchstart',e=>{if(e.target.closest('.step-grip')||e.touches.length!==1)return;start=[e.touches[0].clientX,e.touches[0].clientY];timer=setTimeout(()=>{holdSuppression=performance.now()+900;stop();openStepActions(id)},500)},{passive:true});card.addEventListener('touchmove',e=>{if(start&&Math.hypot(e.touches[0].clientX-start[0],e.touches[0].clientY-start[1])>10)stop()},{passive:true});card.addEventListener('touchend',stop);card.addEventListener('touchcancel',stop)}
+function renameInline(id){const card=cardById(id),item=graph.nodes.find(n=>n.id===id);if(!card||!item)return;const shell=card.closest('.node-shell');if(shell.querySelector('.inline-rename'))return;const input=node('input');input.className='inline-rename';input.value=item.name;input.maxLength=100;input.setAttribute('aria-label','ステップ名を編集');shell.append(input);input.focus();input.select();let done=false;const finish=commit=>{if(done)return;done=true;const name=input.value.trim();input.remove();if(commit&&name&&item.name!==name)update(()=>{item.name=name},false,id+':name');const text=card.querySelector('.node-content strong');if(text)text.textContent=item.name;if(selection===id&&tab==='edit'){const field=[...$('#inspector').querySelectorAll('label.field')].find(l=>l.querySelector('span')?.textContent==='ステップ名')?.querySelector('input');if(field)field.value=item.name}for(const map of document.querySelectorAll('[data-map-id]'))if(map.dataset.mapId===id){const label=map.querySelector('small,title');if(label)label.textContent=item.name;map.setAttribute('aria-label','移動：'+item.name);if(map.tagName.toLowerCase()==='button')map.title=item.name}for(const el of card.closest('.node-shell').querySelectorAll('.card-actions button')){el.setAttribute('aria-label',(el.classList.contains('move-handle')?'経路を移動：':'ステップ操作：')+item.name)}card.focus({preventScroll:true})};input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();finish(true)}else if(e.key==='Escape'){e.preventDefault();finish(false)}});input.addEventListener('blur',()=>finish(true))}
+function openStepActions(id){if(!graph?.nodes.some(n=>n.id===id)||$('#dialog').open)return;const item=graph.nodes.find(n=>n.id===id),box=node('div',null,'insert-picker'),act=(label,fn)=>button(label,()=>{$('#dialog').close();fn()});box.append(act('設定を開く',()=>selectStep(id)));if(item.type==='message')box.append(act('メッセージ専用編集',()=>openMessageComposer(id)));box.append(act('名前を変更',()=>renameInline(id)),act('コピー',()=>copySelected([id])),act('このステップを移動',()=>startMove([id])),act('削除',()=>{const content=button('削除を確定',()=>{$('#dialog').close();removeStep(item)},'danger');dialog('ステップを削除','接続が変更されます。公開版は変わりません。',content)}));dialog(item.name||kinds[item.type],'ステップの操作',box)}
+function openCanvasTools(){const box=node('div',null,'insert-picker'),act=(label,fn)=>button(label,()=>{$('#dialog').close();fn()});box.append(act(minimapOpen?'ミニマップを閉じる':'ミニマップを表示',()=>{minimapOpen=!minimapOpen;flowView()}),act('コピー・貼り付け',openStepCopy),act('配信実績',()=>{tab='metrics';inspector();choosePiece('inspector');loadMetrics()}),act('全分岐を開く',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,true);flowView()}),act('分岐を折りたたむ',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,false);flowView()}),act('画面表示を切り替える',()=>{viewMode=viewMode==='graph'?'basic':'graph';savePrefs();show()}));dialog('フローのツール','表示や複製・実績を操作します。',box)}
+function zoomCanvas(value,anchor){const board=$('#workspace .canvas'),scroll=$('#workspace .canvas-scroll');if(!board||viewMode!=='graph')return;const old=zoom,next=Math.max(.35,Math.min(1.5,value));const scale=next/old,p=scroll.getBoundingClientRect(),x=anchor?anchor.clientX-p.left:scroll.clientWidth/2,y=anchor?anchor.clientY-p.top:scroll.clientHeight/2;const l=(scroll.scrollLeft+x)*scale-x,t=(scroll.scrollTop+y)*scale-y;zoom=next;board.style.zoom=String(next);scroll.scrollLeft=Math.max(0,l);scroll.scrollTop=Math.max(0,t);if($('#zoom-level'))$('#zoom-level').textContent=Math.round(zoom*100)+'%';savePrefs()}
+let panSpace=false
+function installCanvasPan(scroll,board){if(viewMode!=='graph')return;scroll.addEventListener('wheel',e=>{if((e.ctrlKey||e.metaKey)&&!mobileUI()){e.preventDefault();zoomCanvas(zoom*(e.deltaY>0?.92:1.08),e)}},{passive:false});scroll.addEventListener('pointerdown',e=>{if(mobileUI()||e.button!==1&&(!panSpace||e.button!==0))return;e.preventDefault();const x=e.clientX,y=e.clientY,left=scroll.scrollLeft,top=scroll.scrollTop,c=new AbortController(),{signal}=c;scroll.setPointerCapture(e.pointerId);scroll.classList.add('panning');scroll.addEventListener('pointermove',m=>{scroll.scrollLeft=left+x-m.clientX;scroll.scrollTop=top+y-m.clientY},{signal});const stop=()=>{c.abort();scroll.classList.remove('panning')};scroll.addEventListener('pointerup',stop,{signal});scroll.addEventListener('pointercancel',stop,{signal})})}
+function resetTestOutput(){simulation=null;matrix=null;$('#simulation-result')?.replaceChildren();$('#matrix-result')?.replaceChildren();const tested=$('#mark-tested');if(tested)tested.disabled=true;$('#test-delivery')?.remove();refreshCardSelection()}
+function timelineEditor(){const box=node('details',null,'timeline-editor');box.open=!!person.timeline?.length;box.append(node('summary','途中の状態変化を追加（時系列テスト）'));const rows=node('div');box.append(node('p','開始時刻からの経過時間を指定します。予約・返信・同意撤回などが途中で起きる場合の模擬です。実際のLINE送信は行いません。','field-hint'),rows);person.timeline??=[];function render(){rows.replaceChildren();person.timeline.forEach((event,i)=>{const row=node('section',null,'rule-row'),t=timeUnit(event.afterMinutes);let amount=t.value,unit=t.unit;const time=node('div',null,'row');time.append(field('開始からの時間',amount,v=>{amount=v;event.afterMinutes=v*unit;resetTestOutput()},{type:'number',event:'input',attributes:{min:'0',max:'525600'}}),field('単位',String(unit),v=>{unit=Number(v);event.afterMinutes=amount*unit;resetTestOutput()},{items:{'1':'分','60':'時間','1440':'日'}}));row.append(node('strong','状態変化 '+(i+1)),time,field('起きたこと',event.action,v=>{event.action=v;resetTestOutput();render()},{items:timelineActions}));if(['tag_add','tag_remove'].includes(event.action))row.append(tagField('対象タグ',event.tag??'',v=>{event.tag=v;resetTestOutput()}));if(event.action==='book')row.append(field('予約した面談日時（任意）',event.bookingAt??'',v=>{event.bookingAt=v;resetTestOutput()},{type:'datetime-local'}));row.append(button('削除',()=>{person.timeline.splice(i,1);resetTestOutput();render()}));rows.append(row)});const add=button('＋ 状態変化を追加',()=>{person.timeline.push({afterMinutes:180,action:'reply'});resetTestOutput();render()});add.disabled=person.timeline.length>=20;rows.append(add);if(person.timeline.length)rows.append(button('状態変化をすべて消す',()=>{person.timeline=[];resetTestOutput();render()}))}render();return box}
+
+function openMessageComposer(id){
+  const originalStep=graph.nodes.find(n=>n.id===id);if(originalStep?.type!=='message')return
+  const draft=structuredClone(originalStep),snapshot=JSON.stringify(originalStep),originStore=store.id,originScenario=scenario?.id,box=node('div',null,'composer'),edit=node('section',null,'composer-edit'),side=node('section',null,'composer-side'),form=node('div',null,'composer-config'),preview=node('div',null,'composer-phone'),actions=node('div',null,'composer-actions'),status=node('p','','field-hint')
+  const bodyLabel=field('メッセージ本文',draft.body,v=>{draft.body=v;renderPreview()},{type:'textarea',event:'input',attributes:{maxlength:draft.rich?'1000':'5000',placeholder:'応募者へ送る案内を入力'}}),textarea=bodyLabel.querySelector('textarea')
+  const name=field('ステップ名',draft.name,v=>{draft.name=v},{event:'input',attributes:{maxlength:'100'}})
+  const kind=field('形式',draft.rich?.kind??'text',v=>{if(v==='text')delete draft.rich;else draft.rich={kind:v,title:v==='card'?(draft.rich?.title||'ご案内'):draft.rich?.title??'',imageUrl:draft.rich?.imageUrl??'',buttons:draft.rich?.buttons?.length?draft.rich.buttons:v==='buttons'?[{label:'詳細を見る',url:''}]:[]};textarea.maxLength=draft.rich?1000:5000;renderConfig();renderPreview()},{items:{text:'テキスト',image:'画像付き',buttons:'ボタン付き',card:'カード'}})
+  const quick=node('div',null,'composer-quick'),phrases=node('details',null,'composer-phrases');phrases.append(node('summary','絵文字・定型文'))
+  function insert(value){const start=textarea.selectionStart,end=textarea.selectionEnd,total=textarea.value.length-(end-start)+value.length;if(total>textarea.maxLength){status.textContent='文字数の上限を超えます。';return}textarea.setRangeText(value,start,end,'end');draft.body=textarea.value;textarea.focus();renderPreview()}
+  for(const [label,value] of [['お名前','{{name}}'],['店舗名','{{store}}'],['面談・予約URL',graph.purpose==='recruitment'?'{{interview_link}}':'{{customer_link}}'],['予約日時','{{booking}}']])quick.append(button(label,()=>insert(value),'chip'))
+  const phraseList=node('div',null,'controls');for(const value of ['🙂','✨','📅','🙇','ご応募ありがとうございます。','ご希望の日時をご選択ください。','ご不明点はこのトークへご連絡ください。'])phraseList.append(button(value,()=>insert(value),'chip'));phrases.append(phraseList)
+  let discardArmed=false,uploading=false
+  const apply=button('下書きに反映',()=>{if(uploading)return;if(store.id!==originStore||scenario?.id!==originScenario&&originScenario||!graph.nodes.some(n=>n.id===id))throw new Error('編集対象が変わりました。開き直してください。');if(!draft.name.trim())throw new Error('ステップ名を入力してください。');const current=graph.nodes.find(n=>n.id===id);if(JSON.stringify(current)!==snapshot)throw new Error('ステップが別の操作で変わりました。開き直してください。');$('#dialog').close();update(()=>{Object.assign(current,draft);if(!draft.rich)delete current.rich;selection=id;tab='edit'});announce('メッセージを下書きに反映しました。公開版は変わりません。')},'primary')
+  const cancel=button('閉じる',()=>{if(uploading){status.textContent='アップロード中です。完了をお待ちください。';return}if(JSON.stringify(draft)!==snapshot&&!discardArmed){discardArmed=true;cancel.textContent='未反映の変更を破棄';status.textContent='下書きに反映しない場合は、もう一度押して閉じます。';return}$('#dialog').close()})
+  actions.append(status,cancel,apply)
+  function renderPreview(){discardArmed=false;cancel.textContent='閉じる';const result=renderMessage(draft.body,person);preview.replaceChildren(node('div',store.name+' · LINE','composer-phone-head'),messagePreview(result.reason??(result.message||'本文を入力してください。'),draft.rich));status.textContent=draft.body.length+'/'+textarea.maxLength+'文字 · 下書きに反映してから保存・公開';apply.disabled=uploading||draft.body.length>textarea.maxLength}
+  function configureImage(rich,control){const fieldUrl=field('公開画像URL',rich.imageUrl??'',v=>{rich.imageUrl=v;renderPreview()},{event:'input',attributes:{maxlength:'2000'}});control.append(fieldUrl);if(demo){control.append(node('p','デモでは画像URLを指定できます。アップロードは管理画面で利用できます。','field-hint'));return}
+    const file=node('input');file.type='file';file.accept='image/jpeg,image/png';file.setAttribute('aria-label','JPEGまたはPNG画像を選択');const consent=node('label',null,'check media-consent'),checked=node('input');checked.type='checkbox';consent.append(checked,node('span','LINE配信に使う公開画像としてアップロードする（個人情報を含めない）'));const info=node('p','JPEG/PNG・4MBまで。画像は自動圧縮し、最大1600pxに調整します。URLを知る人は画像を閲覧できます。','field-hint')
+    const upload=button('画像をアップロード',async()=>{if(!checked.checked||!file.files?.[0])throw new Error('画像と公開の確認を選択してください。');const selected=file.files[0];if(!['image/jpeg','image/png'].includes(selected.type)||selected.size>4*1024*1024)throw new Error('JPEG/PNG、4MB以下を選択してください。');upload.disabled=true;uploading=true;apply.disabled=true;info.textContent='画像を圧縮・アップロード中…';try{const response=await fetch(workspacePath('/api/v1/stores/'+originStore+'/scenarios/media'),{method:'POST',headers:{'Content-Type':selected.type},body:selected});const payload=await response.json();if(!response.ok)throw new Error(payload.message??'アップロードできませんでした');if(!$('#dialog').open||draft.rich!==rich)return;rich.imageUrl=payload.url;fieldUrl.querySelector('input').value=payload.url;info.textContent='アップロード完了 '+Math.ceil(payload.bytes/1024)+'KB';renderPreview()}finally{uploading=false;upload.disabled=false;renderPreview()}},'primary')
+    const gallery=node('div',null,'media-gallery');const library=button('登録済み画像を選ぶ',async()=>{library.disabled=true;try{const images=await api('/stores/'+originStore+'/scenarios/media');gallery.replaceChildren();for(const image of images){const b=button('',()=>{rich.imageUrl=image.url;fieldUrl.querySelector('input').value=image.url;renderPreview()});const img=node('img');img.src=image.url;img.alt='登録画像';img.loading='lazy';img.referrerPolicy='no-referrer';b.append(img,node('small',image.width+'×'+image.height));gallery.append(b)}if(!images.length)gallery.append(node('p','画像はまだありません。','field-hint'))}finally{library.disabled=false}})
+    control.append(file,consent,upload,library,info,gallery)
+  }
+  function renderConfig(){form.replaceChildren();const rich=draft.rich;if(!rich)return;if(rich.kind==='card')form.append(field('カードタイトル',rich.title??'',v=>{rich.title=v;renderPreview()},{event:'input',attributes:{maxlength:'60'}}));if(rich.kind!=='buttons'||rich.imageUrl)configureImage(rich,form);rich.buttons.forEach((b,i)=>{const row=node('section',null,'rule-row');row.append(node('strong','リンクボタン '+(i+1)),field('表示名',b.label,v=>{b.label=v;renderPreview()},{event:'input',attributes:{maxlength:'20'}}),field('リンク先',b.url,v=>{b.url=v;renderPreview()},{event:'input',attributes:{maxlength:'2000'}}),button('予約URLを設定',()=>{const value=graph.purpose==='recruitment'?'{{interview_link}}':'{{customer_link}}';b.url=value;if(!draft.body.includes(value)){textarea.value=draft.body+'\n'+value;draft.body=textarea.value}renderConfig();renderPreview()}),button('ボタンを削除',()=>{rich.buttons.splice(i,1);renderConfig();renderPreview()}));form.append(row)});const add=button('＋ ボタン追加',()=>{rich.buttons.push({label:'詳細を見る',url:''});renderConfig();renderPreview()});add.disabled=rich.buttons.length>=3;form.append(add)}
+  edit.append(name,kind,bodyLabel,quick,phrases,form);side.append(node('h3','LINEプレビュー（模擬）'),preview,node('p','サンプル値を使った完成イメージです。LINEアプリでの表示や画像の切り抜きは端末によって異なります。','field-hint'));box.append(edit,side,actions);renderConfig();renderPreview();dialog('メッセージ編集','本文とプレビューを見ながら編集します。下書きに反映しても自動配信は始まりません。',box);const d=$('#dialog');d.classList.add('composer-dialog');const onCancel=e=>{if(uploading||JSON.stringify(draft)!==snapshot){e.preventDefault();cancel.click()}};d.addEventListener('cancel',onCancel);d.addEventListener('close',()=>{d.removeEventListener('cancel',onCancel);d.classList.remove('composer-dialog')},{once:true})
+}
+
 async function start() {
   $('#settings-link').href=workspacePath(controlled)
   $('#foot').textContent=demo?'GitHub Pages · 架空データで動作':'シナリオ管理'
   $('#mode').hidden=!demo
   for (const btn of document.querySelectorAll('.mobile button')) btn.onclick=()=>choosePiece(btn.dataset.part)
+  $('#sheet-backdrop').onclick=()=>choosePiece('workspace');addEventListener('resize',()=>{if(!mobileUI()&&part!=='workspace')choosePiece('workspace')});installPanelResizers()
   $('#tag-templates').onclick=async()=>{
     if(!ready||!store)return
-    if(!await finishBeforeLeave())return
+    if(navigationBusy||!await finishBeforeLeave())return
     openTagTemplates()
   }
   $('#new').onclick=async()=>{
     if (!ready || !store) return
-    if(!await finishBeforeLeave())return
+    if(navigationBusy||!await finishBeforeLeave())return
     const content=node('div',null,'controls')
+    content.append(button('保存済みテンプレート',()=>{$('#dialog').close();openSavedTemplates()}))
     content.append(button('かんたん作成ウィザード',()=>{$('#dialog').close();openWizard()},'primary'))
     content.append(button('完全に空のシナリオから開始',()=>{$('#dialog').close();openWizard(true)}))
     for(const [value,label] of Object.entries(purposes).filter(([value])=>channels.some(c=>c.purpose===value||c.purpose==='shared'))) content.append(button(label+'の基本シナリオ',()=>{
@@ -1458,9 +1525,10 @@ async function start() {
   }
   addEventListener('beforeunload',event=>{if(dirty) event.preventDefault()})
   const session=demo?sessionDemo:await api('/session')
-  currentSession=session;try{autosave=localStorage.getItem('npl-studio-auto-v2:'+session.actor.id)!=='false'}catch{}
+  currentSession=session;loadPrefs();try{autosave=localStorage.getItem('npl-studio-auto-v2:'+session.actor.id)!=='false'}catch{}
   $('#saved-templates')?.addEventListener('click',()=>openSavedTemplates().catch(e=>announce(e.message,true)))
-  document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){event.preventDefault();historyMove(event.shiftKey?'redo':'undo')}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='s'){event.preventDefault();save().catch(e=>announce(e.message,true))}})
+  document.addEventListener('keydown',event=>{if((document.activeElement===document.body||document.activeElement?.classList.contains('canvas-scroll'))&&event.code==='Space'&&!$('#dialog').open&&viewMode==='graph'){panSpace=true;event.preventDefault()}if(event.key==='Escape'&&!$('#dialog').open){if(mobileUI()&&part!=='workspace')choosePiece('workspace');else{moveIntent=null;connectIntent=null;multiSelect=false;selectedSteps.clear();refreshCardSelection()}}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){event.preventDefault();historyMove(event.shiftKey?'redo':'undo')}if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='s'){event.preventDefault();save().catch(e=>announce(e.message,true))}})
+  document.addEventListener('keyup',event=>{if(event.code==='Space')panSpace=false});window.addEventListener('blur',()=>panSpace=false)
   if(session.actor.agency){
     $('#studio-operations').hidden=true
     $('#settings-link').textContent='店舗運用'
@@ -1473,9 +1541,7 @@ async function start() {
   if (!stores.length) throw new Error('店舗を登録してからシナリオを作成してください。')
   select.onchange=async()=>{
     const next=stores.find(location=>location.id===select.value)
-    if(!await finishBeforeLeave()){select.value=store.id;return}
-    searchText='';folderFilter='';libraryKind='all'
-    try { await refreshStore(next);choosePiece('workspace');announce('') } catch(error) {announce(error.message,true)}
+    try{const ok=await navigateSafely(async()=>{searchText='';folderFilter='';libraryKind='all';await refreshStore(next);choosePiece('workspace');announce('')});if(!ok)select.value=store.id}catch(error){select.value=store.id;announce(error.message,true)}
   }
   const requestedStore=new URLSearchParams(location.search).get('store')
   const initialStore=stores.find(item=>item.id===requestedStore) ?? stores[0]
