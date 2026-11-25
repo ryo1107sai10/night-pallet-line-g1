@@ -38,6 +38,8 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
       if(route===workflow+'/checks'&&reads)return
       if(includesRoute(workflow+'/sources',route))return
       if(route===workflow+'/rich-menus'&&(reads||req.method==='PUT'))return
+      if(route===workflow+'/rich-menus/:connection/testers'&&reads)return
+      if(req.method==='POST'&&['templates','test'].some(action=>route===workflow+'/rich-menus/:connection/'+action))return
       if(route===workflow+'/forms'&&(reads||req.method==='PUT'))return
       if(route===workflow+'/responses'&&reads)return
     }

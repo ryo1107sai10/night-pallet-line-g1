@@ -40,10 +40,10 @@ import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, t
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
 import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
   type WorkflowSubject } from './forms.js'
-import { saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInput, sourceStatus, sourceQR } from './sources.js'
+import { queueSourceTest, saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInput, sourceStatus, sourceQR, sourceTestInput, sourceTesters } from './sources.js'
 import { applicantTagCatalog, tagOverview, tagListQuery, saveApplicantTagSettings, tagSettingsInput, saveApplicantTag, tagDefinitionInput, saveSubjectTags, subjectTagsInput, tagCampaignInput, tagCampaignConfirm, previewTagCampaign, queueTagCampaign, stopTagCampaign } from './applicant-tags.js'
 import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepareCampaign, stopCampaign } from './campaigns.js'
-import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
+import { createMenuTemplate, listMenus, menuInput, menuTemplateInput, menuTestInput, menuTesters, saveMenus, testRichMenu, validateMenus } from './rich-menus.js'
 import { interviewNotices, noticeInput, setInterviewNotices, setWaitlist, waitlistInput } from './interview-notices.js'
 import { retryService, serviceHistory } from './service-delivery.js'
 import { changeThread, classifyThread, createInboxTemplate, handoffInput, changeHandoff, inboxClassify, inboxEdit,
@@ -591,8 +591,29 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.post(workflow+'/sources',workflowStaff((db,actor,req)=>
     saveSource(db,actor,idOf(req,'store'),workPurpose(req),sourceInput.parse(req.body)),201))
   api.get(workflow+'/sources/:source/qr',workflowStaff((db,_actor,req)=>sourceQR(db,idOf(req,'store'),workPurpose(req),idOf(req,'source'))))
+  api.get(workflow+'/sources/:source/testers',workflowStaff((db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    return sourceTesters(db,cfg,actor,idOf(req,'store'),idOf(req,'source'))
+  }))
+  api.post(workflow+'/sources/:source/test',workflowStaff((db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    return queueSourceTest(db,cfg,actor,idOf(req,'store'),idOf(req,'source'),sourceTestInput.parse(req.body).tester,keyOf(req))
+  },202))
   api.patch(workflow+'/sources/:source',workflowStaff((db,actor,req)=>
     setSourceStatus(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'source'),sourceStatus.parse(req.body).active)))
+  api.post(workflow+'/rich-menus/:connection/templates',workflowStaff(async(db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    return createMenuTemplate(db,cfg,line,actor,idOf(req,'store'),idOf(req,'connection'),keyOf(req),menuTemplateInput.parse(req.body).variant)
+  },201))
+  api.get(workflow+'/rich-menus/:connection/testers',workflowStaff((db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    return menuTesters(db,cfg,actor,idOf(req,'store'),idOf(req,'connection'))
+  }))
+  api.post(workflow+'/rich-menus/:connection/test',workflowStaff(async(db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    await gate(pool,cfg,'menu-test:'+address(req),30)
+    return testRichMenu(db,cfg,line,actor,idOf(req,'store'),idOf(req,'connection'),menuTestInput.parse(req.body).tester)
+  }))
   api.get(workflow+'/rich-menus',workflowStaff((db,_actor,req)=>listMenus(db,idOf(req,'store'),workPurpose(req))))
   api.put(workflow+'/rich-menus',async(req,res)=>{
     const store=idOf(req,'store'),use=workPurpose(req),data=menuInput.parse(req.body)
@@ -1026,7 +1047,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const { rows } = await db.query(`SELECT t.id,t.purpose,t.verified_at,t.expires_at,
       j.status AS send_status,j.line_request_id,
       EXISTS(SELECT 1 FROM webhook_event e WHERE ${connectionTestEvent}) AS received
-      FROM tester t LEFT JOIN test_send j ON j.tester_id=t.id AND j.scenario_id IS NULL
+      FROM tester t LEFT JOIN test_send j ON j.tester_id=t.id AND j.scenario_id IS NULL AND j.source_id IS NULL
       WHERE t.channel_id=$1 AND t.generation=$2 ORDER BY t.expires_at DESC LIMIT 50`,[c.id,c.generation])
     return rows
   }))

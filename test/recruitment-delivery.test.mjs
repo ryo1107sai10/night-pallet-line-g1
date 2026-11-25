@@ -49,6 +49,7 @@ let pg, owner, pool, server, dir, base, tenant, storeId, admin, line, google
 let recruitCh, sharedCh
 const pushes = []
 const menuCalls=[]
+const menuBindings=new Map(), menuTemplates=[]
 const dispatches=[]
 let onQuota=null
 let countedQueries=null,queriesBeforePush=null
@@ -196,10 +197,26 @@ before(async () => {
   await assertAppRole(pool)
   const fetchLine = async (url, options) => {
     const address = new URL(url)
+    if(address.origin==='https://api-data.line.me'){
+      assert.match(address.pathname,/^\/v2\/bot\/richmenu\/richmenu-[0-9a-f]{32}\/content$/)
+      assert.equal(options.headers['Content-Type'],'image/png');assert.ok(options.body.length<1000000)
+      return new Response(null,{status:200})
+    }
     assert.equal(address.origin, 'https://api.line.me')
+    if(address.pathname==='/v2/bot/richmenu'&&options.method==='POST'){
+      const payload=JSON.parse(options.body);menuTemplates.push(payload)
+      assert.equal(payload.size.width,1200);assert.equal(payload.size.height,405)
+      assert.equal(payload.areas[0].action.data,'action=interview_link')
+      return Response.json({richMenuId:'richmenu-'+String(menuTemplates.length+4).repeat(32)})
+    }
     if(address.pathname.startsWith('/v2/bot/richmenu/'))return new Response(null,{status:address.pathname.endsWith('0'.repeat(32))?404:200})
     if(/^\/v2\/bot\/user\/U[0-9a-f]{32}\/richmenu/.test(address.pathname)){
       menuCalls.push({path:address.pathname,method:options.method,authorization:options.headers.Authorization})
+      const user=address.pathname.split('/')[4],menu=address.pathname.split('/')[6]
+      const key=options.headers.Authorization+':'+user
+      if(options.method==='POST')menuBindings.set(key,menu)
+      else if(options.method==='DELETE')menuBindings.delete(key)
+      else if(!options.method||options.method==='GET')return menuBindings.has(key)?Response.json({richMenuId:menuBindings.get(key)}):new Response(null,{status:404})
       return new Response(null,{status:200})
     }
     switch (address.pathname) {
@@ -789,4 +806,51 @@ test('採用リッチメニューは店舗タグを優先順位で判定し、�
   expect(await patch(tagsRoot()+'/settings',admin,{revision:(await overview()).revision,enabled:true}),200)
   await flush(30)
   assert.equal(latest(tagOther),second)
+})
+
+
+test('テスト専用店舗でも認証済みテスターにだけ実際のタグメニューと流入リンクを検収でき、通常配信許可は変えない',async()=>{
+  await setFeatures({sources_enabled:true,rich_menus_enabled:true,token_interviews_enabled:true})
+  await read('UPDATE store SET auto_enabled=false,contract_active=false WHERE id=$1',[storeId])
+  await read(`UPDATE channel SET checks=checks || '{"non_developer":false}'::jsonb WHERE id=$1`,[recruitCh])
+  const conn='/stores/'+storeId+'/connections/'+recruitCh
+  const freshTester=async(who)=>{
+    const invite=expect(await post(conn+'/tests',admin,{purpose:'recruitment'},idempotency()),201)
+    await inbound(recruitCh,botR,[eventFor(randomUUID(),'message',who,{message:{id:randomUUID(),type:'text',text:'接続テスト '+invite.code}})])
+    await inbound(recruitCh,botR,[eventFor(randomUUID(),'message',who,{message:{id:randomUUID(),type:'text',text:'動作確認'}})])
+    return invite
+  }
+  const connectionProof=await freshTester(tagOther)
+  expect(await post(conn+'/tests/'+connectionProof.id+'/send',admin,{},idempotency()),202)
+  await flush(2)
+  const path='/stores/'+storeId+'/workflows/recruitment/rich-menus'
+  const menuPath=path+'/'+recruitCh
+  const normal=expect(await post(menuPath+'/templates',admin,{variant:'normal'},idempotency()),201).menu
+  const booked=expect(await post(menuPath+'/templates',admin,{variant:'booked'},idempotency()),201).menu
+  const prior=expect(await request(path,{cookie:admin}),200).find(x=>x.id===recruitCh)
+  expect(await request(path,{method:'PUT',cookie:admin,data:{channel:recruitCh,revision:prior.revision,base_menu:normal,booked_menu:normal,tag_rules:[{tag:'experienced',menu:booked}]}}),200)
+  const verified=await freshTester(tagOther)
+  assert.ok(expect(await request(menuPath+'/testers',{cookie:admin}),200).some(t=>t.id===verified.id))
+  expect(await post(menuPath+'/test',admin,{tester:randomUUID()}),409)
+  assert.equal(expect(await post(menuPath+'/test',admin,{tester:verified.id}),200).linked,booked)
+  const person=await personByName('タグ検証B');await assign(person,person.tags.filter(x=>x!=='experienced'))
+  assert.equal(expect(await post(menuPath+'/test',admin,{tester:verified.id}),200).linked,normal)
+  const sources='/stores/'+storeId+'/workflows/recruitment/sources'
+  const entry=expect(await post(sources,admin,{channel:recruitCh,label:'検証QR'},idempotency()),201)
+  const sourceRoot=sources+'/'+entry.id
+  assert.equal(expect(await request(sourceRoot+'/testers',{cookie:admin}),200).testers.length,0)
+  expect(await post(sourceRoot+'/test',admin,{tester:verified.id},idempotency()),409)
+  await inbound(recruitCh,botR,[eventFor(randomUUID(),'message',tagOther,{message:{id:randomUUID(),type:'text',text:'面談予約 '+entry.id}})])
+  assert.ok(expect(await request(sourceRoot+'/testers',{cookie:admin}),200).testers.some(t=>t.id===verified.id))
+  const before=pushesTo(tagOther).filter(x=>x.text.includes('流入経路テスト')).length
+  const key=idempotency();const job=expect(await post(sourceRoot+'/test',admin,{tester:verified.id},key),202)
+  assert.equal(expect(await post(sourceRoot+'/test',admin,{tester:verified.id},key),202).id,job.id)
+  expect(await post(sourceRoot+'/test',admin,{tester:verified.id},idempotency()),409)
+  await flush(2)
+  assert.equal(pushesTo(tagOther).filter(x=>x.text.includes('流入経路テスト')).length,before+1)
+  const link=pushesTo(tagOther).filter(x=>x.text.includes('流入経路テスト')).at(-1)
+  expect(await post('/interview-link/'+recruitCh+'/redeem',null,{token:rawOf(link.text)}),200)
+  const report=expect(await request(sources,{cookie:admin}),200)
+  assert.equal(report.entries.find(x=>x.id===entry.id).opened,1)
+  assert.deepEqual((await read('SELECT contract_active,auto_enabled FROM store WHERE id=$1',[storeId])).rows[0],{contract_active:false,auto_enabled:false})
 })

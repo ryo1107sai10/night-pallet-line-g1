@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import QRCode from 'qrcode'
-import { audit, Fault, missing, newId, text, uuid, type Actor, type DB } from './core.js'
-import { channel } from './line.js'
+import { audit, Fault, forbidden, missing, newId, once, text, uuid, type Actor, type Config, type DB } from './core.js'
+import { channel, evidence, testDeliveryConfirmed } from './line.js'
 import type { WorkflowSubject } from './forms.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature } from './store-features.js'
@@ -91,4 +91,44 @@ export async function setSourceStatus(db:DB,actor:Actor,store:string,use:Workflo
   if(!result.rowCount)throw missing()
   await audit(db,actor.tenant_id,store,actor.id,'source.status',source,null,{purpose:use,active})
   return {active}
+}
+
+// A source test is an explicitly selected, freshly verified test recipient.
+// It is NOT admission to production automatic messaging and does not change it.
+export const sourceTestInput=z.strictObject({tester:uuid})
+async function sourceTestConnection(db:DB,cfg:Config,actor:Actor,store:string,source:string){
+  if(!['admin','manager'].includes(actor.role))throw forbidden()
+  await requireFeature(db,store,'sources_enabled')
+  const {rows:[entry]}=await db.query(`SELECT channel_id FROM workflow_source WHERE id=$1 AND store_id=$2 AND purpose='recruitment' AND active`,[source,store])
+  if(!entry)throw missing()
+  const c=await channel(db,entry.channel_id)
+  const {rows:[s]}=await db.query(`SELECT s.stopped OR t.stopped AS stopped,s.interviews_enabled,s.token_interviews_enabled FROM store s JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[store])
+  if(c.purpose!=='recruitment'||c.module_channel_id||c.stopped||s.stopped||!s.interviews_enabled||!s.token_interviews_enabled||!cfg.external||!testDeliveryConfirmed(c)||!(await evidence(db,c)).send_accepted)
+    throw new Fault(409,'SOURCE_TEST_NOT_READY','採用LINEの接続テストとLINE面談予約の設定を確認してください。')
+  return c
+}
+export const sourceTestProof=`t.channel_id=$1 AND t.generation=$2 AND t.purpose='recruitment' AND t.verified_at IS NOT NULL AND t.expires_at>now()
+  AND EXISTS(SELECT 1 FROM webhook_event e WHERE e.channel_id=t.channel_id AND e.user_key=t.user_key AND e.generation=t.generation
+    AND e.kind='message' AND e.action='interview_link' AND e.source_id=$3 AND e.received_at BETWEEN t.verified_at AND t.expires_at
+    AND e.occurred_at BETWEEN t.verified_at AND t.expires_at AND e.occurred_at<=now())`
+export async function sourceTesters(db:DB,cfg:Config,actor:Actor,store:string,source:string){
+  const c=await sourceTestConnection(db,cfg,actor,store,source)
+  const {rows:testers}=await db.query(`SELECT t.id,t.verified_at,t.expires_at FROM tester t WHERE ${sourceTestProof}
+    AND NOT EXISTS(SELECT 1 FROM test_send j WHERE j.tester_id=t.id) ORDER BY t.verified_at DESC LIMIT 20`,[c.id,c.generation,source])
+  const {rows:history}=await db.query(`SELECT id,status,created_at FROM test_send WHERE source_id=$1 AND channel_id=$2 ORDER BY created_at DESC LIMIT 10`,[source,c.id])
+  return {testers,history}
+}
+export async function queueSourceTest(db:DB,cfg:Config,actor:Actor,store:string,source:string,tester:string,key:string){
+  await lockDispatch(db,actor.tenant_id)
+  const c=await sourceTestConnection(db,cfg,actor,store,source)
+  return once(db,cfg,actor,'source.test',key,{source,tester,generation:c.generation},async()=>{
+    const {rows:[proof]}=await db.query(`SELECT t.id FROM tester t WHERE ${sourceTestProof} AND t.id=$4
+      AND NOT EXISTS(SELECT 1 FROM test_send j WHERE j.tester_id=t.id) FOR UPDATE OF t`,[c.id,c.generation,source,tester])
+    if(!proof)throw new Fault(409,'SOURCE_TESTER_REQUIRED','本人確認後、この経路からメッセージを送信した未使用のテスターを選んでください。')
+    const id=newId()
+    await db.query(`INSERT INTO test_send (id,tenant_id,store_id,channel_id,tester_id,actor_id,operation_key,generation,source_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[id,c.tenant_id,store,c.id,tester,actor.id,'source-test:'+id,c.generation,source])
+    await audit(db,actor.tenant_id,store,actor.id,'source.test.queue',source,null,{id,tester})
+    return {id,status:'queued'}
+  })
 }

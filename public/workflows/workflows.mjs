@@ -317,6 +317,21 @@ function sources(root,report,path,refresh,use){
       button(entry.active?'計測を停止':'計測を再開',async()=>{
         await api(path+'/sources/'+entry.id,'PATCH',{active:!entry.active});await refresh('経路を更新しました。')
       })))
+    if(use==='recruitment'&&entry.active&&entry.url){
+      const proof=el('div'),test=el('section',null,'record')
+      test.append(el('h4','テスター専用の流入確認'),el('p','接続テストの本人確認を行った方がこの流入QRまたはリンクを開き、LINEで表示された文を送信してください。通常配信を開始せず、その受信者1人にだけ個人別テストURLを送れます。'))
+      const open=el('a','公式LINE接続を開く');open.href=workspacePath('/agency-line/?store='+new URLSearchParams(location.search).get('store'))
+      test.append(open,button('QR経由の受信を確認',async()=>{
+        proof.replaceChildren();const result=await api(path+'/sources/'+entry.id+'/testers')
+        for(const row of result.history)proof.append(el('p','検証送信 '+new Date(row.created_at).toLocaleString('ja-JP')+' · '+(results[row.status]??row.status)))
+        if(!result.testers.length){proof.append(el('p','本人確認後にこの経路をLINEで送信した未使用テスターがいません。'));return}
+        proof.append(form([field('テスター','tester','',result.testers[0].id,result.testers.map(t=>[t.id,new Date(t.verified_at).toLocaleString('ja-JP')+' に本人確認']))],'テスター1人に検証URLを送信',async(values,key)=>{
+          if(!confirm('本人確認済みの選択したテスター1人にだけ、検証URLを1通送信します。よろしいですか？'))return
+          await api(path+'/sources/'+entry.id+'/test','POST',{tester:values.tester},key)
+          proof.append(el('p','検証送信を受け付けました。送信状況は受信確認ボタンで更新できます。'))
+        }))
+      }),proof);row.append(test)
+    }
     root.append(row)
   }
   if(!report.entries.length)root.append(el('p','発行した経路リンクはまだありません。'))
@@ -388,6 +403,19 @@ function richMenus(root,entries,path,refresh,use){
       await refresh('リッチメニュー設定を保存しました。')
     })
     if(use==='recruitment'){
+      const template=el('section',null,'record')
+      template.append(el('h3','標準メニューをLINEに作成'),el('p','メニューIDを調べなくても、公式LINEに予約用メニューを作成できます。作成だけでは友だちの表示は変更されません。'))
+      const templateResult=el('p',null,'muted')
+      for(const [variant,label,fieldName] of [['normal','対面面談を予約','base_menu'],['booked','面談予約を確認','booked_menu']]){
+        const generateKey=crypto.randomUUID()
+        template.append(button(label+'を作成',async()=>{
+          if(!confirm('この店舗の公式LINEに標準メニューを1件作成します。既定メニューは変更しません。よろしいですか？'))return
+          const result=await api(path+'/rich-menus/'+entry.id+'/templates','POST',{variant},generateKey)
+          editor.querySelector('[name='+fieldName+']').value=result.menu
+          templateResult.textContent=label+'のメニューを作成しました。下の設定を保存してください。'
+        }))
+      }
+      template.append(templateResult);editor.insertBefore(template,editor.querySelector('.fields'))
       const section=el('section',null,'record')
       section.append(el('h3','採用タグ別のメニュー'),el('p','上から優先されます。該当するタグがない場合は予約状態に応じた通常の設定になります。タグの追加・解除でも自動的に再判定します。'))
       if(entry.tags_enabled){
@@ -415,6 +443,20 @@ function richMenus(root,entries,path,refresh,use){
       editor.insertBefore(section,editor.querySelector('button.primary'))
     }
     row.append(editor)
+    if(use==='recruitment'){
+      const test=el('section',null,'record'),status=el('div')
+      test.append(el('h3','本人確認済みテスターで表示を確認'),el('p','公式LINE接続画面でテストコードを発行し、テスターがLINEトークに送信した後、続けてメッセージを1通送ります。通常配信の設定を変えず、選んだテスター1人だけに保存済みのルールを適用します。'))
+      const open=el('a','公式LINE接続を開く');open.href=workspacePath('/agency-line/?store='+new URLSearchParams(location.search).get('store'))
+      test.append(open,button('テスターを読み込む',async()=>{
+        status.replaceChildren();const testers=await api(path+'/rich-menus/'+entry.id+'/testers')
+        if(!testers.length){status.append(el('p','有効なテスターがいません。接続テストを開始してください。'));return}
+        status.append(form([field('本人確認済みテスター','tester','',testers[0].id,testers.map(t=>[t.id,new Date(t.verified_at).toLocaleString('ja-JP')+' に本人確認']))],'テスター1人の表示を確認',async values=>{
+          if(!confirm('選択したテスター1人のLINEリッチメニューだけを切り替えます。よろしいですか？'))return
+          const result=await api(path+'/rich-menus/'+entry.id+'/test','POST',{tester:values.tester})
+          status.append(el('p','LINEの現在のメニューを照合しました：'+(result.linked??'既定メニュー')+(result.matched?'（タグルール適用）':'（通常・予約状態）')))
+        }))
+      }),status);row.append(test)
+    }
     root.append(row)
   }
   if(!entries.length)root.append(el('p','対象の公式LINEを先に登録してください。'))

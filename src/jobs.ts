@@ -1,6 +1,6 @@
 import type pg from 'pg'
-import { type Actor, type Config, type DB, type Route, audit, automationForStore, conflict, scope, tx, unseal } from './core.js'
-import { channel, channelCredentials, channelTestReady, LineAPI, userKey } from './line.js'
+import { type Actor, type Config, type DB, type Route, audit, automationForStore, conflict, scope, seal, tx, unseal } from './core.js'
+import { automaticRelationshipReady, channel, channelCredentials, channelTestReady, evidence, testDeliveryConfirmed, LineAPI, userKey } from './line.js'
 
 import { lockDispatch } from './dispatch-lock.js'
 import { endScope, locationOf, processCustomerWebhook, runAutomation } from './automation.js'
@@ -12,6 +12,7 @@ import { updateRichMenu } from './rich-menus.js'
 import { deliverService } from './service-delivery.js'
 import { googleFromEnvironment } from './interview-availability.js'
 import { runGoogleSync } from './interview-hosts.js'
+import {sourceTestProof} from './sources.js'
 export { lockDispatch } from './dispatch-lock.js'
 
 const targets = {
@@ -175,6 +176,20 @@ async function resolveScenarioCustomerLink(db: DB,cfg:Config,c:Awaited<ReturnTyp
   return resolved.length<=5000?resolved:null
 }
 
+async function sourceTestMessage(db:DB,cfg:Config,c:Awaited<ReturnType<typeof channel>>,job:{id:string;source_id:string;tester_id:string;generation:number;test_body:string|null},user:string){
+  if(c.purpose!=='recruitment'||c.module_channel_id||!testDeliveryConfirmed(c)||!(await evidence(db,c)).send_accepted)return null
+  const key=userKey(cfg,c,user)
+  const {rowCount}=await db.query(`SELECT 1 FROM tester t JOIN workflow_source w ON w.id=$3 AND w.channel_id=t.channel_id AND w.store_id=t.store_id AND w.purpose='recruitment'
+    JOIN store s ON s.id=w.store_id WHERE ${sourceTestProof} AND t.id=$4 AND t.user_key=$5 AND w.active AND s.sources_enabled`,[c.id,c.generation,job.source_id,job.tester_id,key])
+  if(!rowCount||!await automaticRelationshipReady(db,c,key)||!await interviewLinkEligible(db,c,job.generation,key))return null
+  if(job.test_body)return unseal(cfg,'test-body:'+job.id,job.test_body)
+  const link=await issueInterviewLinkToken(db,cfg,c,user,job.source_id)
+  const body='【Night PRO LINE 流入経路テスト】\nこれは検証専用です。リンクを開くと流入分析に記録されます（来店不要）。\n'+link.url
+  await db.query('UPDATE test_send SET test_body=$2 WHERE id=$1',[job.id,seal(cfg,'test-body:'+job.id,body)])
+  await audit(db,c.tenant_id,c.store_id,null,'source.test.link',job.source_id,null,{job:job.id,link:link.id})
+  return body
+}
+
 async function sendCandidate(db: DB, r: Route, id?: string) {
   const { rows: [job] } = await db.query(`SELECT j.*, t.recipient,t.code_hash,t.user_key,t.expires_at,
     s.stopped AS store_stopped,f.disabled_at,
@@ -260,6 +275,11 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
       }
       const to = unseal(cfg,'tester:' + current.code_hash,current.recipient)
       let message = current.test_body ? unseal(cfg,'test-body:' + job.id,current.test_body) : undefined
+      if(current.source_id){
+        const body=await sourceTestMessage(db,cfg,fresh,current,to)
+        if(!body){await db.query(`UPDATE test_send SET status=$2,next_at='infinity' WHERE id=$1`,[job.id,attempt===1?'cancelled':'unknown']);return}
+        message=body
+      }
       if (message?.includes(INTERVIEW_LINK_MARKER)) {
         // 面談予約URLは送信直前に受信者ごとに発行する。条件を満たさない場合はURLを送らず送信を取りやめる。
         const resolved = await resolveScenarioInterviewLink(db,cfg,fresh,current,message,to)

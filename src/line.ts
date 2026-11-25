@@ -132,7 +132,7 @@ const testerVerified = `EXISTS(SELECT 1 FROM tester WHERE channel_id=c.id AND ge
 const evidenceColumns = `${testerVerified} AS tester_verified,
     EXISTS(SELECT 1 FROM tester t JOIN webhook_event e ON ${connectionTestEvent}
       WHERE t.channel_id=c.id AND t.generation=c.generation) AS receive_verified,
-    EXISTS(SELECT 1 FROM test_send WHERE channel_id=c.id AND generation=c.generation AND status='accepted' AND scenario_id IS NULL) AS send_accepted`
+    EXISTS(SELECT 1 FROM test_send WHERE channel_id=c.id AND generation=c.generation AND status='accepted' AND scenario_id IS NULL AND source_id IS NULL) AS send_accepted`
 
 export async function evidence(db:DB,c:Channel) {
   const {rows:[result]}=await db.query<Evidence>(`SELECT ${evidenceColumns}
@@ -245,6 +245,29 @@ export class LineAPI {
     ]).parse(await limit.json())
     const used = z.object({totalUsage:z.int().nonnegative()}).parse(await consumption.json()).totalUsage
     return ceiling.type==='none'?Infinity:Math.max(0,ceiling.value-used)
+  }
+
+  async makeRecruitmentMenu(cred:SendCredentials,variant:'normal'|'booked',png:Uint8Array){
+    const menu={size:{width:1200,height:405},selected:true,name:'Night PRO LINE 採用 '+(variant==='normal'?'面談予約':'予約確認'),
+      chatBarText:variant==='normal'?'対面面談の予約':'面談予約の確認',areas:[{bounds:{x:0,y:0,width:1200,height:405},
+        action:{type:'postback',data:'action=interview_link'}}]}
+    const headers=await this.headers(cred)
+    const result=await this.call('/v2/bot/richmenu',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(menu)})
+    if(!result.ok)throw new Fault(502,'RICH_MENU_CREATE_FAILED','LINEでリッチメニューを作成できませんでした。')
+    const id=z.object({richMenuId:z.string().regex(/^richmenu-[0-9a-f]{32}$/i)}).parse(await result.json()).richMenuId
+    // The data host is the official LINE image-upload endpoint, not the Messaging API host.
+    const content=await this.request('https://api-data.line.me/v2/bot/richmenu/'+encodeURIComponent(id)+'/content',{
+      method:'POST',headers:{...headers,'Content-Type':'image/png'},body:Buffer.from(png),redirect:'error',signal:AbortSignal.timeout(6000),
+    }).catch(()=>null)
+    if(!content?.ok)throw new Fault(502,'RICH_MENU_IMAGE_FAILED','LINEのメニュー画像の登録が確認できません。再試行前にLINE側の作成状態を確認してください。')
+    return id
+  }
+
+  async userRichMenu(cred:SendCredentials,user:string){
+    const response=await this.call('/v2/bot/user/'+encodeURIComponent(user)+'/richmenu',{headers:await this.headers(cred)})
+    if(response.status===404)return null
+    if(!response.ok)throw new Fault(502,'MENU_READ_FAILED','LINEで現在の表示メニューを確認できませんでした。')
+    return z.object({richMenuId:z.string().regex(/^richmenu-[0-9a-f]{32}$/i)}).parse(await response.json()).richMenuId
   }
 
   async richMenuExists(cred:SendCredentials,id:string){
@@ -452,7 +475,7 @@ export async function issueTester(db: DB, actor: Actor, c: Channel, usage: z.inf
 
 export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: string, key: string) {
   const { rows: [previous] } = await db.query(`SELECT id,tester_id,status FROM test_send
-    WHERE scenario_id IS NULL AND channel_id=$1 AND actor_id=$2 AND operation_key=$3`,[c.id,actor.id,key])
+    WHERE scenario_id IS NULL AND source_id IS NULL AND channel_id=$1 AND actor_id=$2 AND operation_key=$3`,[c.id,actor.id,key])
   if (previous) {
     if (previous.tester_id !== testerId) throw conflict()
     return { id: previous.id, status: previous.status }
@@ -460,8 +483,8 @@ export async function queueTest(db: DB, actor: Actor, c: Channel, testerId: stri
   const { rows: [tester] } = await db.query(`SELECT * FROM tester WHERE id=$1 AND channel_id=$2
     AND generation=$3 AND verified_at IS NOT NULL AND expires_at>now() FOR UPDATE`,[testerId,c.id,c.generation])
   if (!tester) throw missing()
-  const existing = await db.query('SELECT id,status,scenario_id FROM test_send WHERE tester_id=$1', [testerId])
-  if (existing.rows[0]?.scenario_id) throw conflict()
+  const existing = await db.query('SELECT id,status,scenario_id,source_id FROM test_send WHERE tester_id=$1', [testerId])
+  if (existing.rows[0]?.scenario_id||existing.rows[0]?.source_id) throw conflict()
   if (existing.rowCount) return {id:existing.rows[0].id,status:existing.rows[0].status}
   const { rows: [e] } = await db.query(`SELECT EXISTS(SELECT 1 FROM webhook_event e WHERE ${connectionTestEvent}) AS heard,
     EXISTS(SELECT 1 FROM channel_relationship WHERE channel_id=t.channel_id AND user_key=t.user_key AND following=false) AS blocked

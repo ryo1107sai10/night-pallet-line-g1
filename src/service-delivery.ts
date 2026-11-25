@@ -38,7 +38,7 @@ async function testRecipient(db:DB,connection:Channel,userKey:string) {
   const {rowCount}=await db.query(`SELECT 1 FROM tester t JOIN test_send j ON j.tester_id=t.id
     WHERE t.channel_id=$1 AND t.user_key=$2 AND t.generation=$3 AND t.purpose='recruitment'
       AND t.verified_at IS NOT NULL AND t.expires_at>now() AND j.status='accepted'
-      AND j.channel_id=t.channel_id AND j.generation=t.generation AND j.scenario_id IS NULL LIMIT 1`,
+      AND j.channel_id=t.channel_id AND j.generation=t.generation AND j.scenario_id IS NULL AND j.source_id IS NULL LIMIT 1`,
   [connection.id,userKey,connection.generation])
   return !!rowCount
 }
