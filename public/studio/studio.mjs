@@ -1073,12 +1073,58 @@ function resultView() {
   return wrap
 }
 
+function stepDescription(flow,n){
+  const name=id=>flow.nodes.find(v=>v.id===id)?.name??'接続なし'
+  const lines=[n.name+'（'+(kinds[n.type]??n.type)+'）']
+  if(n.type==='message'){
+    lines.push(n.body)
+    if(n.tagGuard)lines.push('送信直前条件：'+n.tagGuard.tag+(n.tagGuard.exclude.length?' ／ 除外 '+n.tagGuard.exclude.join('、'):'')+(n.tagGuard.booked===undefined?'':n.tagGuard.booked?' ／ 予約済み':' ／ 未予約'))
+  }
+  if(n.type==='wait')lines.push(n.mode==='delay'?formatMinutes(n.minutes)+'待機':n.mode==='booking'?'予約の'+formatMinutes(n.minutes)+'前':n.mode==='business'?n.days+'営業日後 '+n.time:n.time??'未設定')
+  if(n.type==='branch')lines.push((conditions[n.condition]??n.condition)+(n.condition==='tag'?'：'+n.tag:''),'はい → '+name(n.yes),'いいえ → '+name(n.no))
+  else if(n.type!=='end')lines.push('次 → '+name(n.next))
+  if(n.type==='tag')lines.push((n.action==='remove'?'解除':'追加')+'：'+n.tag)
+  if(n.type==='task')lines.push(n.note)
+  return lines.join('\n')
+}
 function diffSummary(before,after){
-  const changes=compareFlows(before,after),box=node('div',null,'diff-summary')
+  const changes=compareFlows(before,after),box=node('div',null,'version-diff')
+  const compact=node('div',null,'diff-summary')
   const labels={name:'名称',purpose:'用途',trigger:'開始条件',triggerTag:'開始タグ',channel:'配信先LINE',entry:'開始位置',windowStart:'送信開始時刻',windowEnd:'送信終了時刻',daily:'日次上限',weekly:'週次上限',holidays:'休業曜日',rejoin:'再参加',cooldownDays:'再参加間隔',missingAssignee:'担当者条件'}
   for(const [title,items] of [['追加',changes.added],['変更',changes.changed],['削除',changes.removed],['設定変更',changes.settings.map(k=>labels[k]??k)]]){
-    const row=node('div',null,'diff-line');row.append(node('strong',title+' '+items.length+'件'),node('p',items.join('、')||'なし','field-hint'));box.append(row)
+    const row=node('div',null,'diff-line');row.append(node('strong',title+' '+items.length+'件'),node('p',items.join('、')||'なし','field-hint'));compact.append(row)
   }
+  box.append(compact)
+  const old=new Map((before?.nodes??[]).map(n=>[n.id,n])),next=new Map(after.nodes.map(n=>[n.id,n]))
+  const specific=node('details',null,'diff-details')
+  specific.append(node('summary','変更内容の詳細（変更前・変更後）'))
+  function row(label,from,to){
+    const line=node('section',null,'diff-detail')
+    line.append(node('h4',label))
+    const pair=node('div',null,'diff-pair')
+    for(const [heading,value] of [['変更前',from],['変更後',to]]){
+      const item=node('div',null,'diff-detail-box');item.append(node('strong',heading),node('p',value,'diff-text'));pair.append(item)
+    }
+    line.append(pair);specific.append(line)
+  }
+  for(const n of after.nodes){
+    const prev=old.get(n.id)
+    if(!prev||JSON.stringify(prev)!==JSON.stringify(n))row(n.name,prev?stepDescription(before,prev):'（追加前のステップなし）',stepDescription(after,n))
+  }
+  for(const n of before?.nodes??[])if(!next.has(n.id))row(n.name,stepDescription(before,n),'（削除）')
+  const display=(flow,key)=>{
+    const v=flow?.[key]
+    if(v===undefined)return '未設定'
+    if(key==='channel')return channels.find(c=>c.id===v)?.label??'登録先が変わりました'
+    if(key==='purpose')return purposes[v]??v
+    if(key==='trigger')return triggers[v]??v
+    if(key==='entry')return flow.nodes.find(n=>n.id===v)?.name??v
+    if(key==='triggerTag')return applicantTagOptions(v)[v]??v
+    if(typeof v==='boolean')return v?'有効':'無効'
+    return Array.isArray(v)?v.join('、')||'なし':String(v)
+  }
+  for(const key of changes.settings)row(labels[key]??key,display(before,key),display(after,key))
+  if(specific.children.length>1)box.append(specific)
   return box
 }
 async function reviewPublication(){
@@ -1098,6 +1144,10 @@ async function reviewPublication(){
   const results=node('div',null,'matrix-result')
   for(const c of cases)results.append(node('p',c.label+'：'+(c.result.errors.length?'要確認':c.result.count+'通／保留 '+c.result.events.filter(e=>e.state==='held').length+'件')))
   box.append(results)
+  const messages=node('details',null,'diff-details')
+  messages.append(node('summary','公開するLINEメッセージ（'+graph.nodes.filter(n=>n.type==='message').length+'ステップ）'))
+  for(const item of graph.nodes.filter(n=>n.type==='message'))messages.append(node('h4',item.name),node('p',item.body,'bubble'))
+  if(messages.children.length>1)box.append(messages)
   box.append(node('h3',info.published?'現公開版と下書きの差分':'初回公開の内容'),diffSummary(info.published?.graph,graph))
   if(info.related.length){
     box.append(node('h3','同じ開始条件の公開シナリオ'))

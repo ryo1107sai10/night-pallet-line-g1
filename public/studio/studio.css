@@ -264,3 +264,11 @@ dialog p{font-size:13px;margin-bottom:12px;color:#c6c7df}
   .diff-summary{grid-template-columns:1fr}
   .branch-route>summary{font-size:12px;padding-inline:6px}
 }
+.diff-details{border:1px solid #afa3eb42;border-radius:11px;background:#ffffff06;padding:0 10px;margin:8px 0}
+.diff-details h4{font-size:13px;margin:9px 0 6px}
+.diff-details .bubble{margin:4px 0 11px}
+.diff-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px;margin-bottom:8px}
+.diff-detail-box{padding:9px;background:#11152988;border-radius:9px;border:1px solid #ffffff20;min-width:0}
+.diff-detail-box strong{display:block;font-size:11px;color:var(--muted);margin-bottom:6px}
+.diff-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6}
+@media(max-width:540px){.diff-pair{grid-template-columns:1fr}}
