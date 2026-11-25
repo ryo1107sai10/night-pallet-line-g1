@@ -78,6 +78,7 @@ export function unseal(cfg: Config, context: string, value: string) {
 
 export function poolFor(url: string | undefined) {
   if (!url) throw new Error('Database URL is required.')
+  const sharedSupabase = new URL(url).hostname.endsWith('.pooler.supabase.com')
   const pool = new pg.Pool({
     connectionString: url,
     // Session-mode proxies may not forward PostgreSQL startup options. Await
@@ -85,7 +86,11 @@ export function poolFor(url: string | undefined) {
     onConnect: async client => {
       await client.query("SET search_path=night,pg_catalog; SET timezone='UTC'; SET statement_timeout=8000")
     },
-    connectionTimeoutMillis: 5000,
+    // The live scheduler runs once per minute. Reuse the authenticated TLS
+    // session between real sweeps instead of reconnecting on every webhook.
+    // Keep the existing short timeout for the same-region Cloud SQL socket.
+    connectionTimeoutMillis: sharedSupabase ? 12000 : 5000,
+    ...(sharedSupabase?{idleTimeoutMillis:95000,keepAlive:true,keepAliveInitialDelayMillis:30000}:{}),
   })
   // プールが idle クライアントのエラーを 'error' イベントとして再発火したとき、
   // 受け手が無いと EventEmitter が throw してプロセスが落ちる（DB再起動時の

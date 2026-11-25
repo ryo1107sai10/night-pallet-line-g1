@@ -48,7 +48,7 @@ function psqlEnv(url){
   return {...process.env,PGHOST:parsed.hostname,PGPORT:parsed.port||'5432',PGOPTIONS:'',
     PGDATABASE:decodeURIComponent(parsed.pathname.slice(1)),PGUSER:decodeURIComponent(parsed.username),
     PGPASSWORD:decodeURIComponent(parsed.password),PGSSLMODE:local?'disable':'verify-full',
-    ...(local?{}:{PGSSLROOTCERT:'system'}),PGTZ:'UTC',PGCONNECT_TIMEOUT:'10'}
+    ...(local?{}:{PGSSLROOTCERT:parsed.searchParams.get('sslrootcert')||'system'}),PGTZ:'UTC',PGCONNECT_TIMEOUT:'10'}
 }
 
 function command(url,sql,extra=[]){
