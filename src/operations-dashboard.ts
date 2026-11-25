@@ -7,7 +7,7 @@ export async function operationsDashboard(db:DB,actor:Actor) {
   if(!['admin','manager','recruiter'].includes(actor.role))throw forbidden()
   const stores=await storeList(db,actor)
   const result=[]
-  const uses=actor.agency||actor.role==='recruiter'?['recruitment']:['recruitment','customer','unclassified']
+  const uses=actor.role==='recruiter'?['recruitment']:actor.agency?['recruitment','unclassified']:['recruitment','customer','unclassified']
   for(const {id,name,timezone} of stores){
     await scope(db,actor.tenant_id,id)
     const {rows:[{inbox,interviews,failed}]}=await db.query(`

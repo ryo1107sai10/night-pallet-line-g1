@@ -36,4 +36,12 @@ LINEのチャネルシークレットとアクセストークンは公開後の�
 
 既存の専用実行アカウント `night-schedule-invoker` にジョブ単位の実行権限を与えたうえで、`bash deploy/schedule-worker.sh <PROJECT_ID> 1` を実行すると、東京時間で1分ごとにワーカーを起動します。すでに `night-pro-line-notices` がある場合はその設定を更新します。定期実行を設定しても配信の全体設定や店舗設定は自動でONになりません。
 
+## 無料試用中のデータ保護と復旧
+
+Cloud SQLの無料試用インスタンスでは標準バックアップと時点復旧を有効化できません。試用期間中は、Cloud SQL APIのSQLエクスポートを利用します。専用の非公開バケット `<PROJECT_ID>-db-backups` を東京リージョンに作成し、`bash deploy/schedule-backup.sh <PROJECT_ID> <INSTANCE_ID> <公開済みイメージ>` を実行すると毎朝9時（日本時間）にバックアップします。日次データを15日、日曜日分と初回検証データを120日保持します。バックアップジョブはデータベースのパスワードや暗号化キーを取得しません。
+
+復旧時は本番とは別のPostgreSQL環境を用意し、アプリ用・所有者用のロールを再作成してSQLダンプをインポートします。スキーマのバージョン、法人・店舗・LINE接続・予約・配信履歴の件数、アプリロールの店舗ごとの参照制限を照合します。復旧先でアプリの暗号化済みフィールドを扱うには、元のSecret Manager内のアプリ用暗号化キーを継続して使用します。
+
+試用期間の終了前に運用用のCloud SQLへ移行する判断が必要です。移行後は標準の自動バックアップと時点復旧も設定・検証します。[Cloud SQLの無料試用条件](https://cloud.google.com/sql/docs/postgres/free-trial-instance) [SQLエクスポートとインポート](https://cloud.google.com/sql/docs/postgres/import-export/import-export-sql)
+
 [2026-11-24の照合・修正・残作業](COMPLETION-2026-11-24.md)

@@ -1,9 +1,19 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {starter,liveTriggers,validate,simulate,localInstant,renderMessage} from '../public/studio/engine.mjs'
+import {starter,recruitmentTemplates,recruitmentTemplate,liveTriggers,validate,simulate,localInstant,renderMessage} from '../public/studio/engine.mjs'
 
 const person = {start:'2026-11-14T22:00',zone:'Asia/Tokyo',cutoff:'06:00',adult:true,consent:true,
   assigned:true,booked:false,dayCount:0,weekCount:0,values:{name:'山田',store:'検証店'}}
+
+test('面談ステップのテンプレートは実配信対応の採用開始条件と編集可能な文面を持つ',()=>{
+  assert.equal(recruitmentTemplates.length,4)
+  for(const template of recruitmentTemplates){
+    const flow=recruitmentTemplate(template.id,'account')
+    assert.ok(Object.hasOwn(liveTriggers.recruitment,flow.trigger))
+    assert.deepEqual(validate(flow,true),[])
+    assert.notEqual(recruitmentTemplate(template.id,'other').channel,flow.channel)
+  }
+})
 
 test('新しい採用シナリオは実配信できる面談予約を起点にし、用途別の開始項目を使う',()=>{
   const graph=starter('recruitment')

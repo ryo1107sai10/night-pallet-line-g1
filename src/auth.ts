@@ -115,7 +115,7 @@ export async function authenticate(db: DB, credential: string | undefined, kind:
   }
   await scope(db, tenantId)
   const { rows: [actor] } = await db.query<Actor>(`SELECT f.id,f.tenant_id,f.role,f.email,
-    EXISTS(SELECT 1 FROM platform_master p WHERE p.agency_id=f.tenant_id) AS agency
+    (t.agency_operations_only OR EXISTS(SELECT 1 FROM platform_master p WHERE p.agency_id=f.tenant_id)) AS agency
     FROM staff_session s JOIN staff f ON (s.tenant_id,s.staff_id)=(f.tenant_id,f.id) JOIN tenant t ON t.id=f.tenant_id
     WHERE s.token_hash=$1 AND s.session_kind=$2 AND s.expires_at>now()
       AND NOT f.platform_actor AND f.disabled_at IS NULL AND f.password_hash IS NOT NULL

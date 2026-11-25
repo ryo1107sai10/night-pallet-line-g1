@@ -15,6 +15,7 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   // platform.ts の requireAgencyMasterAccess が判定し、マスターでない代理店スタッフは403になる。
   if(route==='/agency-master'||route==='/agency-master/invite'||route==='/agency-master/promote')return
   if(includesRoute(interviews,route)||includesRoute(scenarios,route))return
+  if(includesRoute('/stores/:store/intake',route)&&['admin','manager'].includes(actor.role))return
   if(req.params.purpose?.toString().toLowerCase()==='recruitment'){
     if(reads&&['settings','delivery'].some(page=>route===workflow+'/'+page))return
     if(route===workflow+'/delivery/:delivery/retry')return

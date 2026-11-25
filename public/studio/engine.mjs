@@ -36,6 +36,25 @@ export function starter(purpose='customer') {
   }
 }
 
+export const recruitmentTemplates = Object.freeze([
+  {id:'application-guide',name:'友だち追加 → 面談予約案内',trigger:'follow',dedicated:true,
+    body:'{{store}}の採用窓口です。ご希望の面談日時は次のリンクから選んでいただけます。\n{{interview_link}}'},
+  {id:'interview-preparation',name:'面談予約後の準備案内',trigger:'interview_booked',dedicated:false,
+    body:'{{name}}さん、面談予定に関するご質問・持ち物の確認は、このトークからご連絡ください。'},
+  {id:'interview-rescheduled',name:'面談日程変更のフォロー',trigger:'interview_changed',dedicated:false,
+    body:'{{name}}さん、日程のご調整ありがとうございます。当日のご質問がありましたら、このトークからお知らせください。'},
+  {id:'interview-cancelled',name:'面談キャンセル後の案内',trigger:'interview_cancelled',dedicated:false,
+    body:'{{name}}さん、面談のキャンセルを受け付けました。再度ご希望の場合は、このトークにご連絡ください。'},
+])
+
+export function recruitmentTemplate(id,channel) {
+  const template=recruitmentTemplates.find(item=>item.id===id)
+  if(!template)throw new Error('選択したテンプレートが見つかりません。')
+  return {...starter('recruitment'),name:template.name,trigger:template.trigger,channel,
+    nodes:[{id:'welcome',type:'message',name:template.name,category:'service',body:template.body,next:'end'},
+      {id:'end',type:'end',name:'終了'}]}
+}
+
 export const links = node => node.type==='branch' ? [node.yes,node.no] : node.type==='end' ? [] : [node.next]
 
 export function validate(flow, publish=false) {
