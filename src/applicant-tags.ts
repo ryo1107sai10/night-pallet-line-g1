@@ -104,8 +104,25 @@ const activeTagSelect=`SELECT a.tag_key FROM applicant_tag_assignment a JOIN app
   WHERE a.subject_id=$1 AND a.active AND t.active AND (a.expires_at IS NULL OR a.expires_at>now())`
 async function activeTags(db:DB,subjectId:string):Promise<string[]>{return (await db.query<{tag_key:string}>(activeTagSelect,[subjectId])).rows.map(r=>r.tag_key)}
 export async function applicantTags(db:DB,identity:Pick<ApplicantIdentity,'channel_id'|'applicant_key'>):Promise<string[]>{
-  const {rows:[s]}=await db.query<{id:string}>('SELECT id FROM applicant_tag_subject WHERE channel_id=$1 AND applicant_key=$2',[identity.channel_id,identity.applicant_key])
-  return s?activeTags(db,s.id):[]
+  const {rows}=await db.query<{tag_key:string}>(`SELECT a.tag_key FROM applicant_tag_subject s
+    JOIN applicant_tag_assignment a ON a.subject_id=s.id
+    JOIN applicant_tag t ON t.tenant_id=a.tenant_id AND t.store_id=a.store_id AND t.tag_key=a.tag_key
+    WHERE s.channel_id=$1 AND s.applicant_key=$2 AND a.active AND t.active AND (a.expires_at IS NULL OR a.expires_at>now())`,
+    [identity.channel_id,identity.applicant_key])
+  return rows.map(row=>row.tag_key)
+}
+// Resolve a legacy label or stable tag key and check the live assignment in
+// one query. Exact keys take precedence, as in resolveTag.
+export async function applicantHasTag(db:DB,identity:ApplicantIdentity,reference:string){
+  const {rows:[row]}=await db.query<{present:boolean}>(`SELECT EXISTS(
+    SELECT 1 FROM applicant_tag_subject s JOIN applicant_tag_assignment a ON a.subject_id=s.id
+    WHERE s.channel_id=$1 AND s.applicant_key=$2 AND s.store_id=$3 AND a.active
+      AND (a.expires_at IS NULL OR a.expires_at>now()) AND a.tag_key=(
+        SELECT tag_key FROM applicant_tag WHERE store_id=$3 AND active AND (tag_key=$4 OR label=$4)
+        ORDER BY (tag_key=$4) DESC LIMIT 1
+      )
+    ) AS present`,[identity.channel_id,identity.applicant_key,identity.store_id,reference])
+  return row.present
 }
 async function setAssignment(db:DB,subject:Subject,key:string,add:boolean,at:Date,expires:Date|null,emit:boolean){
   const {rows:[old]}=await db.query<{active:boolean;changed_at:Date;expires_at:Date|null}>('SELECT active,changed_at,expires_at FROM applicant_tag_assignment WHERE subject_id=$1 AND tag_key=$2',[subject.id,key])
@@ -165,12 +182,16 @@ export async function allowApplicantTagGraph(db:DB,actor:Actor,store:string,grap
 }
 export async function validApplicantTagsForRun(db:DB,store:string,graph:Graph,started:Date){
   if(!graphUsesApplicantTags(graph))return true
-  const s=await tagState(db,store)
-  if(!s.recruitment_enabled||!s.recruitment_tags_enabled||s.recruitment_tags_enabled_at&&+started<+s.recruitment_tags_enabled_at)return false
-  const refs=applicantGraphTagRefs(graph)
-  if(!refs.length)return true
-  const active=(await definitions(db,store)).filter(t=>t.active)
-  return refs.every(ref=>active.some(t=>t.tag_key===ref||t.label===ref))
+  const refs=[...new Set(applicantGraphTagRefs(graph))]
+  const {rows:[s]}=await db.query<{recruitment_enabled:boolean;recruitment_tags_enabled:boolean;recruitment_tags_enabled_at:Date|null;refs_valid:boolean}>(`
+    SELECT s.recruitment_enabled,s.recruitment_tags_enabled,s.recruitment_tags_enabled_at,
+      NOT EXISTS (SELECT 1 FROM unnest($2::text[]) AS ref(value) WHERE NOT EXISTS (
+        SELECT 1 FROM applicant_tag t WHERE t.store_id=s.id AND t.active AND (t.tag_key=ref.value OR t.label=ref.value)
+      )) AS refs_valid
+    FROM store s WHERE s.id=$1`,[store,refs])
+  if(!s)throw missing()
+  return s.recruitment_enabled&&s.recruitment_tags_enabled&&
+    (!s.recruitment_tags_enabled_at||+started>=+s.recruitment_tags_enabled_at)&&s.refs_valid
 }
 async function requireKeys(db:DB,store:string,tags:string[]){
   const unique=[...new Set(tags)]

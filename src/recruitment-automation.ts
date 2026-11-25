@@ -3,14 +3,13 @@ import { renderMessage, waitUntil } from '../public/studio/engine.mjs'
 import { audit, keyed, newId, scope, seal, tx, unseal, type Config, type DB, type Route } from './core.js'
 import { automaticRelationshipReady, channel, channelCredentials, channelReady, type Channel, type LineAPI } from './line.js'
 import { locationOf } from './automation.js'
-import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
 import type { Graph } from './scenario.js'
 import { messageBudget } from './delivery-budget.js'
 import { INTERVIEW_LINK_MARKER, interviewLinkEligible, issueInterviewLinkToken } from './interview-link.js'
 import { contactAddress, rememberContact } from './rich-menus.js'
 import { emitApplicantEvent } from './applicant-events.js'
-import { applicantTags, applyApplicantTagRules, resolveTag, setScenarioTag, tagCampaignForRun, validApplicantTagsForRun } from './applicant-tags.js'
+import { applicantTags, applicantHasTag, applyApplicantTagRules, setScenarioTag, tagCampaignForRun, validApplicantTagsForRun } from './applicant-tags.js'
 import { deliveryScope } from './delivery-budget.js'
 export { emitApplicantEvent } from './applicant-events.js'
 
@@ -119,12 +118,12 @@ async function enrollApplicants(db:DB,c:Channel,s:Location,cfg:Config) {
       const {rows:scenarios}=await db.query<{id:string;published_version:number;graph:Graph}>(`SELECT q.id,v.version AS published_version,v.graph
         FROM scenario q JOIN scenario_version v ON v.scenario_id=q.id AND v.version=CASE WHEN $4::uuid IS NOT NULL THEN $5 ELSE q.published_version END
         WHERE ($4::uuid IS NULL OR q.id=$4) AND q.stopped=false AND v.published_at<=$1 AND q.delivery_floor<=$1 AND v.graph->>'channel'=$2 AND v.graph->>'purpose'='recruitment'
-        AND v.graph->>'trigger'=$3`,[ev.happened_at,c.id,ev.kind,campaign?.scenario_id??null,campaign?.scenario_version??null])
+        AND v.graph->>'trigger'=$3 AND ($3<>'tag_added' OR v.graph->>'triggerTag'=$6)`,[ev.happened_at,c.id,ev.kind,campaign?.scenario_id??null,campaign?.scenario_version??null,ev.tag_key])
+      // Only the actual triggering tag's scenarios need contact/catalog reads.
+      const contact=scenarios.length?await contactByKey(db,c.id,ev.applicant_key):undefined
       for (const item of scenarios) {
         if(!await validApplicantTagsForRun(db,c.store_id,item.graph,ev.happened_at))continue
-        if(ev.kind==='tag_added'&&item.graph.triggerTag!==ev.tag_key)continue
         // 顧客側の同意チェックに相当するものとして、通知の同意（notices）がある応募者だけを登録する。
-        const contact=await contactByKey(db,c.id,ev.applicant_key)
         if (!contact || !contact.notices) continue
         const last=await db.query(`SELECT starts_at,ended_at FROM applicant_enrollment WHERE scenario_id=$1 AND applicant_key=$2
           ORDER BY starts_at DESC LIMIT 1`,[item.id,ev.applicant_key])
@@ -148,56 +147,88 @@ const runSelect=`SELECT e.*,v.graph,q.stopped,evt.kind AS event_kind,evt.happene
   JOIN scenario_version v ON v.scenario_id=e.scenario_id AND v.version=e.version
   JOIN scenario q ON q.id=e.scenario_id JOIN applicant_event evt ON evt.id=e.event_id`
 
-async function note(db:DB,run:ARun,kind:string,detail:string) {
-  await db.query(`INSERT INTO applicant_note(tenant_id,store_id,channel_id,enrollment_id,kind,node_id,detail)
-    VALUES($1,$2,$3,$4,$5,$6,$7)`,[run.tenant_id,run.store_id,run.channel_id,run.id,kind,run.node_id,detail])
-}
-async function advance(db:DB,run:ARun,next:string,at=new Date()) {
-  await db.query('UPDATE applicant_enrollment SET node_id=$2,due_at=$3,wait_node=NULL WHERE id=$1',[run.id,next,at])
+async function advance(db:DB,run:ARun,next:string,at=new Date(),note?:{kind:string;detail:string}) {
+  if(note){
+    await db.query(`WITH moved AS (
+      UPDATE applicant_enrollment SET node_id=$2,due_at=$3,wait_node=NULL WHERE id=$1
+      RETURNING tenant_id,store_id,channel_id,id
+    ) INSERT INTO applicant_note(tenant_id,store_id,channel_id,enrollment_id,kind,node_id,detail)
+      SELECT tenant_id,store_id,channel_id,id,$4,$5,$6 FROM moved`,
+      [run.id,next,at,note.kind,run.node_id,note.detail])
+  }else await db.query('UPDATE applicant_enrollment SET node_id=$2,due_at=$3,wait_node=NULL WHERE id=$1',[run.id,next,at])
   run.node_id=next;run.due_at=at;run.wait_node=null
 }
 async function end(db:DB,run:ARun,why:string) {
-  await db.query(`UPDATE applicant_enrollment SET ended_at=now(),end_reason=$2 WHERE id=$1 AND ended_at IS NULL`,[run.id,why])
-  await note(db,run,'end',why)
+  await db.query(`WITH ended AS (
+    UPDATE applicant_enrollment SET ended_at=now(),end_reason=$2 WHERE id=$1 AND ended_at IS NULL
+  ) INSERT INTO applicant_note(tenant_id,store_id,channel_id,enrollment_id,kind,node_id,detail)
+    VALUES($3,$4,$5,$1,'end',$6,$2)`,[run.id,why,run.tenant_id,run.store_id,run.channel_id,run.node_id])
   run.ended_at=new Date();run.end_reason=why
 }
 
-async function currentInterview(db:DB,run:ARun) {
-  const {rows:[linked]}=await db.query<IBooking>(`SELECT b.id,b.revision,b.status,s.starts_at,b.applicant_name
-    FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id
-    WHERE b.channel_id=$1 AND b.applicant_key=$2 AND
-    (($3::uuid IS NOT NULL AND b.id=$3) OR ($3::uuid IS NULL AND b.status='confirmed' AND s.starts_at>now()))
-    ORDER BY s.starts_at LIMIT 1`,[run.channel_id,run.applicant_key,run.booking_id])
-  return linked
+// Read contact and the relevant reservation in one fresh snapshot, not a
+// shared cache. A missing row on either side remains independently visible.
+async function applicantFacts(db:DB,run:ARun) {
+  const {rows:[row]}=await db.query<Contact & {booking_id:string|null;booking_revision:number;booking_status:string;booking_starts_at:Date;applicant_name:string}>(`
+    SELECT w.*,b.id AS booking_id,b.revision AS booking_revision,b.status AS booking_status,
+      b.starts_at AS booking_starts_at,b.applicant_name
+    FROM (SELECT 1) base
+    LEFT JOIN LATERAL (
+      SELECT channel_id,purpose,subject,user_key,recipient_box,notices,notices_changed_at FROM workflow_contact
+      WHERE channel_id=$1 AND purpose='recruitment' AND subject=$2
+    ) w ON true
+    LEFT JOIN LATERAL (
+      SELECT b.id,b.revision,b.status,s.starts_at,b.applicant_name
+      FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id
+      WHERE b.channel_id=$1 AND b.applicant_key=$2 AND
+      (($3::uuid IS NOT NULL AND b.id=$3) OR ($3::uuid IS NULL AND b.status='confirmed' AND s.starts_at>now()))
+      ORDER BY s.starts_at LIMIT 1
+    ) b ON true`,[run.channel_id,run.applicant_key,run.booking_id])
+  const contact:Contact|undefined=row.channel_id?{
+    channel_id:row.channel_id,purpose:row.purpose,subject:row.subject,user_key:row.user_key,
+    recipient_box:row.recipient_box,notices:row.notices,notices_changed_at:row.notices_changed_at
+  }:undefined
+  const booking:IBooking|undefined=row.booking_id?{
+    id:row.booking_id,revision:row.booking_revision,status:row.booking_status,
+    starts_at:row.booking_starts_at,applicant_name:row.applicant_name
+  }:undefined
+  return {contact,booking}
 }
 
-async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,run:ARun,booking?:IBooking):
+async function liveValues(db:DB,cfg:Config,s:Location,c:Channel,run:ARun,body:string,booking?:IBooking):
   Promise<{values:Record<string,string>,bookingLinkValid:boolean}> {
-  let name=booking?.applicant_name??''
-  if (!name) {
+  // Avoid fetching personal details or formatting dates that the message
+  // does not reference. The renderer still enforces all required variables.
+  const needsName=/\{\{\s*name\s*\}\}/.test(body)
+  let name=needsName?(booking?.applicant_name??''):''
+  if (needsName&&!name) {
     const {rows:[latest]}=await db.query<{applicant_name:string}>(`SELECT applicant_name FROM interview_booking
       WHERE channel_id=$1 AND applicant_key=$2 ORDER BY updated_at DESC LIMIT 1`,[c.id,run.applicant_key])
     name=latest?.applicant_name??''
   }
-  if (!name) {
+  if (needsName&&!name) {
     const {rows:[rc]}=await db.query<{display_name_box:string|null}>(`SELECT display_name_box FROM recruitment_case
       WHERE channel_id=$1 AND applicant_key=$2`,[c.id,run.applicant_key])
     if (rc?.display_name_box) {
       try { name=unseal(cfg,'recruitment-name:'+c.id+':'+run.applicant_key,rc.display_name_box) } catch { name='' }
     }
   }
-  const display=booking?new Intl.DateTimeFormat('ja-JP',{timeZone:s.timezone,dateStyle:'long',timeStyle:'short'}).format(booking.starts_at):''
+  const display=booking&&/\{\{\s*booking\s*\}\}/.test(body)?new Intl.DateTimeFormat('ja-JP',{timeZone:s.timezone,dateStyle:'long',timeStyle:'short'}).format(booking.starts_at):''
   // booking_url / customer_link は応募者には発行先がないため常に空（本文で使われていれば描画側が保留にする）。
   // interview_link は呼び出し側がプレースホルダで上書きする（送信直前に実URLを発行して差し替える）。
   return {values:{name,store:s.name,staff:'',booking:display,price:'',booking_url:'',customer_link:''},bookingLinkValid:false}
 }
 
 async function applicantBarred(db:DB,cfg:Config,s:Location,c:Channel,run:ARun,
-  contact:Contact|undefined,booking:IBooking|undefined) {
+  contact:Contact|undefined,booking:IBooking|undefined,tagPolicyChecked=false) {
   if (!recruitmentEnabled(cfg,s,c) || !channelReady(c)) return '店舗またはLINE接続の配信条件が未成立'
   if (run.stopped||run.ended_at) return 'シナリオ停止'
-  if(!await validApplicantTagsForRun(db,c.store_id,run.graph,run.event_at))return '採用タグ機能が停止または変更されました'
-  if(run.campaign_id&&!await tagCampaignForRun(db,run.campaign_id,run))return 'タグ条件が変更されたか絞り込み配信が停止されました'
+  // The claim already checked the catalog and campaign under the same lock.
+  // The independent pre-send transaction always performs both checks again.
+  if(!tagPolicyChecked){
+    if(!await validApplicantTagsForRun(db,c.store_id,run.graph,run.event_at))return '採用タグ機能が停止または変更されました'
+    if(run.campaign_id&&!await tagCampaignForRun(db,run.campaign_id,run))return 'タグ条件が変更されたか絞り込み配信が停止されました'
+  }
   if (run.booking_id && (!booking||booking.revision!==run.booking_revision)) return '予約が更新されました'
   if (!contact) return '応募者の連絡先がありません'
   if (!contact.notices) return '通知の同意がありません'
@@ -208,19 +239,18 @@ async function applicantBarred(db:DB,cfg:Config,s:Location,c:Channel,run:ARun,
     if(guard.booked!==undefined&&guard.booked!==(booking?.status==='confirmed'))return '送信直前の面談予約条件に一致しません'
   }
   if (!await automaticRelationshipReady(db,c,contact.user_key)) return '友だち状態を確認できないかブロックされています'
-  const pending=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND stop_signal IS NOT NULL
-    AND processed_at IS NULL AND occurred_at>=$3 LIMIT 1`,[c.id,contact.user_key,contact.notices_changed_at])
-  if (pending.rowCount) return 'LINEで配信停止を受信'
-  if (await handoffUntil(db,c.id,contact.user_key)) return '店長対応中'
-  const handling=await db.query(`SELECT 1 FROM inbox_thread x JOIN store s ON s.id=x.store_id WHERE x.channel_id=$1
-    AND x.user_key=$2 AND x.purpose='recruitment' AND x.state='handling' AND s.inbox_enabled`,[c.id,contact.user_key])
-  if (handling.rowCount) return '有人対応中'
-  if (run.event_kind==='follow') {
-    if (booking) return '予約済みまたは返信済み'
-    const replied=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind='message'
-      AND occurred_at>=$3 LIMIT 1`,[c.id,contact.user_key,run.event_at])
-    if (replied.rowCount) return '予約済みまたは返信済み'
-  }
+  const {rows:[guards]}=await db.query<{pending_stop:boolean;handoff:boolean;handling:boolean;replied:boolean}>(`SELECT
+    EXISTS(SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND stop_signal IS NOT NULL
+      AND processed_at IS NULL AND occurred_at>=$3) AS pending_stop,
+    EXISTS(SELECT 1 FROM line_handoff WHERE channel_id=$1 AND user_key=$2 AND until_at>now()) AS handoff,
+    EXISTS(SELECT 1 FROM inbox_thread x JOIN store s ON s.id=x.store_id WHERE x.channel_id=$1
+      AND x.user_key=$2 AND x.purpose='recruitment' AND x.state='handling' AND s.inbox_enabled) AS handling,
+    ($4::boolean AND EXISTS(SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind='message'
+      AND occurred_at>=$5)) AS replied`,[c.id,contact.user_key,contact.notices_changed_at,run.event_kind==='follow',run.event_at])
+  if(guards.pending_stop)return 'LINEで配信停止を受信'
+  if(guards.handoff)return '店長対応中'
+  if(guards.handling)return '有人対応中'
+  if(run.event_kind==='follow'&&(booking||guards.replied))return '予約済みまたは返信済み'
   return null
 }
 
@@ -228,8 +258,7 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
   const node=run.graph.nodes.find(n=>n.id===run.node_id)
   if (!node || run.stopped || !recruitmentEnabled(cfg,s,c)) { await end(db,run,'シナリオ停止または配信無効');return null }
   if(!await validApplicantTagsForRun(db,c.store_id,run.graph,run.event_at)||run.campaign_id&&!await tagCampaignForRun(db,run.campaign_id,run)){await end(db,run,'採用タグ機能または配信条件の変更');return null}
-  const contact=await contactByKey(db,c.id,run.applicant_key)
-  const booking=await currentInterview(db,run)
+  const {contact,booking}=await applicantFacts(db,run)
   if ((contact && !contact.notices) || run.booking_id && booking?.revision!==run.booking_revision) {
     await end(db,run,'配信停止または旧予約版')
     return null
@@ -256,27 +285,26 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
         [c.id,contact.user_key])
       responded=!!reply.rowCount
     }
-    const key=node.condition==='tag'&&node.tag?await resolveTag(db,c.store_id,node.tag):null
+    const tagged=node.condition==='tag'&&node.tag?await applicantHasTag(db,run,node.tag):false
     const states={booked:booking?.status==='confirmed',consent:!!contact?.notices,adult:false,
-      responded,assigned:false,tag:!!key&&(await applicantTags(db,run)).includes(key)}
-    await note(db,run,'branch',states[node.condition]?'はい':'いいえ')
-    await advance(db,run,states[node.condition]?node.yes:node.no,run.due_at)
+      responded,assigned:false,tag:tagged}
+    await advance(db,run,states[node.condition]?node.yes:node.no,run.due_at,
+      {kind:'branch',detail:states[node.condition]?'はい':'いいえ'})
     return null
   }
   if (node.type==='tag'||node.type==='task') {
     if(node.type==='tag'){
       const saved=await setScenarioTag(db,run,node.tag,node.action!=='remove')
       if(!saved){await end(db,run,'採用タグが無効になりました');return null}
-      await note(db,run,'tag',(node.action==='remove'?'解除：':'付与：')+node.tag)
-    }else await note(db,run,'task',node.note)
-    await advance(db,run,node.next,run.due_at)
+      await advance(db,run,node.next,run.due_at,{kind:'tag',detail:(node.action==='remove'?'解除：':'付与：')+node.tag})
+    }else await advance(db,run,node.next,run.due_at,{kind:'task',detail:node.note})
     return null
   }
-  const reason=await applicantBarred(db,cfg,s,c,run,contact,booking)
+  const reason=await applicantBarred(db,cfg,s,c,run,contact,booking,true)
   const now=Date.now()
   const expired=now-+run.due_at>(run.campaign_id?day:30*minute)
   const id=newId()
-  const person=await liveValues(db,cfg,s,c,run,booking)
+  const person=await liveValues(db,cfg,s,c,run,node.body,booking)
   // 面談予約URLは実URLをこの時点では発行せず、プレースホルダで封緘する（発行は submit 直前）。
   // 発行条件を満たさない場合は、このメッセージを保留してURLを送らない（テスト送信と同じ挙動）。
   let linkHeld:string|null=null
@@ -289,8 +317,7 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
     await messageBudget(db,s,null,undefined)
   const rendered=renderMessage(node.body,person)
   if (exclude || !rendered.message) {
-    await note(db,run,'held',exclude??rendered.reason??'差し込み値がありません')
-    await advance(db,run,node.next,run.due_at)
+    await advance(db,run,node.next,run.due_at,{kind:'held',detail:exclude??rendered.reason??'差し込み値がありません'})
     return null
   }
   const result=await db.query<AJob>(`INSERT INTO applicant_send(id,tenant_id,store_id,channel_id,enrollment_id,
@@ -339,37 +366,33 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
     await lockDispatch(db,r.tenant_id)
     return work(db)
   })
-  const {job,worked}=await scoped(async db=>{
+  const {job,worked,connection}=await scoped(async db=>{
     const c=await channel(db,r.id)
-    if (c.purpose==='customer') return {job:null,worked:false}
+    if (c.purpose==='customer') return {job:null,worked:false,connection:null}
     const s=await locationOf(db,r.store_id)
     const enrolled=campaignOnly?0:await enrollApplicants(db,c,s,cfg)
-    if (!cfg.external || !cfg.automation) return {job:null,worked:enrolled>0}
+    if (!cfg.external || !cfg.automation) return {job:null,worked:enrolled>0,connection:null}
     const chosen=await chooseJob(db,cfg,c,s,campaignOnly)
-    return {job:chosen.job,worked:enrolled>0||chosen.advanced}
+    return {job:chosen.job,worked:enrolled>0||chosen.advanced,connection:c}
   })
   if (!job) return worked
-  const quota=await tx(pool,async db=>{
-    await scope(db,r.tenant_id,r.store_id)
-    const c=await channel(db,r.id)
-    if (!channelReady(c) || c.generation!==job.generation) return null
-    return c
-  })
+  // Reuse the committed claim's connection for the read-only quota check,
+  // just as service delivery does. Sending still requires a fresh generation,
+  // connection and all guards in the independent locked submission below.
   let remaining:number|null=null
-  if (quota) {
-    try {remaining=await api.quota(channelCredentials(cfg,quota))}
+  if (connection&&channelReady(connection)&&connection.generation===job.generation) {
+    try {remaining=await api.quota(channelCredentials(cfg,connection))}
     catch { /* External quota verification is required before a new LINE request. */ }
   }
   const submitted=await scoped(async db=>{
     const {rows:[fresh]}=await db.query<AJob>('SELECT * FROM applicant_send WHERE id=$1 FOR UPDATE',[job.id])
     if (fresh.status!=='submitting'||fresh.attempt!==job.attempt) return null
     const {rows:[run]}=await db.query<ARun>(runSelect+' WHERE e.id=$1',[job.enrollment_id])
-    const contact=await contactByKey(db,r.id,job.applicant_key)
     const c=await channel(db,r.id)
     const s=await locationOf(db,r.store_id)
-    const booking=await currentInterview(db,run)
+    const {contact,booking}=await applicantFacts(db,run)
     const current=run.graph.nodes.find(node=>node.id===job.node_id)
-    const person=await liveValues(db,cfg,s,c,run,booking)
+    const person=await liveValues(db,cfg,s,c,run,current?.type==='message'?current.body:'',booking)
     // 封緘時と同じプレースホルダで再描画し、差し込み値の同一性を照合する（実URLはまだ発行しない）。
     if (current?.type==='message' && current.body.includes(INTERVIEW_LINK_MARKER)) {
       person.values.interview_link=interviewLinkPlaceholder(job.id)
@@ -427,8 +450,7 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
     if (result.authError) await db.query(`UPDATE channel SET checks=checks-'token_verified'-'webhook_verified',
       revision=revision+1 WHERE id=$1 AND generation=$2`,[r.id,job.generation])
     if (result.status==='accepted') {
-      await note(db,submitted.run,'accepted','LINE受付済')
-      await advance(db,submitted.run,submitted.next)
+      await advance(db,submitted.run,submitted.next,new Date(),{kind:'accepted',detail:'LINE受付済'})
     } else if (resultRow.next_at===Infinity) await end(db,submitted.run,finalStatus==='failed'?'送信失敗':'送信結果不明')
   })
   return true

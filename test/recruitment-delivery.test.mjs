@@ -50,6 +50,7 @@ let recruitCh, sharedCh
 const pushes = []
 const dispatches=[]
 let onQuota=null
+let countedQueries=null,queriesBeforePush=null
 const dispatchRequest=(input,authorization='Bearer test-worker')=>send('/internal/line-dispatch',{method:'POST',headers:{'Content-Type':'application/json',Authorization:authorization},body:JSON.stringify(input)})
 const signed = raw => createHmac('sha256', channelSecret).update(raw).digest('base64')
 const send = (url, options = {}) => fetch(base + url, { redirect: 'error',...options})
@@ -186,6 +187,10 @@ before(async () => {
   owner = poolFor(`postgresql://night_owner:owner-test@127.0.0.1:${port}/postgres`)
   await owner.query("CREATE ROLE night_app LOGIN NOBYPASSRLS PASSWORD 'app-test'")
   pool = poolFor(`postgresql://night_app:app-test@127.0.0.1:${port}/postgres`)
+  pool.on('connect',client=>{
+    const query=client.query.bind(client)
+    client.query=(...args)=>{if(countedQueries!==null)countedQueries++;return query(...args)}
+  })
   await migrate(owner, 'night_app')
   await assertAppRole(pool)
   const fetchLine = async (url, options) => {
@@ -205,6 +210,7 @@ before(async () => {
       case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0})
       case '/v2/bot/message/push': {
         const body = JSON.parse(options.body)
+        if(countedQueries!==null&&body.messages[0].text==='タグテンプレート送信確認B')queriesBeforePush=countedQueries
         pushes.push({ to: body.to, text: body.messages[0].text})
         return new Response('{}', { status: 200, headers: { 'x-line-request-id': 'line-id'}})
       }
@@ -697,6 +703,15 @@ test('採用タグテンプレート: 現在のタグカタログに対応し、
   assert.equal(dispatches.length,at+1)
   const job=dispatches.at(-1);assert.deepEqual(job,{channel:recruitCh,source:'applicant'})
   assert.equal((await dispatchRequest(job,'Bearer invalid')).status,403)
+  countedQueries=0
+  assert.equal((await dispatchRequest(job)).status,204)
+  const immediateQueries=countedQueries
+  countedQueries=null
+  console.log('Immediate template database round trips:',immediateQueries,'before push:',queriesBeforePush)
+  // Previous implementation: 108 total queries and 76 before the LINE push.
+  // A bounded budget catches accidental reintroduction of per-branch lookups.
+  assert.ok(queriesBeforePush!==null&&queriesBeforePush<=55,'送信開始までのDB往復数を55以下に保つ')
+  assert.ok(immediateQueries<=90,'即時処理全体のDB往復数を90以下に保つ')
   const requests=await Promise.all([dispatchRequest(job),dispatchRequest(job)])
   assert.deepEqual(requests.map(r=>r.status),[204,204])
   assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認B').length,1,'定期実行なしの即時処理で重複なく配信')
@@ -718,6 +733,7 @@ test('採用タグ即時処理: 明示的な未来の待機を維持し、時刻
   assert.equal(run.node_id,'wait');assert.equal(run.wait_node,'wait');assert.ok(+run.due_at>Date.now()+3500000)
   assert.equal(pushesTo(tagUser).filter(x=>x.text==='予約した待機の後に通知').length,0)
   await read("UPDATE applicant_enrollment SET due_at=now()-interval '1 second' WHERE scenario_id=$1",[scenario.id])
-  assert.equal((await dispatchRequest(task)).status,204)
+  const results=await Promise.all([dispatchRequest(task),dispatchRequest(task)])
+  assert.deepEqual(results.map(r=>r.status),[204,204])
   assert.equal(pushesTo(tagUser).filter(x=>x.text==='予約した待機の後に通知').length,1)
 })
