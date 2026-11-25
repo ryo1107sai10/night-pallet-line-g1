@@ -854,9 +854,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const data = connectionSchema.parse(req.body)
     const store = idOf(req,'store')
     return once(db,cfg,actor,'line.register',keyOf(req),{store,data},async()=>{
-      const botUserId = data.bot_user_id ?? await line.botIdForChannel(data.messaging_id,data)
-      if (!botUserId) throw new Fault(422,'LINE_CHANNEL_TOKEN','Messaging APIのチャネルIDと、同じチャネルで発行したアクセストークンを確認してください。')
-      const created=await createChannel(db,cfg,actor,store,{...data,bot_user_id:botUserId})
+      const identity = data.bot_user_id ? {userId:data.bot_user_id,basicId:null} : await line.botIdentityForChannel(data.messaging_id,data)
+      if (!identity) throw new Fault(422,'LINE_CHANNEL_TOKEN','Messaging APIのチャネルIDと、同じチャネルで発行したアクセストークンを確認してください。')
+      const created=await createChannel(db,cfg,actor,store,{...data,bot_user_id:identity.userId,basic_id:identity.basicId})
       await markOnboardingRegistered(db,store,created.id)
       return created
     })
@@ -895,14 +895,17 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境でLINE接続を確認してください。')
       await gate(pool,cfg,'line-check:'+item+':'+c.id,5)
       const cred = channelCredentials(cfg,c)
-      const passed = item==='token' ? await line.checkToken(c,cred)
+      const identity = item==='token' && !('module' in cred) && c.messaging_id
+        ? await line.botIdentityForChannel(c.messaging_id,cred) : null
+      const passed = item==='token' ? ('module' in cred ? await line.checkToken(c,cred) : identity?.userId===c.bot_user_id)
         : c.checks.token_verified && await line.checkWebhook(cred,cfg.origin+'/api/v1/webhooks/line/'+c.id)
       const response = await tx(pool,async db=>{
         await read(db)
         await lockDispatch(db,actor.tenant_id)
         const checks = { [item+'_verified']: !!passed, ...(item==='token' && !passed ? {webhook_verified:false} : {}) }
-        const updated = await db.query(`UPDATE channel SET checks=checks || $2::jsonb,revision=revision+1
-          WHERE id=$1 AND revision=$3 RETURNING id`,[c.id,JSON.stringify(checks),c.revision])
+        const updated = await db.query(`UPDATE channel SET checks=checks || $2::jsonb,revision=revision+1,
+          basic_id=coalesce($4,basic_id) WHERE id=$1 AND revision=$3 RETURNING id`,
+          [c.id,JSON.stringify(checks),c.revision,passed&&identity?identity.basicId:null])
         if (!updated.rowCount) throw conflict()
         await audit(db,c.tenant_id,c.store_id,actor.id,'line.check_'+item,c.id,null,checks)
         return summary(db,cfg,await channel(db,c.id))

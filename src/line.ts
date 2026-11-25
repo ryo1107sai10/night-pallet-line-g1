@@ -90,17 +90,17 @@ export function channelCredentials(cfg: Config, c: Channel):SendCredentials {
 }
 
 export async function createChannel(db: DB, cfg: Config, actor: Actor, store: string,
-  data: z.infer<typeof connectionSchema> & {bot_user_id:string}) {
+  data: z.infer<typeof connectionSchema> & {bot_user_id:string;basic_id?:string|null}) {
   const c = { id: newId(), tenant_id: actor.tenant_id, store_id: store, messaging_id: data.messaging_id }
   await db.query('INSERT INTO channel_route(id,tenant_id,store_id,messaging_id) VALUES($1,$2,$3,$4)',
     [c.id,c.tenant_id,c.store_id,c.messaging_id])
   const { access_token, channel_secret, token_type } = data
   await db.query(`INSERT INTO channel(id,tenant_id,store_id,label,purpose,owner_name,provider_id,
-    bot_user_id,account_type,existing_webhook,existing_tools,management_authority,credentials)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+    bot_user_id,account_type,existing_webhook,existing_tools,management_authority,credentials,basic_id)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
     [c.id,c.tenant_id,c.store_id,data.label,data.purpose,data.owner_name,data.provider_id,
       data.bot_user_id,data.account_type,data.existing_webhook ?? null,data.existing_tools ?? null,
-      data.management_authority,seal(cfg,secretContext(c),JSON.stringify({access_token,channel_secret,token_type}))])
+      data.management_authority,seal(cfg,secretContext(c),JSON.stringify({access_token,channel_secret,token_type})),data.basic_id??null])
   await audit(db,c.tenant_id,c.store_id,actor.id,'line.register',c.id)
   return { id: c.id }
 }
@@ -185,7 +185,7 @@ export class LineAPI {
     }
   }
 
-  async botIdForChannel(messagingId: string, cred: Credentials) {
+  async botIdentityForChannel(messagingId: string, cred: Credentials) {
     const endpoint = '/oauth2/v2.1/verify?' + new URLSearchParams({ access_token: cred.access_token })
     const verified = await (cred.token_type === 'v2.1'
       ? this.call(endpoint)
@@ -195,8 +195,15 @@ export class LineAPI {
     const bot = await this.call('/v2/bot/info', { headers: { Authorization: 'Bearer ' + cred.access_token } })
     if (bot.status === 429 || bot.status >= 500) throw lineUnavailable()
     if (!bot.ok) return null
-    const identity = userId.safeParse((await bot.json()).userId)
-    return identity.success ? identity.data : null
+    const payload=await bot.json()
+    const identity = userId.safeParse(payload.userId)
+    if(!identity.success)return null
+    const basic=z.string().regex(/^@[a-zA-Z0-9._-]{1,30}$/).safeParse(payload.basicId)
+    return {userId:identity.data,basicId:basic.success?basic.data:null}
+  }
+
+  async botIdForChannel(messagingId: string, cred: Credentials) {
+    return (await this.botIdentityForChannel(messagingId,cred))?.userId??null
   }
 
   async checkToken(c: Channel, cred: SendCredentials) {

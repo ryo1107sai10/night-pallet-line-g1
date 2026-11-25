@@ -19,7 +19,7 @@ import { issueInterviewLinkToken } from '../dist/interview-link.js'
 import { issueCustomerLinkToken } from '../dist/customer-link.js'
 import { starter } from '../public/studio/engine.mjs'
 import { reorderStep } from '../public/studio/step-order.mjs'
-import { lineSetupLinks } from '../public/line-setup.mjs'
+import { lineSetupLinks,lineConsoleId,lineBasicId } from '../public/line-setup.mjs'
 
 const origin = 'https://example.test'
 const cfg = { origin, master:randomBytes(32), external:true, automation:true }
@@ -103,6 +103,26 @@ test('公式LINEの設定ボタンは対象チャネルの画面を開き、未�
   assert.equal(links.messagingBasics,root+'channel/'+ids.messaging)
   assert.equal(links.messagingSettings,root+'channel/'+ids.messaging+'/messaging-api')
   assert.equal(lineSetupLinks({messaging_id:'../token?secret=sample'}).messagingSettings,root)
+})
+
+test('公式LINE設定ナビはIDや正規の設定URLから移動先を再構成し、外部URLや秘密情報を引き継がない',()=>{
+  const root='https://developers.line.biz/console/'
+  const links=lineSetupLinks({provider_id:root+'provider/2000000010/settings',messaging_id:root+'channel/'+ids.messaging+'/messaging-api?unused=sample',
+    basic_id:'https://manager.line.biz/account/@testshop/setting/messaging-api'})
+  assert.equal(links.provider,root+'provider/2000000010/settings')
+  assert.equal(links.messagingBasics,root+'channel/'+ids.messaging)
+  assert.equal(links.messagingSettings,root+'channel/'+ids.messaging+'/messaging-api')
+  assert.equal(links.managerMessaging,'https://manager.line.biz/account/@testshop/setting/messaging-api')
+  assert.equal(lineBasicId(' ＠testshop '),'@testshop')
+  assert.equal(lineConsoleId('２０００００００１０','provider'),'2000000010')
+  const invalid=lineSetupLinks({provider_id:'https://developers.line.biz.example.test/console/provider/2000000010',
+    messaging_id:'https://example.test/console/channel/'+ids.messaging,basic_id:'https://manager.line.biz.example.test/account/@testshop'})
+  assert.equal(invalid.provider,root)
+  assert.equal(invalid.messagingSettings,root)
+  assert.equal(invalid.managerMessaging,'https://manager.line.biz/')
+  assert.equal(lineConsoleId('https://someone@developers.line.biz/console/channel/'+ids.messaging,'channel'),'')
+  assert.equal(lineConsoleId(root+'provider/2000000010','channel'),'')
+  assert.equal(lineBasicId('@test/shop'),'')
 })
 
 // 本人確認はトークン方式に一本化した。セッションはリンク発行→引換APIで取得する。
@@ -221,7 +241,7 @@ before(async ()=>{
         assert.equal(options.body.get('client_secret'),moduleConfig.secret)
         return Response.json({access_token:moduleToken,expires_in:900})
       case '/v2/bot/info': {
-        if (!options.headers[moduleConfig.botHeader]) return Response.json({userId:bot})
+        if (!options.headers[moduleConfig.botHeader]) return Response.json({userId:bot,basicId:'@g1test'})
         assert.equal(options.headers.Authorization,'Bearer '+moduleToken)
         assert.equal(options.headers[moduleConfig.botHeader],moduleBot)
         if (botInfoUnavailable) return new Response(null,{status:503})
@@ -374,6 +394,7 @@ test('AT01/04 接続台帳とWebhookの署名・destination・再送',async ()=>
   expect(await post('/stores/'+otherStore+'/connections',admin,data,idempotency()),409)
   const result = expect(await request(prefix,{cookie:manager}),200)[0]
   assert.equal(result.bot_user_id,bot)
+  assert.equal(result.basic_id,'@g1test')
   assert.equal(result.status,'pending')
   assert.doesNotMatch(JSON.stringify(result),new RegExp(channelSecret+'|'+accessToken+'|credentials'))
   assert.notEqual((await read('SELECT credentials FROM channel')).rows[0].credentials,channelSecret)
@@ -412,7 +433,10 @@ async function prepareTester(usage='recruitment') {
 
 test('AT01/05/06 用途の固定、兼用OAの隔離、受付と実機確認の区別',async ()=>{
   expect(await patch(path+'/console',admin,{...consoleChecks,reason:'公式管理画面で照合',revision:(await getChannel()).revision}),200)
-  expect(await post(path+'/check-token',admin,{revision:(await getChannel()).revision}),200)
+  await read('UPDATE channel SET basic_id=NULL WHERE id=$1',[c])
+  const checked=expect(await post(path+'/check-token',admin,{revision:(await getChannel()).revision}),200)
+  assert.equal(checked.basic_id,'@g1test')
+  assert.equal(checked.checks.token_verified,true)
   expect(await post(path+'/check-webhook',admin,{revision:(await getChannel()).revision}),200)
   const salesEmail = 'sales@example.test'
   const salesInvite = expect(await post('/staff/invites',admin,{email:salesEmail,role:'sales',stores:[storeId]},idempotency()),201)

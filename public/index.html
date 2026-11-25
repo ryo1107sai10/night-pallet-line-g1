@@ -58,8 +58,8 @@
     <label>利用中のツール<input name="existing_tools" placeholder="任意"></label>
   </template>
   <template id="messaging-fields">
-    <label>プロバイダーID<input name="provider_id" required></label>
-    <label>Messaging API チャネルID<input name="messaging_id" inputmode="numeric" required></label>
+    <label>プロバイダーID<input name="provider_id" inputmode="numeric" autocomplete="off" placeholder="数字 またはプロバイダー設定URL" required></label>
+    <label>Messaging API チャネルID<input name="messaging_id" inputmode="numeric" autocomplete="off" placeholder="数字 またはチャネル設定URL" required></label>
   </template>
   <template id="credentials-fields">
     <label>トークン種別<select name="token_type"><option value="console">長期・短期</option><option value="v2.1">v2.1</option></select></label>
