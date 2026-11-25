@@ -76,6 +76,7 @@ export async function saveApplicantTagSettings(db:DB,actor:Actor,store:string,da
   if(!state.recruitment_enabled)throw new Fault(409,'RECRUITMENT_DISABLED','先に応募・選考管理を有効にしてください。')
   if(state.revision!==data.revision)throw conflict()
   await db.query(`UPDATE store SET recruitment_tags_enabled=$2,recruitment_tags_enabled_at=CASE WHEN recruitment_tags_enabled<>$2 THEN clock_timestamp() ELSE recruitment_tags_enabled_at END,revision=revision+1 WHERE id=$1`,[store,data.enabled])
+  await requeueTagMenus(db,store)
   await audit(db,actor.tenant_id,store,actor.id,'recruitment.tags.settings',store,null,{enabled:data.enabled})
   return {enabled:data.enabled}
 }
@@ -88,6 +89,7 @@ export async function saveApplicantTag(db:DB,actor:Actor,store:string,data:z.inf
     WHERE store_id=$1 AND tag_key=$2 AND revision=$8 RETURNING tag_key,revision`,[store,key,data.label,data.category,data.add_events,data.remove_events,data.active,data.revision]):
     await db.query(`INSERT INTO applicant_tag(tenant_id,store_id,tag_key,label,category,add_events,remove_events,active) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING tag_key,revision`,[actor.tenant_id,store,key,data.label,data.category,data.add_events,data.remove_events,data.active])
   if(!result.rowCount)throw conflict()
+  await requeueTagMenus(db,store,key)
   await audit(db,actor.tenant_id,store,actor.id,'recruitment.tag.definition',store,null,{key,active:data.active})
   return result.rows[0]
 }
@@ -124,6 +126,14 @@ export async function applicantHasTag(db:DB,identity:ApplicantIdentity,reference
     ) AS present`,[identity.channel_id,identity.applicant_key,identity.store_id,reference])
   return row.present
 }
+// Re-evaluate only menus that use tag rules, scoped to the affected store/contact.
+async function requeueTagMenus(db:DB,store:string,tag?:string,subject?:{channel_id:string;applicant_key:string}){
+  await db.query(`UPDATE workflow_contact w SET menu_due_at=now()
+    FROM workflow_menu m WHERE w.store_id=$1 AND w.channel_id=m.channel_id AND w.purpose=m.purpose
+      AND w.purpose='recruitment' AND jsonb_array_length(m.tag_rules)>0
+      AND ($2::text IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements(m.tag_rules) r WHERE r->>'tag'=$2))
+      AND ($3::uuid IS NULL OR (w.channel_id=$3 AND w.subject=$4))`,[store,tag??null,subject?.channel_id??null,subject?.applicant_key??null])
+}
 async function setAssignment(db:DB,subject:Subject,key:string,add:boolean,at:Date,expires:Date|null,emit:boolean){
   const {rows:[old]}=await db.query<{active:boolean;changed_at:Date;expires_at:Date|null}>('SELECT active,changed_at,expires_at FROM applicant_tag_assignment WHERE subject_id=$1 AND tag_key=$2',[subject.id,key])
   if(old&&+old.changed_at>+at)return false
@@ -132,7 +142,10 @@ async function setAssignment(db:DB,subject:Subject,key:string,add:boolean,at:Dat
   await db.query(`INSERT INTO applicant_tag_assignment(tenant_id,store_id,subject_id,tag_key,active,changed_at,expires_at)
     VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(subject_id,tag_key) DO UPDATE SET active=excluded.active,changed_at=excluded.changed_at,expires_at=excluded.expires_at`,
     [subject.tenant_id,subject.store_id,subject.id,key,add,at,add?expires:null])
-  if(wasActive!==add||+(old?.expires_at??0)!==+(expires??0))await db.query('UPDATE applicant_tag_subject SET revision=revision+1,updated_at=now() WHERE id=$1',[subject.id])
+  if(wasActive!==add||+(old?.expires_at??0)!==+(expires??0)){
+    await db.query('UPDATE applicant_tag_subject SET revision=revision+1,updated_at=now() WHERE id=$1',[subject.id])
+    await requeueTagMenus(db,subject.store_id,key,subject)
+  }
   if(emit&&add&&!wasActive&&(!expires||+expires>Date.now())&&(await db.query(`SELECT 1 FROM workflow_contact WHERE channel_id=$1 AND purpose='recruitment' AND subject=$2 AND notices AND notices_changed_at<=$3`,[subject.channel_id,subject.applicant_key,at])).rowCount)return emitApplicantEvent(db,subject,'tag:'+newId(),'tag_added',at,undefined,{tagKey:key})
   return false
 }

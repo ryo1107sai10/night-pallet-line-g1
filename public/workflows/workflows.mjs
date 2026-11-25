@@ -372,14 +372,48 @@ function richMenus(root,entries,path,refresh,use){
   for(const entry of entries){
     const row=el('article',null,'record')
     row.append(el('h3',entry.label),el('p','切替済み '+entry.linked+'人'+(entry.verified?'':' · メニュー未照合')))
-    row.append(form([
+    const rules=(entry.tag_rules??[]).map(rule=>({...rule}))
+    const editor=form([
       field('通常時のメニューID','base_menu','text',entry.base_menu),
       field(use==='recruitment'?'面談が確定しているときのメニューID':'来店予約が確定しているときのメニューID','booked_menu','text',entry.booked_menu),
     ],'LINEで確認して保存',async values=>{
-      await api(path+'/rich-menus','PUT',{channel:entry.id,revision:entry.revision,
-        base_menu:values.base_menu.trim()||null,booked_menu:values.booked_menu.trim()||null})
+      const payload={channel:entry.id,revision:entry.revision,base_menu:values.base_menu.trim()||null,booked_menu:values.booked_menu.trim()||null}
+      if(entry.tags_enabled){
+        if(rules.some(rule=>!rule.tag||!rule.menu.trim()))throw new Error('各ルールのタグとメニューIDを入力してください。')
+        if(new Set(rules.map(rule=>rule.tag)).size!==rules.length)throw new Error('同じタグは1回だけ指定してください。')
+        payload.tag_rules=rules.map(rule=>({tag:rule.tag,menu:rule.menu.trim()}))
+      }
+      await api(path+'/rich-menus','PUT',payload)
       await refresh('リッチメニュー設定を保存しました。')
-    }))
+    })
+    if(use==='recruitment'){
+      const section=el('section',null,'record')
+      section.append(el('h3','採用タグ別のメニュー'),el('p','上から優先されます。該当するタグがない場合は予約状態に応じた通常の設定になります。タグの追加・解除でも自動的に再判定します。'))
+      if(entry.tags_enabled){
+        const list=el('div')
+        const redraw=()=>{
+          list.replaceChildren()
+          rules.forEach((rule,index)=>{
+            const card=el('div',null,'tag-subject')
+            const options=[['','タグを選択'],...(entry.tags??[]).map(tag=>[tag.tag_key,tag.label+(tag.active?'':'（無効）')])]
+            if(rule.tag&&!options.some(([key])=>key===rule.tag))options.push([rule.tag,'未登録のタグ（変更してください）'])
+            const tagPicker=field('優先順位 '+(index+1)+'：タグ','rule-tag-'+index,'text',rule.tag,options)
+            const menuPicker=field('メニューID','rule-menu-'+index,'text',rule.menu)
+            tagPicker.querySelector('select').onchange=e=>rule.tag=e.target.value
+            menuPicker.querySelector('input').oninput=e=>rule.menu=e.target.value
+            const up=button('上へ',()=>{[rules[index-1],rules[index]]=[rules[index],rules[index-1]];redraw()})
+            const down=button('下へ',()=>{[rules[index+1],rules[index]]=[rules[index],rules[index+1]];redraw()})
+            up.disabled=index===0;down.disabled=index===rules.length-1
+            card.append(tagPicker,menuPicker,controls(up,down,button('削除',()=>{rules.splice(index,1);redraw()})))
+            list.append(card)
+          })
+          if(rules.length<10)list.append(button('タグ別の切り替えを追加',()=>{rules.push({tag:'',menu:''});redraw()}))
+        }
+        redraw();section.append(list)
+      }else section.append(el('p','採用タグ機能をオンにすると設定できます。保存済みのタグ別ルールは保持されます。','muted'))
+      editor.insertBefore(section,editor.querySelector('button.primary'))
+    }
+    row.append(editor)
     root.append(row)
   }
   if(!entries.length)root.append(el('p','対象の公式LINEを先に登録してください。'))

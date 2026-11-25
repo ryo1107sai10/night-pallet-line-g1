@@ -81,6 +81,11 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
     [store,features.reminders_enabled===false,features.waitlist_enabled===false,features.inbox_enabled===false,
       features.token_interviews_enabled===false,features.token_customers_enabled===false])
   }
+  if(features.recruitment_tags_enabled!==undefined||features.recruitment_enabled!==undefined||features.rich_menus_enabled===true){
+    await db.query(`UPDATE workflow_contact w SET menu_due_at=now() FROM workflow_menu m
+      WHERE w.store_id=$1 AND m.channel_id=w.channel_id AND m.purpose=w.purpose AND w.purpose='recruitment'
+        AND jsonb_array_length(m.tag_rules)>0`,[store])
+  }
   await audit(db,actor.tenant_id,store,actor.id,'store.features',store,null,features)
   return settings
 }

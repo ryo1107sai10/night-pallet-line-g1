@@ -48,6 +48,7 @@ const consoleChecks = {
 let pg, owner, pool, server, dir, base, tenant, storeId, admin, line, google
 let recruitCh, sharedCh
 const pushes = []
+const menuCalls=[]
 const dispatches=[]
 let onQuota=null
 let countedQueries=null,queriesBeforePush=null
@@ -196,6 +197,11 @@ before(async () => {
   const fetchLine = async (url, options) => {
     const address = new URL(url)
     assert.equal(address.origin, 'https://api.line.me')
+    if(address.pathname.startsWith('/v2/bot/richmenu/'))return new Response(null,{status:address.pathname.endsWith('0'.repeat(32))?404:200})
+    if(/^\/v2\/bot\/user\/U[0-9a-f]{32}\/richmenu/.test(address.pathname)){
+      menuCalls.push({path:address.pathname,method:options.method,authorization:options.headers.Authorization})
+      return new Response(null,{status:200})
+    }
     switch (address.pathname) {
       case '/v2/oauth/verify':
         return Response.json({ client_id: clients[options.body.get('access_token')]})
@@ -736,4 +742,45 @@ test('採用タグ即時処理: 明示的な未来の待機を維持し、時刻
   const results=await Promise.all([dispatchRequest(task),dispatchRequest(task)])
   assert.deepEqual(results.map(r=>r.status),[204,204])
   assert.equal(pushesTo(tagUser).filter(x=>x.text==='予約した待機の後に通知').length,1)
+})
+
+
+test('採用リッチメニューは店舗タグを優先順位で判定し、タグ追加・解除・無効化に追随する',async()=>{
+  await setFeatures({rich_menus_enabled:true})
+  const path='/stores/'+storeId+'/workflows/recruitment/rich-menus'
+  const list=async()=>expect(await request(path,{cookie:admin}),200).find(entry=>entry.id===recruitCh)
+  const entry=await list()
+  assert.ok(entry.tags_enabled)
+  assert.ok(entry.tags.some(tag=>tag.tag_key==='follow_up'))
+  const baseMenu='richmenu-'+'1'.repeat(32), first='richmenu-'+'2'.repeat(32), second='richmenu-'+'3'.repeat(32)
+  const config={channel:recruitCh,revision:entry.revision,base_menu:baseMenu,booked_menu:baseMenu}
+  const save=data=>request(path,{method:'PUT',cookie:admin,data})
+  expect(await save({...config,tag_rules:[{tag:'not-a-store-tag',menu:first}]}),422)
+  expect(await save({...config,tag_rules:[{tag:'follow_up',menu:'richmenu-'+'0'.repeat(32)}]}),422)
+  expect(await save({...config,tag_rules:[{tag:'follow_up',menu:first},{tag:'follow_up',menu:second}]}),400)
+  const rules=[{tag:'beginner',menu:first},{tag:'experienced',menu:second}]
+  expect(await save({...config,tag_rules:rules}),200)
+  assert.deepEqual((await list()).tag_rules,rules)
+  let a=await personByName('タグ検証A'),b=await personByName('タグ検証B')
+  await assign(a,[...a.tags.filter(k=>!['beginner','experienced'].includes(k)),'beginner','experienced'])
+  await assign(b,[...b.tags.filter(k=>!['beginner','experienced'].includes(k)),'experienced'])
+  await flush(30)
+  const latest=who=>menuCalls.filter(call=>call.path.includes('/'+who+'/richmenu')&&call.authorization==='Bearer access-token-recruit').at(-1)?.path.split('/').at(-1)
+  assert.equal(latest(tagUser),first)
+  assert.equal(latest(tagOther),second)
+  a=await personByName('タグ検証A');await assign(a,a.tags.filter(tag=>tag!=='beginner'))
+  await flush(3)
+  assert.equal(latest(tagUser),second)
+  a=await personByName('タグ検証A');await assign(a,a.tags.filter(tag=>tag!=='experienced'))
+  await flush(3)
+  assert.equal(latest(tagUser),baseMenu)
+  assert.equal(latest(tagOther),second)
+  const current=await overview()
+  expect(await patch(tagsRoot()+'/settings',admin,{revision:current.revision,enabled:false}),200)
+  await flush(30)
+  assert.equal(latest(tagOther),baseMenu)
+  const disabled=await list();assert.equal(disabled.tags_enabled,false);assert.deepEqual(disabled.tag_rules,rules)
+  expect(await patch(tagsRoot()+'/settings',admin,{revision:(await overview()).revision,enabled:true}),200)
+  await flush(30)
+  assert.equal(latest(tagOther),second)
 })
