@@ -136,3 +136,11 @@ dialog p{font-size:13px;margin-bottom:12px;color:#c6c7df}
 .branch-lane .branch-lanes .branch-lanes{grid-template-columns:1fr}
 .path-ref{width:100%;min-height:40px;font-size:12px;overflow-wrap:anywhere;color:#dbd4f2;text-align:center;background:#181a33;border:1px dashed #a69ad366;border-radius:11px;padding:8px;margin:0}
 .disconnected{border-top:1px dashed #a69ad366;margin-top:20px;padding-top:12px;display:grid;gap:6px}
+/* Tag template chooser: compact on mobile, wide enough to read complete messages on desktop. */
+#dialog.template-dialog{max-width:min(680px,calc(100% - 24px));max-height:calc(100dvh - 36px);overflow:auto}
+.tag-template-picker{display:grid;gap:12px;min-width:0}.tag-template-picker .field{margin:0;min-width:0}.tag-template-picker select{width:100%;max-width:100%}
+.template-pills{display:flex;flex-wrap:wrap;gap:6px}.template-preview{border:1px solid #aab1d84d;border-radius:14px;padding:12px;min-width:0;background:#14173255}
+.template-preview h3{margin:0 0 9px;color:#e7ddff}.template-preview h4{margin:14px 0 8px;font-size:13px}.template-preview .template-message{white-space:pre-wrap;overflow-wrap:anywhere;background:#e7f6ec;color:#1c3d33;padding:12px;border-radius:13px;font-size:13px;line-height:1.7}
+.template-path{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:10px 0}.template-path-step{font-size:11px;background:#302c53;border:1px solid #a999e352;padding:5px 8px;border-radius:20px;overflow-wrap:anywhere}.template-path-step:not(:last-child)::after{content:'  →';color:#cdbbff}
+.template-use{width:100%;min-height:46px}.template-guard{border:1px solid #a999e34f;padding:10px;border-radius:12px;margin:8px 0}.template-guard summary{cursor:pointer;font-weight:700;color:#e0d6ff}.template-guard .check{min-height:30px}
+@media(max-width:540px){#dialog.template-dialog{padding:14px;max-height:calc(100dvh - 22px)}.tag-template-picker select,.tag-template-picker .check{min-height:44px}.template-preview{padding:10px}.hero .controls>button{min-height:44px;flex:1;white-space:normal}}

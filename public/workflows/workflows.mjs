@@ -231,12 +231,15 @@ function tagManager(root,data,store,path,refresh){
     tagFilters={...tagFilters,include:[],exclude:[],page:1}
     await refresh('タグ設定を保存しました。')
   })
+  function templateLink(key=''){const link=el('a',key?'このタグのステップテンプレート':'採用タグ別テンプレートを選ぶ','studio-link tag-template-link');const query=new URLSearchParams({store:store.id,'tag-template':key});link.href=workspacePath('/studio/?'+query);return link}
+  root.append(controls(templateLink()))
   const catalog=el('section',null,'record');catalog.append(el('h3','タグの登録・自動ルール'),el('p','標準タグは自由に名称・分類・付与条件を変更できます。無効化すると新規配信の条件から外れます。'),details('新しいタグを追加',ruleForm(null)))
   for(const category of data.categories){
     const list=el('div')
     for(const t of data.definitions.filter(t=>t.category===category)){
       const item=el('div',null,'tag-rule-item')
       item.append(el('p',[t.add_events.length?'自動付与：'+t.add_events.map(e=>data.events[e]).join('、'):'手動・ステップで付与',t.remove_events.length?'自動解除：'+t.remove_events.map(e=>data.events[e]).join('、'):''].filter(Boolean).join(' · '),'muted'),details('ルールを編集',ruleForm(t)))
+      if(t.active)item.append(templateLink(t.tag_key))
       list.append(details(t.label+(t.active?'':'（無効）'),item))
     }
     catalog.append(details(category+'（'+data.definitions.filter(t=>t.category===category).length+'件）',list))

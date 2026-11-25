@@ -2,6 +2,7 @@ import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
 import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
 import {reorderGroups,reorderStep,adjacentMove} from './step-order.mjs'
 import {installStepDrag} from './step-drag.mjs'
+import {tagStepTemplates,recommendedTagTemplate,buildTagTemplate} from './tag-templates.mjs'
 
 scopeWorkspaceLinks()
 
@@ -138,6 +139,7 @@ function field(label,value,change,options={}) {
 }
 function dialog(title,text,content) {
   const box=$('#dialog')
+  box.classList.remove('template-dialog')
   box.replaceChildren(node('h2',title),node('p',text),content,button('閉じる',()=>box.close()))
   box.showModal()
 }
@@ -184,7 +186,7 @@ async function refreshStore(next) {
   store=next
   person={...person,zone:store.timezone,cutoff:store.cutoff,values:{...person.values,store:store.name}}
   channels=demo?channelDemo(store.id):await api('/stores/'+store.id+'/connections')
-  applicantCatalog=demo?{enabled:true,definitions:[{tag_key:'new_application',label:'新規応募',active:true},{tag_key:'interview_booked',label:'面談予約済',active:true}]}:await api('/stores/'+store.id+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]}))
+  applicantCatalog=demo?{enabled:true,definitions:Object.entries(tagStepTemplates).filter(([key])=>key!=='generic').map(([tag_key,t])=>({tag_key,label:t.label,active:true}))}:await api('/stores/'+store.id+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]}))
   scenarioList=demo?structuredClone(demoRecords()):await api(base())
   setupFlow(scenarioList[0])
 }
@@ -197,20 +199,75 @@ async function openScenario(id) {
   announce('')
 }
 
-function newScenario(purpose='customer',template) {
+function draftScenario(flow,templateInfo){
   scenario=null
   localCreateKey=crypto.randomUUID()
-  const preferred=channels.find(item=>item.purpose===purpose)??(!template?.dedicated&&channels.find(item=>item.purpose==='shared'))
-  graph=template?recruitmentTemplate(template.id,preferred?.id??''):starter(purpose)
-  graph.channel=preferred?.id??''
+  graph=flow
   original=''
   selection=graph.entry
   dirty=true
   simulation=null
   tab='settings'
+  if(templateInfo){
+    const booked=templateInfo.booked===true
+    preset=booked?'booked':'unbooked'
+    person={...person,tags:[templateInfo.tag],booked,consent:true,blocked:false,stopped:false,human:false,cancelled:false,
+      values:{...person.values,interview_link:'https://example.test/reserve/sample'}}
+  }
   show()
   choosePiece('inspector')
-  announce('下書きを作成しました。名称と公式アカウントを確認してください。')
+  announce(templateInfo?'タグ別テンプレートを下書きに読み込みました。文面・待機・分岐を自由に編集できます。':'下書きを作成しました。名称と公式アカウントを確認してください。')
+}
+function newScenario(purpose='customer',template) {
+  const preferred=channels.find(item=>item.purpose===purpose)??(!template?.dedicated&&channels.find(item=>item.purpose==='shared'))
+  const flow=template?recruitmentTemplate(template.id,preferred?.id??''):starter(purpose)
+  flow.channel=preferred?.id??''
+  draftScenario(flow)
+}
+function openTagTemplates(initialTag){
+  const content=node('div',null,'tag-template-picker')
+  const tags=applicantCatalog.enabled?applicantCatalog.definitions.filter(t=>t.active):[]
+  if(!tags.length){
+    content.append(node('p','この店舗で有効な採用タグがありません。採用タグ管理で機能を有効にし、タグを登録してください。'))
+    const link=node('a','採用タグ管理を開く','studio-link');link.href=workspacePath('/workflows/?store='+encodeURIComponent(store.id)+'&use=recruitment&tab=tags');content.append(link)
+    dialog('採用タグ別テンプレート','店舗ごとのタグに対応するテンプレートです。',content);return
+  }
+  const compatible=channels.filter(c=>c.purpose==='recruitment'||c.purpose==='shared')
+  let tag=tags.find(t=>t.tag_key===initialTag)??tags[0]
+  let pattern=recommendedTagTemplate(tag.tag_key),mode='tag_added',channel=compatible.find(c=>c.purpose==='recruitment')?.id??compatible[0]?.id??'',withLink=true
+  const prefix=node('div',null,'template-pills');prefix.append(pill('店舗：'+store.name),pill(tags.length+'種類のタグ'),button('閉じる',()=>$('#dialog').close()))
+  content.append(prefix)
+  const tagPicker=field('対象の採用タグ',tag.tag_key,value=>{tag=tags.find(t=>t.tag_key===value)??tags[0];pattern=recommendedTagTemplate(tag.tag_key);patternPicker.querySelector('select').value=pattern;withLink=true;renderPreview()},{items:Object.fromEntries(tags.map(t=>[t.tag_key,t.label]))})
+  const patternPicker=field('テンプレート文面・フロー',pattern,value=>{pattern=value;withLink=true;renderPreview()},{items:Object.fromEntries(Object.entries(tagStepTemplates).map(([key,t])=>[key,t.label+' · '+t.title]))})
+  const modePicker=field('配信の開始方法',mode,value=>{mode=value;renderPreview()},{items:{tag_added:'タグが付いたとき（自動）',tag_campaign:'既にタグが付いた人へ絞り込み配信（手動）'}})
+  const channelPicker=field('配信先の公式LINE',channel,value=>{channel=value;renderPreview()},{items:Object.fromEntries(compatible.length?compatible.map(c=>[c.id,c.label]):[['','採用用・兼用LINEを登録してください']])})
+  content.append(tagPicker,patternPicker,modePicker,channelPicker)
+  const preview=node('section',null,'template-preview')
+  content.append(preview)
+  function renderPreview(){
+    const t=tagStepTemplates[pattern]
+    const flow=buildTagTemplate({tag,pattern,channel,mode,withLink,activeKeys:tags.map(t=>t.tag_key)})
+    const message=flow.nodes.find(n=>n.type==='message')
+    const list=node('div',null,'template-path')
+    preview.replaceChildren(node('h3',t.title),node('p',t.description,'field-hint'))
+    if(t.link)preview.append(field('面談予約の専用URLを文面に含める',withLink,value=>{withLink=value;renderPreview()},{type:'checkbox'}))
+    if(t.link&&withLink)preview.append(node('p','予約URLは送信時に応募者ごとに発行されます。発行できない場合はメッセージを保留します。','field-hint'))
+    preview.append(node('p',mode==='tag_added'?'今後、通知に同意した応募者にタグが新しく付いたときに開始します。既に付いている人には自動で送り直しません。':'公開後、採用タグ管理で対象タグを指定し、人数を確認して配信開始します。','field-hint'))
+    const stages=[]
+    if(!t.silent){stages.push('対象タグを確認');if(t.wait)stages.push(t.wait===1440?'24時間待機':t.wait+'分待機','タグを再確認');if(typeof t.booked==='boolean')stages.push(t.booked?'面談予約ありを確認':'面談未予約を確認');stages.push('送信直前の条件確認','LINEメッセージ1通','終了')}
+    else stages.push('自動メッセージを送信せず終了')
+    for(const label of stages)list.append(node('span',label,'template-path-step'))
+    preview.append(list)
+    if(message){preview.append(node('h4','メッセージ文面（編集できます）'),node('p',message.body,'template-message'))}
+    if(t.manual){preview.append(node('h4','手動返信用の参考文面'),node('p',t.manual,'template-message'),button('参考文面をコピー',async()=>{try{await navigator.clipboard.writeText(t.manual);noticeText.textContent='文面をコピーしました。'}catch{noticeText.textContent='上の文面を選択してコピーしてください。'}}))}
+    const noticeText=node('p','', 'field-hint');noticeText.setAttribute('role','status');preview.append(noticeText)
+    if(!channel)preview.append(node('p','先にこの店舗の採用用または兼用の公式LINEを登録してください。','field-hint'))
+    preview.append(node('p','下書きを作成しても送信されません。内容の編集・テスト・承認・公開を行ってから利用してください。一度に複数の似たテンプレートを公開すると案内が重複することがあるため、用途に合うものを選んでください。','field-hint'))
+    const use=button('このテンプレートで下書きを作成',()=>{$('#dialog').close();draftScenario(flow,{tag:tag.tag_key,booked:t.booked})},'primary template-use');use.disabled=!channel;preview.append(use)
+  }
+  renderPreview()
+  dialog('採用タグ別ステップテンプレート','対象タグと文面を選び、用意されたステップを下書きに読み込みます。',content)
+  $('#dialog').classList.add('template-dialog')
 }
 
 async function save() {
@@ -496,6 +553,15 @@ function editStep() {
     },'chip'))
     updatePreview()
     wrap.append(body,vars,preview,node('div',null,'separ'))
+    if(item.tagGuard){
+      const guard=node('details',null,'template-guard');guard.open=true
+      guard.append(node('summary','送信直前の条件（テンプレート）'),node('p','対象タグや面談予約が変わった場合、送信を保留します。','field-hint'),
+        tagField('必要なタグ',item.tagGuard.tag,value=>update(()=>{item.tagGuard.tag=value;item.tagGuard.exclude=item.tagGuard.exclude.filter(k=>k!==value)})),
+        field('面談予約条件',item.tagGuard.booked===undefined?'any':item.tagGuard.booked?'booked':'unbooked',value=>update(()=>{if(value==='any')delete item.tagGuard.booked;else item.tagGuard.booked=value==='booked'}),{items:{any:'指定しない',booked:'予約済みのみ',unbooked:'未予約のみ'}}))
+      for(const t of applicantCatalog.definitions.filter(t=>t.active&&t.tag_key!==item.tagGuard.tag))guard.append(field('除外：'+t.label,item.tagGuard.exclude.includes(t.tag_key),value=>update(()=>{item.tagGuard.exclude=value?[...new Set([...item.tagGuard.exclude,t.tag_key])]:item.tagGuard.exclude.filter(k=>k!==t.tag_key)},false),{type:'checkbox'}))
+      guard.append(button('送信直前条件を外す',()=>update(()=>{delete item.tagGuard})))
+      wrap.append(guard)
+    }
   }
   if (item.type==='wait') {
     wrap.append(field('待機方法',item.mode,value=>update(()=>{
@@ -701,7 +767,7 @@ function publication() {
   }
   wrap.append(pill(steps[scenario.state]),node('p',scenario.published_version?'公開版 v'+scenario.published_version+
     (scenario.stopped?' · 停止中':''):'公開版はまだありません。','empty'))
-  if (!demo) wrap.append(node('p','顧客向けの対応イベントが発生すると、有効な店舗で対象者と最新の配信条件を照合します。','field-hint'))
+  if (!demo) wrap.append(node('p',(graph.purpose==='recruitment'?'採用向け':'顧客向け')+'の対応イベントが発生すると、有効な店舗で対象者と最新の配信条件を照合します。','field-hint'))
   const row=node('div',null,'controls')
   if (scenario.state==='draft') row.append(button('配信前テストへ',()=>{tab='test';show()}))
   if (scenario.state==='tested') row.append(button('下書きを承認',()=>transition('approve'),'primary'))
@@ -767,6 +833,11 @@ async function start() {
   $('#foot').textContent=demo?'GitHub Pages · 架空データで動作':'シナリオ管理'
   $('#mode').hidden=!demo
   for (const btn of document.querySelectorAll('.mobile button')) btn.onclick=()=>choosePiece(btn.dataset.part)
+  $('#tag-templates').onclick=async()=>{
+    if(!ready||!store)return
+    if(dirty&&!await ask('保存せずに別のテンプレートを開きますか？'))return
+    openTagTemplates()
+  }
   $('#new').onclick=async()=>{
     if (!ready || !store) return
     if (dirty&&!await ask('保存せずに新規シナリオを作りますか？')) return
@@ -775,6 +846,7 @@ async function start() {
       $('#dialog').close()
       newScenario(value)
     },'primary'))
+    content.append(button('採用タグ別テンプレートを選ぶ',()=>{$('#dialog').close();openTagTemplates()},'primary'))
     for(const template of recruitmentTemplates){
       const compatible=channels.some(account=>account.purpose==='recruitment'||!template.dedicated&&account.purpose==='shared')
       const choice=button(template.name,()=>{
@@ -808,6 +880,8 @@ async function start() {
   select.value=initialStore.id
   await refreshStore(initialStore)
   ready=true
+  const templateRequest=new URLSearchParams(location.search).get('tag-template')
+  if(templateRequest!==null&&initialStore.id===requestedStore){const url=new URL(location.href);url.searchParams.delete('tag-template');history.replaceState(null,'',url);openTagTemplates(templateRequest)}
   if (demo) $('#foot').textContent='LINE通信は模擬 · 下書きはこのブラウザに保存'
 }
 

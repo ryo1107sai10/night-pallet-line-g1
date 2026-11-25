@@ -661,3 +661,24 @@ test('採用タグ: 同じ法人でも別店舗のタグ定義・応募者は利
   expect(await request(newPath+'/definitions',{method:'PUT',cookie:admin,data:{key:customTag,revision:1,label:'他店舗変更',category:'その他',add_events:[],remove_events:[],active:true}}),409)
   assert.equal((await overview()).definitions.find(t=>t.tag_key===customTag).label,'優先フォロー')
 })
+
+test('採用タグテンプレート: 現在のタグカタログに対応し、公開後に付いたタグで配信を開始するが送信直前の解除で止まる',async()=>{
+  const {buildTagTemplate,recommendedTagTemplate}=await import('../public/studio/tag-templates.mjs')
+  const current=await overview();assert.ok(current.definitions.filter(t=>!t.tag_key.includes('-')).every(t=>recommendedTagTemplate(t.tag_key)!=='generic'))
+  const created=expect(await request(tagsRoot()+'/definitions',{method:'PUT',cookie:admin,data:{revision:0,label:'テンプレート動作確認',category:'対応',add_events:[],remove_events:[],active:true}}),200)
+  const flow=buildTagTemplate({tag:{tag_key:created.tag_key,label:'テンプレート動作確認',active:true},channel:recruitCh,pattern:'new_application'})
+  flow.nodes.find(n=>n.type==='message').body='タグテンプレート送信確認A'
+  const published=await publishScenario(flow)
+  let p=await personByName('タグ検証A');await assign(p,[...p.tags,created.tag_key])
+  let run
+  for(let i=0;i<5;i++){await worker();run=(await read('SELECT node_id,ended_at FROM applicant_enrollment WHERE scenario_id=$1',[published.id])).rows[0];if(run?.node_id==='message')break}
+  assert.equal(run?.node_id,'message');assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認A').length,0)
+  p=await personByName('タグ検証A');await assign(p,p.tags.filter(k=>k!==created.tag_key));await flush(5)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認A').length,0)
+  const next=expect(await request(tagsRoot()+'/definitions',{method:'PUT',cookie:admin,data:{revision:0,label:'テンプレート配信成功',category:'対応',add_events:[],remove_events:[],active:true}}),200)
+  const ready=buildTagTemplate({tag:{tag_key:next.tag_key,label:'テンプレート配信成功',active:true},channel:recruitCh,pattern:'new_application'})
+  ready.nodes.find(n=>n.type==='message').body='タグテンプレート送信確認B'
+  await publishScenario(ready)
+  p=await personByName('タグ検証A');await assign(p,[...p.tags,next.tag_key]);await flush(6)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認B').length,1)
+})

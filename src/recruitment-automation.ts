@@ -198,6 +198,12 @@ async function applicantBarred(db:DB,cfg:Config,s:Location,c:Channel,run:ARun,
   if (run.booking_id && (!booking||booking.revision!==run.booking_revision)) return '予約が更新されました'
   if (!contact) return '応募者の連絡先がありません'
   if (!contact.notices) return '通知の同意がありません'
+  const node=run.graph.nodes.find(n=>n.id===run.node_id)
+  if(node?.type==='message'&&node.tagGuard){
+    const guard=node.tagGuard,tags=await applicantTags(db,run)
+    if(!tags.includes(guard.tag)||guard.exclude.some(key=>tags.includes(key)))return '送信直前の採用タグ条件に一致しません'
+    if(guard.booked!==undefined&&guard.booked!==(booking?.status==='confirmed'))return '送信直前の面談予約条件に一致しません'
+  }
   if (!await automaticRelationshipReady(db,c,contact.user_key)) return '友だち状態を確認できないかブロックされています'
   const pending=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND stop_signal IS NOT NULL
     AND processed_at IS NULL AND occurred_at>=$3 LIMIT 1`,[c.id,contact.user_key,contact.notices_changed_at])

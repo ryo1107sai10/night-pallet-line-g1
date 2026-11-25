@@ -101,6 +101,7 @@ export function validate(flow, publish=false) {
         return ''
       })
       if (remaining.includes('{{') || remaining.includes('}}')) add('差し込み項目の形式を確認してください。',node.id)
+      if(node.tagGuard&&(flow.purpose!=='recruitment'||typeof node.tagGuard.tag!=='string'||!node.tagGuard.tag.trim()||!Array.isArray(node.tagGuard.exclude)||node.tagGuard.exclude.includes(node.tagGuard.tag)||new Set(node.tagGuard.exclude).size!==node.tagGuard.exclude.length||node.tagGuard.booked!==undefined&&typeof node.tagGuard.booked!=='boolean'))add('送信直前の採用タグ条件を確認してください。',node.id)
       if (flow.purpose==='recruitment' && node.category==='marketing') add('採用シナリオに顧客向け販促は追加できません。',node.id)
       if (flow.purpose!=='recruitment' && /\{\{\s*interview_link\s*\}\}/.test(node.body)) add('面談予約 URLの差し込みは採用シナリオでのみ使えます。',node.id)
       if (flow.purpose!=='customer' && /\{\{\s*customer_link\s*\}\}/.test(node.body)) add('来店予約・設定 URLの差し込みは顧客シナリオでのみ使えます。',node.id)
@@ -259,7 +260,9 @@ export function simulate(flow, person) {
       const marketing=node.category==='marketing'
       const due=marketing ? nextWindow(at,flow,person.zone) : at
       const adjusts=due!==null && due!==at
-      const rejected=person.stopped?'全配信停止':person.blocked?'LINEでブロックされています':!person.consent?'目的別の同意なし':
+      const guard=node.tagGuard
+      const guardMismatch=guard&&(!tags.has(guard.tag)||guard.exclude.some(key=>tags.has(key))||guard.booked!==undefined&&guard.booked!==!!person.booked)
+      const rejected=guardMismatch?'送信直前のタグ・面談予約条件に一致しません':person.stopped?'全配信停止':person.blocked?'LINEでブロックされています':!person.consent?'目的別の同意なし':
         person.eligible===false?'店舗の利用適格性が未確認':person.contractActive===false?'契約に有効な配信権限がありません':
         person.budgetAvailable===false?'利用可能な配信枠なし':
         (node.body.match(/\{\{\s*(booking|booking_url)\s*\}\}/) && person.bookingCurrent===false)?'予約の版が更新されています':

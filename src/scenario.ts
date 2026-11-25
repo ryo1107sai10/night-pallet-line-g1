@@ -14,7 +14,7 @@ const base = { id:nodeId, name:z.string().max(100) }
 const next = nodeId.or(z.literal(''))
 const clock = z.string().max(16)
 const nodes = z.discriminatedUnion('type',[
-  z.strictObject({...base,type:z.literal('message'),category:z.enum(['service','marketing']),body:z.string().max(5000),next}),
+  z.strictObject({...base,type:z.literal('message'),category:z.enum(['service','marketing']),body:z.string().max(5000),tagGuard:z.strictObject({tag:text(80),exclude:z.array(text(80)).max(30),booked:z.boolean().optional()}).optional(),next}),
   z.strictObject({...base,type:z.literal('wait'),mode:z.enum(['delay','fixed','business','booking']),minutes:z.int().optional(),
     days:z.int().optional(),time:clock.optional(),next}),
   z.strictObject({...base,type:z.literal('branch'),condition:z.enum(['booked','consent','adult','responded','tag','assigned']),

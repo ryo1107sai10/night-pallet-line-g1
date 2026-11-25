@@ -144,21 +144,25 @@ export async function resolveTag(db:DB,store:string,value:string){
   const {rows:[entry]}=await db.query<{tag_key:string}>(`SELECT tag_key FROM applicant_tag WHERE store_id=$1 AND active AND (tag_key=$2 OR label=$2) ORDER BY (tag_key=$2) DESC LIMIT 1`,[store,value])
   return entry?.tag_key??null
 }
-export function graphUsesApplicantTags(graph:Graph){return ['tag_added','tag_campaign'].includes(graph.trigger)||graph.nodes.some(n=>n.type==='tag'||n.type==='branch'&&n.condition==='tag')}
+export function graphUsesApplicantTags(graph:Graph){return ['tag_added','tag_campaign'].includes(graph.trigger)||graph.nodes.some(n=>n.type==='tag'||n.type==='branch'&&n.condition==='tag'||n.type==='message'&&!!n.tagGuard)}
+function applicantGraphTagRefs(graph:Graph){return [...(graph.trigger==='tag_added'?[graph.triggerTag??'']:[]),...graph.nodes.flatMap(n=>n.type==='tag'||n.type==='branch'&&n.condition==='tag'?[n.tag??'']:n.type==='message'&&n.tagGuard?[n.tagGuard.tag,...n.tagGuard.exclude]:[])]}
 export async function allowApplicantTagGraph(db:DB,actor:Actor,store:string,graph:Graph){
   if(graph.purpose!=='recruitment'||!graphUsesApplicantTags(graph))return
   await requireTags(db,store);await seedApplicantTags(db,actor.tenant_id,store)
-  const refs=[...(graph.trigger==='tag_added'?[graph.triggerTag??'']:[]),...graph.nodes.flatMap(n=>n.type==='tag'||n.type==='branch'&&n.condition==='tag'?[n.tag??'']:[])]
+  const refs=applicantGraphTagRefs(graph)
   for(const ref of refs)if(!await resolveTag(db,store,ref))throw new Fault(422,'APPLICANT_TAG_UNKNOWN','採用タグの一覧から有効なタグを選択してください。')
   // Canonicalize only the published graph (the caller has already checked the draft revision).
   if(graph.trigger==='tag_added')graph.triggerTag=(await resolveTag(db,store,graph.triggerTag!))!
-  for(const node of graph.nodes)if(node.type==='tag'||node.type==='branch'&&node.condition==='tag')node.tag=(await resolveTag(db,store,node.tag!))!
+  for(const node of graph.nodes){
+    if(node.type==='tag'||node.type==='branch'&&node.condition==='tag')node.tag=(await resolveTag(db,store,node.tag!))!
+    if(node.type==='message'&&node.tagGuard){node.tagGuard.tag=(await resolveTag(db,store,node.tagGuard.tag))!;node.tagGuard.exclude=[...new Set(await Promise.all(node.tagGuard.exclude.map(async k=>(await resolveTag(db,store,k))!)))];if(node.tagGuard.exclude.includes(node.tagGuard.tag))throw new Fault(422,'TAG_GUARD_CONFLICT','必要なタグを除外タグにも設定できません。')}
+  }
 }
 export async function validApplicantTagsForRun(db:DB,store:string,graph:Graph,started:Date){
   if(!graphUsesApplicantTags(graph))return true
   const s=await tagState(db,store)
   if(!s.recruitment_enabled||!s.recruitment_tags_enabled||s.recruitment_tags_enabled_at&&+started<+s.recruitment_tags_enabled_at)return false
-  const refs=[...(graph.trigger==='tag_added'?[graph.triggerTag??'']:[]),...graph.nodes.flatMap(n=>n.type==='tag'||(n.type==='branch'&&n.condition==='tag')?[n.tag??'']:[])]
+  const refs=applicantGraphTagRefs(graph)
   if(!refs.length)return true
   const active=(await definitions(db,store)).filter(t=>t.active)
   return refs.every(ref=>active.some(t=>t.tag_key===ref||t.label===ref))
