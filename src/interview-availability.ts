@@ -242,10 +242,15 @@ export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range
     return []
   }
   const shared=google.sharedCalendar(store)
-  if(shared&&(!alternate||alternate===shared))return google.sharedBusy(store,range,shared)
-  const record=await calendarRecord(db,store)
-  if((alternate||required)&&!record)throw unavailable()
-  return record?google.busy(record,range,alternate):[]
+  const record=shared&&(!alternate||alternate===shared)?null:await calendarRecord(db,store)
+  if(!(shared&&(!alternate||alternate===shared))&&!record&&(alternate||required))throw unavailable()
+  try{
+    if(shared&&(!alternate||alternate===shared))return await google.sharedBusy(store,range,shared)
+    return record?await google.busy(record,range,alternate):[]
+  }catch(error){
+    console.warn(JSON.stringify({severity:'WARNING',event:'integration_failure',provider:'google',operation:'availability'}))
+    throw error
+  }
 }
 
 export async function availabilityOverview(db:DB,store:string,google:InterviewGoogle){

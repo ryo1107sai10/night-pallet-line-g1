@@ -176,11 +176,20 @@ export class LineAPI {
     return 'module' in cred ? this.modules.headers(cred.module,cred.bot) : { Authorization:'Bearer '+cred.access_token }
   }
   private async call(path: string, options: RequestInit = {}) {
+    const operation=path.startsWith('/v2/bot/message/quota')?'quota':
+      path==='/v2/bot/message/push'?'push':null
     try {
-      return await this.request('https://api.line.me' + path, {
+      const response=await this.request('https://api.line.me' + path, {
         ...options, redirect: 'error', signal: AbortSignal.timeout(6000),
       })
+      // Per-recipient 400 errors and accepted retry responses are handled in
+      // delivery history. Report only operational failures, never URLs,
+      // tokens, message bodies, IDs or response payloads.
+      if(operation&&([401,403,429].includes(response.status)||response.status>=500))
+        console.warn(JSON.stringify({severity:'WARNING',event:'integration_failure',provider:'line',operation,status:response.status}))
+      return response
     } catch {
+      if(operation)console.warn(JSON.stringify({severity:'WARNING',event:'integration_failure',provider:'line',operation,reason:'network'}))
       throw new Fault(502,'LINE_UNAVAILABLE','LINEとの通信結果を確認できません。',true)
     }
   }

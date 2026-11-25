@@ -80,6 +80,7 @@ export async function runGoogleSync(pool:pg.Pool,google:InterviewGoogle,r:Route)
     if(!job)return
     if(job.attempts>=5){
       await db.query("UPDATE interview_google_sync SET status='failed',last_error='Googleで予定の反映を確認できませんでした' WHERE booking_id=$1",[job.booking_id])
+      console.warn(JSON.stringify({severity:'WARNING',event:'integration_failure',provider:'google',operation:'calendar_sync_exhausted'}))
       return
     }
     const target=job.booking_status==='confirmed'&&+job.starts_at>Date.now()?job.calendar_id??credential.calendar_id:null
