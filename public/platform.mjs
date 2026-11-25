@@ -133,12 +133,8 @@ async function loadProgress() {
 }
 document.querySelector('#progress-refresh').onclick = () => loadProgress().catch(report)
 
-try {
-  const [{actor},records]=await Promise.all([platformApi('/session'),platformApi('/tenants')])
-  document.querySelector('#account').textContent=actor.organization+' · '+actor.display_name
-  mountPiyomaru('platform')
-  if (!records.length) notice.textContent='管理を担当する会社が登録されていません。'
-  else mountTour('platform',{enter:async()=>(await platformApi('/tenants/'+records[0].id+'/enter','POST')).url})
+function drawTenantList(records){
+  tenants.replaceChildren()
   for (const tenant of records) {
     const row=element('li',null,'record')
     const detail=element('div',null,'onboarding-store')
@@ -157,5 +153,16 @@ try {
     row.append(detail,open)
     tenants.append(row)
   }
+}
+try {
+  const [{actor},records]=await Promise.all([platformApi('/session'),platformApi('/tenants')])
+  document.querySelector('#account').textContent=actor.organization+' · '+actor.display_name
+  mountPiyomaru('platform')
+  if (!records.length) notice.textContent='管理を担当する会社が登録されていません。'
+  else mountTour('platform',{enter:async()=>(await platformApi('/tenants/'+records[0].id+'/enter','POST')).url})
+  drawTenantList(records)
+  window.addEventListener('npl:piyomaru-store-created',()=>{
+    Promise.all([platformApi('/tenants').then(drawTenantList),loadProgress()]).catch(report)
+  })
   await loadProgress()
 } catch (error) { report(error) }

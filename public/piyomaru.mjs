@@ -38,7 +38,7 @@ export function mountPiyomaru(page='platform'){
   panel.append(heading,nav,notice,content);document.body.append(launch,panel)
   if(page==='platform'){
     const actions=document.querySelector('main .heading .actions')
-    if(actions){const emergency=button('🐥 緊急AI導入代行',()=>open('jobs'),'piyo-emergency-entry');actions.prepend(emergency)}
+    if(actions){const emergency=button('緊急AI導入代行',()=>open('jobs'),'piyo-emergency-entry');actions.prepend(emergency)}
   }
   function state(expression,tip){
     mascot.dataset.expression=expression;face.dataset.expression=expression
@@ -82,8 +82,12 @@ export function mountPiyomaru(page='platform'){
       el('p','LINEの連携やステップ配信で困ったことを聞いてね。必要なら導入作業も一緒に進めるよ。'),
       button('緊急AI導入代行を始める',()=>switchTab('jobs'),'piyo-danger'))
     const log=el('div',null,'piyo-log');log.setAttribute('role','log');log.setAttribute('aria-live','polite')
+    const continuation=el('div',null,'piyo-continuation')
+    continuation.append(el('small','案内を読み終えたら、対象店舗を選んで準備やステップの構築を進められます。','piyo-muted'),
+      button('公式LINE連携・ステップ構築を進める',()=>switchTab('jobs'),'piyo-primary'))
     const drawMessages=()=>{
       welcome.hidden=messages.length>0;chips.hidden=messages.length>0;log.hidden=messages.length===0
+      continuation.hidden=!messages.some(m=>m.role==='assistant'&&m.source!=='ピヨ丸・確認事項')
       log.replaceChildren(...messages.map(m=>{
         const b=el('article',null,'piyo-message '+(m.role==='user'?'is-user':'is-piyo'))
         if(m.role!=='user')b.append(el('small',m.source??'ピヨ丸'))
@@ -100,7 +104,7 @@ export function mountPiyomaru(page='platform'){
     form.onsubmit=async e=>{e.preventDefault();const value=question.value.trim();if(!value||busy)return;question.value='';await ask(value,drawMessages,send)}
     const chips=el('div',null,'piyo-chips')
     for(const q of quickQuestions)chips.append(button(q,()=>{question.value=q;question.focus()},'piyo-chip'))
-    content.append(welcome,chips,log,form);drawMessages()
+    content.append(welcome,chips,log,continuation,form);drawMessages()
   }
   async function ask(q,drawMessages,send){
     if(busy)return
@@ -186,7 +190,7 @@ export function mountPiyomaru(page='platform'){
     box.append(el('p','配信はまだ開始しません。外部サービスの認証・規約同意は権限者が行います。','piyo-muted'))
     const apply=button('この内容で準備を開始',async()=>{
       if(busy)return;busy=true;apply.disabled=true;state('working');clearNotice()
-      try{activeJob=await request('/jobs','POST',data,jobKey);openJob=activeJob.id;await load();state('happy');render();tell('店舗準備が完了したよ。次の作業へ進もう！')}
+      try{activeJob=await request('/jobs','POST',data,jobKey);openJob=activeJob.id;await load();state('happy');render();tell('店舗準備が完了したよ。次の作業へ進もう！');if(data.new_store)window.dispatchEvent(new Event('npl:piyomaru-store-created'))}
       catch(e){tell(e.message,true)}
       finally{busy=false;apply.disabled=false}
     },'piyo-primary')
@@ -202,6 +206,7 @@ export function mountPiyomaru(page='platform'){
     content.append(title,bar,toolbar)
     if(job.cancelled){content.append(el('p','この導入代行は終了しています。既存の店舗・配信は変更していません。','piyo-muted'));return}
     let selected=job.selected_channel??''
+    if(job.channels.length===1&&selected)content.append(el('p','対象LINE：'+job.channels[0].label+(job.channels[0].basic_id?' · '+job.channels[0].basic_id:''),'piyo-muted'))
     if(job.channels.length>1||job.channels.length&& !selected){
       const choice=select([['','採用LINEを選択'],...job.channels.map(c=>[c.id,c.label])],selected)
       choice.onchange=()=>{if(choice.value)act(job,'select_channel',choice.value)}
@@ -220,7 +225,7 @@ export function mountPiyomaru(page='platform'){
         row.append(link('店舗設定を開く',job.links.store))
       }
       if(step.topic==='line'){
-        if(!step.done){row.append(link('公式LINE開設画面 ↗',job.links.official),link('Developers設定 ↗',job.links.developers))}
+        if(!step.done){if(!selected)row.append(link('公式LINE開設画面 ↗',job.links.official));row.append(link('Developers設定 ↗',job.links.developers))}
         row.append(link('Night PRO LINEの接続・テスト ↗',job.links.line))
         if(!step.done)card.append(el('p','公式画面の本人認証や同意を済ませ、接続後に「接続・進捗を照合」を押してね。','piyo-muted'))
       }
