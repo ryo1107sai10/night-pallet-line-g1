@@ -4,6 +4,8 @@ import { forbidden, type Actor } from './core.js'
 const interviews='/stores/:store/interviews'
 const scenarios='/stores/:store/scenarios'
 const workflow='/stores/:store/workflows/:purpose'
+const connections='/stores/:store/connections'
+const connection=connections+'/:connection'
 const includesRoute=(base:string,route:string)=>route===base||route.startsWith(base+'/')
 
 export function checkAgencyAccess(actor:Actor,req:Request) {
@@ -11,6 +13,15 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   const route:string=req.route.path
   const reads=req.method==='GET'||req.method==='HEAD'
   if(route==='/session' || reads&&(route==='/dashboard'||route==='/stores/:store/connections'))return
+  // 現マスターに採用LINEの手動初回連携を委任する。管理画面の閲覧権限だけでなく
+  // 各APIも明示的に許可し、既存トークンの交換・配信停止・モジュール連携は委任しない。
+  // authenticate() は admin の場合、現法人マスターとの一致を毎回確認する。
+  if(actor.role==='admin'){
+    if(req.method==='POST'&&route===connections)return
+    if(req.method==='PATCH'&&route===connection+'/console')return
+    if(reads&&route===connection+'/tests')return
+    if(req.method==='POST'&&['/check-token','/check-webhook','/tests','/tests/:tester/send'].some(suffix=>route===connection+suffix))return
+  }
   // マスター交代の3ルートは到達だけ許可する。実施権限（監督者か自法人の現マスターか）は
   // platform.ts の requireAgencyMasterAccess が判定し、マスターでない代理店スタッフは403になる。
   if(route==='/agency-master'||route==='/agency-master/invite'||route==='/agency-master/promote')return

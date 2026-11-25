@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>公式LINEの接続 | Night PRO LINE</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/agency-line.mjs"></script>
+</head>
+<body>
+  <header><div class="header-inner"><a class="brand" href="/master/">Night <strong>PRO LINE</strong></a><span id="line-account"></span></div></header>
+  <main>
+    <div class="heading"><h1>公式LINEの接続</h1><a class="studio-link" id="agency-return" href="/master/">店舗運用へ戻る</a></div>
+    <p>エールのマスターが、選択した店舗の採用用公式LINEを登録・確認します。</p>
+    <p id="line-status" role="status" aria-live="polite"></p>
+    <section id="line-workspace" hidden>
+      <section class="panel"><label>操作する店舗 <select id="line-store"></select></label></section>
+      <section class="panel">
+        <h2>1. 新しい公式LINEを登録</h2>
+        <p>公式LINEの管理者の許可を得たアカウントのみ登録してください。</p>
+        <div class="actions"><a id="manager-link" class="studio-link" target="_blank" rel="noopener noreferrer">LINE公式アカウント管理</a><a id="developer-link" class="studio-link" target="_blank" rel="noopener noreferrer">LINE Developers</a></div>
+        <form id="line-register" autocomplete="off">
+          <label>公式LINEのベーシックID（リンク案内用・任意）<input id="basic-id" placeholder="@xxxx"></label>
+          <label>登録名<input name="label" required maxlength="100"></label>
+          <label>公式LINEの運営者名<input name="owner_name" required maxlength="160"></label>
+          <label>プロバイダーIDまたは公式設定URL<input name="provider_id" required inputmode="text" maxlength="500"></label>
+          <label>Messaging APIチャネルIDまたは公式設定URL<input name="messaging_id" required inputmode="text" maxlength="500"></label>
+          <div class="actions"><a id="basic-link" class="studio-link" target="_blank" rel="noopener noreferrer">チャネル基本設定・シークレット</a><a id="token-link" class="studio-link" target="_blank" rel="noopener noreferrer">アクセストークン・Webhook設定</a></div>
+          <label>チャネルシークレット<input name="channel_secret" type="password" required maxlength="32" autocomplete="off" spellcheck="false"></label>
+          <label>チャネルアクセストークン<input name="access_token" type="password" required maxlength="4096" autocomplete="off" spellcheck="false"></label>
+          <label>認証情報の種類<select name="token_type"><option value="console">LINE Developers発行（長期）</option><option value="v2.1">v2.1</option></select></label>
+          <label>アカウント種別<select name="account_type"><option value="unverified">未認証</option><option value="verified">認証済み</option><option value="premium">プレミアム</option></select></label>
+          <label>管理権限の確認記録<input name="management_authority" required maxlength="160" placeholder="店舗の許可を得た担当者・確認日など"></label>
+          <label>既存の連携ツール（任意）<input name="existing_tools" maxlength="300"></label>
+          <label>既存WebhookのURL（任意）<input name="existing_webhook" type="url" maxlength="500"></label>
+          <button type="submit">採用用LINEの接続情報を登録</button>
+        </form>
+      </section>
+      <section id="line-connections" class="panel">
+        <h2>2. Webhook・動作確認</h2>
+        <div id="connection-select"></div><div id="line-detail"></div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

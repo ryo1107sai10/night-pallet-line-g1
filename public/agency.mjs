@@ -36,6 +36,7 @@ try{
       url.searchParams.set('store',store.value)
       history.replaceState(null,'',url)
       const query='?store='+encodeURIComponent(store.value)
+      $('agency-line-link').href='/agency-line/'+query
       $('agency-studio').href='/studio/'+query
       $('agency-calendar').href='/interview/staff.html'+query
       $('agency-inbox').href='/workflows/'+query+'&use=recruitment'
@@ -47,6 +48,7 @@ try{
     store.onchange=renderLinks
     renderLinks()
     $('agency-steps').hidden=!['admin','manager'].includes(session.actor.role)
+    $('agency-line').hidden=!session.actor.agency||session.actor.role!=='admin'
     $('agency-tags').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-forms').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-interview').hidden=!['admin','manager','recruiter'].includes(session.actor.role)

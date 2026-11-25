@@ -178,6 +178,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       }
     })
   }
+  workspace.get('/agency-line/',async(req,res)=>{
+    res.set('X-Robots-Tag','noindex, nofollow')
+    const actor=await pageActor(req)
+    if(!actor?.agency||actor.role!=='admin'){
+      res.redirect(302,actor?.role==='admin'?'/master/':'/staff/')
+      return
+    }
+    res.sendFile(here('../public/agency-line.html'))
+  })
   app.get(supervisorHandoffPath,(_req,res)=>{
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/supervisor-handoff.html'))
   })
@@ -212,7 +221,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','supervisor-handoff.mjs','dashboard.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','dashboard.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -479,8 +488,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     await storeAccess(db,actor,idOf(req,'store'),manage)
     return action(db,actor,req)
   },status)
+  const requireAgencyManualConnection=(actor:Actor,c:Awaited<ReturnType<typeof channel>>)=>{
+    if(actor.agency&&(c.module_channel_id||c.purpose!=='recruitment'))throw forbidden()
+  }
   const withChannel = (action: (db:DB,actor:Actor,req:Request,c:Awaited<ReturnType<typeof channel>>)=>Promise<unknown>,
-    status=200)=>inStore(async (db,actor,req)=>action(db,actor,req,await channel(db,idOf(req,'connection'))),true,status)
+    status=200)=>inStore(async (db,actor,req)=>{
+      const c=await channel(db,idOf(req,'connection'))
+      requireAgencyManualConnection(actor,c)
+      return action(db,actor,req,c)
+    },true,status)
 
   const interviewStaff=(action:Action,status=200)=>staff(async(db,actor,req)=>{
     await interviewAccess(db,actor,idOf(req,'store'))
@@ -915,6 +931,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   }))
   api.post(channels,inStore(async(db,actor,req)=>{
     const data = connectionSchema.parse(req.body)
+    // エールの初回接続は採用用途のみ。ボットIDを手入力で確定せず、公式APIで
+    // トークンとチャネルの実際の対応関係を確認してから登録する。
+    if(actor.agency&&(data.purpose!=='recruitment'||data.bot_user_id))throw forbidden()
     const store = idOf(req,'store')
     return once(db,cfg,actor,'line.register',keyOf(req),{store,data},async()=>{
       const identity = data.bot_user_id ? {userId:data.bot_user_id,basicId:null} : await line.botIdentityForChannel(data.messaging_id,data)
@@ -950,6 +969,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
         checkAgencyAccess(actor,req)
         await storeAccess(db,actor,idOf(req,'store'),true)
         const c = await channel(db,idOf(req,'connection'))
+        requireAgencyManualConnection(actor,c)
         if (c.module_channel_id && item==='webhook') throw new Fault(409,'LINE_MODULE_MANAGED','公式LINEへのテストメッセージで受信を確認してください。')
         if (c.revision !== required.revision) throw conflict()
         return { actor,c }

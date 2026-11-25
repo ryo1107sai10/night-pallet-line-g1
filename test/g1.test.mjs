@@ -28,6 +28,10 @@ const user = 'U'+'2'.repeat(32)
 const user2 = 'U'+'3'.repeat(32)
 const channelSecret = 'a'.repeat(32)
 const accessToken = 'test-channel-token'
+const agencyAccessToken = 'test-agency-channel-token'
+const agencyMessagingId = '2010000099'
+const agencyBot = 'U'+'90ab'.repeat(8)
+let agencyConnectionId
 const pass = 'Only used in local tests!'
 const ids = { messaging:'1234567890', login:'1234567891', redLogin:'1234567894' }
 const redCalendar='red-store@example.test'
@@ -233,6 +237,7 @@ before(async ()=>{
     }
     switch (address.pathname) {
       case '/v2/oauth/verify':
+        if(options.body.get('access_token')===agencyAccessToken)return Response.json({client_id:agencyMessagingId})
         assert.equal(options.body.get('access_token'),accessToken)
         return Response.json({client_id:ids.messaging})
       case '/oauth2/v3/token':
@@ -241,6 +246,7 @@ before(async ()=>{
         assert.equal(options.body.get('client_secret'),moduleConfig.secret)
         return Response.json({access_token:moduleToken,expires_in:900})
       case '/v2/bot/info': {
+        if(options.headers.Authorization==='Bearer '+agencyAccessToken)return Response.json({userId:agencyBot,basicId:'@agencytest'})
         if (!options.headers[moduleConfig.botHeader]) return Response.json({userId:bot,basicId:'@g1test'})
         assert.equal(options.headers.Authorization,'Bearer '+moduleToken)
         assert.equal(options.headers[moduleConfig.botHeader],moduleBot)
@@ -248,8 +254,10 @@ before(async ()=>{
         return Response.json({userId:moduleBot,basicId:'@testshop',displayName:'かんたん連携テスト'})
       }
       case '/v2/bot/channel/webhook/endpoint':
+        if(options.headers.Authorization==='Bearer '+agencyAccessToken)return Response.json({endpoint:origin+endpoint(agencyConnectionId),active:true})
         return Response.json({endpoint:origin+endpoint(c),active:true})
       case '/v2/bot/channel/webhook/test':
+        if(options.headers.Authorization==='Bearer '+agencyAccessToken)return Response.json({success:true})
         assert.equal((await web({destination:bot,events:[]})).status,200)
         return Response.json({success:true})
       case '/v2/bot/message/quota': return Response.json({type:'limited',value:200})
@@ -1703,7 +1711,12 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const portal=await send('/master/?store='+storeId,{headers:{Cookie:admin}})
   const portalHTML=await portal.text()
   assert.match(portalHTML,/id="agency-tools"/)
+  assert.match(portalHTML,/id="agency-line-link"/)
   assert.doesNotMatch(portalHTML,/id="npl-tour"|id="manage-line"/)
+  const linePage=await send('/agency-line/?store='+created,{headers:{Cookie:admin}})
+  assert.equal(linePage.status,200)
+  assert.match(await linePage.text(),/採用用LINEの接続情報を登録/)
+  assert.equal((await send('/agency-line/',{redirect:'manual'})).status,302)
   assert.equal((await send('/static/tour.mjs',{headers:{Cookie:admin}})).status,401)
   assert.equal((await open('/static/tour.mjs')).status,200)
   assert.equal((await send('/platform/tours/',{headers:{Cookie:admin},redirect:'manual'})).status,302)
@@ -1740,7 +1753,30 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await request('/stores/'+storeId+'/line-module',{cookie:admin}),403)
   expect(await post('/stores/'+storeId+'/line-module',admin,{purpose:'recruitment'}),403)
   expect(await post('/stores/'+storeId+'/line-module/complete',admin,{state:'a'.repeat(96),code:'unused'}),403)
-  expect(await post('/stores/'+storeId+'/connections',admin,{},idempotency()),403)
+  const manualStore=expect(await scoped(alpha.tenant.id,'/stores','POST',storeData('エールの初回連携検証店')),201).id
+  const manualPath='/stores/'+manualStore+'/connections'
+  const lineInput={label:'エール採用検証',purpose:'recruitment',owner_name:'検証担当',provider_id:'2000000010',messaging_id:agencyMessagingId,
+    account_type:'unverified',management_authority:'検証用',channel_secret:'b'.repeat(32),access_token:agencyAccessToken,token_type:'console'}
+  expect(await post(manualPath,admin,{...lineInput,purpose:'customer'},idempotency()),403)
+  expect(await post(manualPath,admin,{...lineInput,bot_user_id:agencyBot},idempotency()),403)
+  expect(await post(manualPath,admin,{...lineInput,messaging_id:'2010000098'},idempotency()),422)
+  agencyConnectionId=expect(await post(manualPath,admin,lineInput,idempotency()),201).id
+  const manualConnection=manualPath+'/'+agencyConnectionId
+  let manual=expect(await request(manualPath,{cookie:admin}),200)[0]
+  assert.equal(manual.basic_id,'@agencytest')
+  assert.equal(manual.webhook_url,origin+endpoint(agencyConnectionId))
+  assert.doesNotMatch(JSON.stringify(manual),/test-agency-channel-token|credentials/)
+  manual=expect(await patch(manualConnection+'/console',admin,{...consoleChecks,non_developer:false,revision:manual.revision,reason:'検証用の確認記録'}),200)
+  manual=expect(await post(manualConnection+'/check-token',admin,{revision:manual.revision}),200)
+  assert.equal(manual.checks.token_verified,true)
+  manual=expect(await post(manualConnection+'/check-webhook',admin,{revision:manual.revision}),200)
+  assert.equal(manual.checks.webhook_verified,true)
+  assert.equal(manual.status,'pending')
+  expect(await post(manualConnection+'/tests',admin,{purpose:'recruitment'},idempotency()),201)
+  expect(await request(manualConnection+'/tests',{cookie:admin}),200)
+  expect(await patch(manualConnection+'/credentials',admin,{revision:manual.revision}),403)
+  expect(await patch(manualConnection+'/stop',admin,{revision:manual.revision}),403)
+  expect(await request('/stores/'+gamma.stores[0].id+'/connections',{cookie:admin}),404)
   // 代理店本人の現マスターは、自法人のマスター管理を閲覧できる（セルフサービス化で仕様変更）。
   const ownMaster=expect(await request('/agency-master',{cookie:admin}),200)
   assert.equal(ownMaster.current_email,agency.actor.email)
@@ -1761,6 +1797,9 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const managerEmail='step-manager@example.test'
   const next=expect(await scoped(alpha.tenant.id,'/staff/invites','POST',{email:managerEmail,role:'manager',stores:[storeId]}),201)
   const manager=await activate(next,managerEmail,'alpha')
+  expect(await post(manualPath,manager,lineInput,idempotency()),403)
+  expect(await request(manualConnection+'/tests',{cookie:manager}),403)
+  assert.equal((await send('/agency-line/',{headers:{Cookie:manager},redirect:'manual'})).status,302)
   assert.deepEqual(expect(await request('/session',{cookie:manager}),200).stores.map(item=>item.id),[storeId])
   const graph={...starter(),channel:c,name:'店舗別のステップ'}
   const path='/stores/'+storeId+'/scenarios'
