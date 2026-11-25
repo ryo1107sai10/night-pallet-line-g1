@@ -536,6 +536,21 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   assert.equal(version.graph.name,graph.name)
   assert.equal(version.graph.entry,'welcome')
   assert.equal(version.graph.nodes.find(node=>node.id==='welcome').next,'wait')
+  const review=expect(await request(url+'/publication-review',{cookie:admin}),200)
+  assert.equal(review.published.graph.entry,'welcome')
+  assert.equal(review.revision,draft.revision)
+  const moved=expect(await patch(url+'/folder',admin,{revision:draft.revision,folder:'テスト分類'}),200)
+  assert.equal(moved.folder,'テスト分類')
+  assert.equal(moved.published_version,1)
+  expect(await request(url+'/publication-review',{cookie:other}),404)
+  // テンプレートは別の未公開コピー。通常の公開手順を試しても配信対象にはならない。
+  const template=expect(await post(base,admin,{graph:{...graph,name:'自社テンプレート検証'},folder:'共通',is_template:true},idempotency()),201)
+  assert.equal(template.is_template,true);assert.equal(template.published_version,null)
+  const templateUrl=base+'/'+template.id
+  const result=expect(await post(templateUrl+'/transition',admin,{action:'test',revision:template.revision,fixture}),200)
+  const accepted=expect(await post(templateUrl+'/transition',admin,{action:'approve',revision:result.revision}),200)
+  expect(await post(templateUrl+'/transition',admin,{action:'publish',revision:accepted.revision}),409)
+  assert.equal(expect(await request(templateUrl,{cookie:admin}),200).published_version,null)
 })
 
 

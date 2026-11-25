@@ -28,6 +28,8 @@ const graph = z.strictObject({
   daily:z.int(),weekly:z.int(),cooldownDays:z.int(),rejoin:z.boolean(),missingAssignee:z.enum(['manager','hold']),
   holidays:z.array(z.int().min(0).max(6)).max(6),entry:next,nodes:z.array(nodes).max(100),
 })
+const folder=z.string().trim().max(50)
+const libraryInput=z.strictObject({graph,folder:folder.optional(),is_template:z.boolean().optional()})
 const fixture = z.strictObject({
   start:z.string().max(16),bookingAt:z.string().max(16),dayCount:z.int().min(0).max(10000),weekCount:z.int().min(0).max(10000),
   booked:z.boolean(),consent:z.boolean(),adult:z.boolean(),responded:z.boolean(),assigned:z.boolean(),
@@ -47,7 +49,7 @@ function canPublish(graph:Graph) {
 }
 
 type Scenario = { id:string; channel_id:string; graph:Graph; revision:number; state:string;
-  published_version:number|null; stopped:boolean; updated_at:Date }
+  published_version:number|null; stopped:boolean; updated_at:Date; folder:string; is_template:boolean }
 type Context = { db:DB; actor:Actor; store:string }
 
 const record = async (db:DB,id:string,lock=false) => {
@@ -77,12 +79,14 @@ export const versionDetail = async ({db}:Context,id:string,version:number) => {
   return item
 }
 export async function createScenario({db,actor,store}:Context,cfg:Config,req:Request,key:string) {
-  const data = graph.parse(req.body)
+  const wrapped=libraryInput.safeParse(req.body)
+  const data=wrapped.success?wrapped.data.graph:graph.parse(req.body)
+  const settings=wrapped.success?{folder:wrapped.data.folder??'',is_template:wrapped.data.is_template??false}:{folder:'',is_template:false}
   await allowedChannel(db,data)
-  return once(db,cfg,actor,'scenario.create',key,{store,data},async()=>{
+  return once(db,cfg,actor,'scenario.create',key,wrapped.success?{store,data,settings}:{store,data},async()=>{
     const id = newId()
-    await db.query(`INSERT INTO scenario(id,tenant_id,store_id,channel_id,created_by,graph)
-      VALUES ($1,$2,$3,$4,$5,$6)`,[id,actor.tenant_id,store,data.channel,actor.id,JSON.stringify(data)])
+    await db.query(`INSERT INTO scenario(id,tenant_id,store_id,channel_id,created_by,graph,folder,is_template)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,[id,actor.tenant_id,store,data.channel,actor.id,JSON.stringify(data),settings.folder,settings.is_template])
     await audit(db,actor.tenant_id,store,actor.id,'scenario.create',id)
     return record(db,id)
   })
@@ -98,6 +102,27 @@ export async function saveScenario({db,actor,store}:Context,id:string,input:unkn
   await audit(db,actor.tenant_id,store,actor.id,'scenario.save',id)
   return record(db,id)
 }
+export async function saveScenarioFolder({db,actor,store}:Context,id:string,input:unknown){
+  const data=z.strictObject({revision,folder}).parse(input)
+  await lockDispatch(db,actor.tenant_id)
+  const result=await db.query('UPDATE scenario SET folder=$2,revision=revision+1 WHERE id=$1 AND revision=$3 RETURNING id',[id,data.folder,data.revision])
+  if(!result.rowCount)throw conflict()
+  await audit(db,actor.tenant_id,store,actor.id,'scenario.folder',id)
+  return scenarioDetail({db,actor,store},id)
+}
+
+export async function publicationReview(context:Context,id:string){
+  const {db}=context,current=await record(db,id)
+  const published=current.published_version?await versionDetail(context,id,current.published_version):null
+  // Compare immutable live graphs, rather than the editable drafts.
+  const {rows:related}=await db.query<{id:string;name:string;version:number}>(`SELECT s.id,v.graph->>'name' AS name,v.version
+    FROM scenario s JOIN scenario_version v ON v.scenario_id=s.id AND v.version=s.published_version
+    WHERE s.id<>$1 AND NOT s.stopped AND v.graph->>'channel'=$2 AND v.graph->>'purpose'=$3 AND v.graph->>'trigger'=$4
+      AND ($4<>'tag_added' OR v.graph->>'triggerTag'=$5)
+    ORDER BY s.updated_at DESC LIMIT 20`,[id,current.graph.channel,current.graph.purpose,current.graph.trigger,current.graph.triggerTag??''])
+  return {revision:current.revision,published,related}
+}
+
 export async function transitionScenario({db,actor,store}:Context,id:string,input:unknown) {
   const data = z.strictObject({ revision, action:z.enum(['test','approve','publish','stop','resume']), reason:text(200).optional(),fixture:fixture.optional() }).parse(input)
   await lockDispatch(db,actor.tenant_id)
@@ -120,6 +145,7 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
       state='approved'
       break
     case 'publish':
+      if(current.is_template)throw new Fault(409,'TEMPLATE_ONLY','テンプレートは配信されません。新しいシナリオへ複製して公開してください。')
       if (state!=='approved') throw conflict()
       canPublish(current.graph)
       complete(current.graph)

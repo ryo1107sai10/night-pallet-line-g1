@@ -21,7 +21,7 @@ import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, modul
   moduleStart, rememberModuleBot, requireModule} from './line-module.js'
 import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboarding, markOnboardingRegistered,
   onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
-import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
+import { createScenario, saveScenario, saveScenarioFolder, publicationReview, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop, workOnce } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, authenticateCustomer,
   customerSessionCookie, setPreferences, customerById, selfPreferenceInput, emitDelivery } from './customer.js'
@@ -951,6 +951,8 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.post(scenarios,inStore((db,actor,req)=>createScenario(scenarioContext(db,actor,req),cfg,req,keyOf(req)),true,201))
   api.get(scenario,inStore((db,actor,req)=>scenarioDetail(scenarioContext(db,actor,req),idOf(req,'scenario'))))
   api.patch(scenario,inStore((db,actor,req)=>saveScenario(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
+  api.patch(scenario+'/folder',inStore((db,actor,req)=>saveScenarioFolder(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
+  api.get(scenario+'/publication-review',inStore((db,actor,req)=>publicationReview(scenarioContext(db,actor,req),idOf(req,'scenario'))))
   api.get(scenario+'/versions/:version',inStore((db,actor,req)=>versionDetail(scenarioContext(db,actor,req),
     idOf(req,'scenario'),z.coerce.number().int().positive().parse(req.params.version))))
   api.post(scenario+'/transition',inStore((db,actor,req)=>transitionScenario(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))

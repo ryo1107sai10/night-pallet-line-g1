@@ -63,7 +63,15 @@ export function installStepDrag(board,{groups,canMove,onMove}) {
     if(!board.isConnected||!canMove()){cleanup();return}
     const edge=Math.min(90,innerHeight/5)
     const delta=d.y<edge?-Math.min(18,(edge-d.y)/4):d.y>innerHeight-edge?Math.min(18,(d.y-innerHeight+edge)/4):0
-    if(delta){window.scrollBy(0,delta);locate(d.x,d.y)}
+    const scroller=board.closest('.canvas-scroll')
+    const rect=scroller?.getBoundingClientRect()
+    if(scroller&&rect&&scroller.scrollHeight>scroller.clientHeight+1){
+      const edgeY=Math.min(80,rect.height/5),edgeX=Math.min(70,rect.width/5)
+      const dy=d.y<rect.top+edgeY?-Math.min(18,(rect.top+edgeY-d.y)/4):d.y>rect.bottom-edgeY?Math.min(18,(d.y-rect.bottom+edgeY)/4):0
+      const dx=d.x<rect.left+edgeX?-Math.min(18,(rect.left+edgeX-d.x)/4):d.x>rect.right-edgeX?Math.min(18,(d.x-rect.right+edgeX)/4):0
+      if(dx||dy){scroller.scrollBy(dx,dy);locate(d.x,d.y)}
+    }else if(delta){window.scrollBy(0,delta);locate(d.x,d.y)}
+
     d.frame=requestAnimationFrame(scrollFrame)
   }
   function activate() {

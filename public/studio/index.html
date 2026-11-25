@@ -19,12 +19,13 @@
     <header class="hero">
       <div>
         <h1>シナリオ<span>スタジオ</span></h1>
-        <p>LINE配信の流れを設計し、配信前に分岐と除外条件を確認。</p>
+        <p>作成 → テスト → 承認 → 公開</p>
       </div>
-      <div class="controls"><button id="tag-templates" type="button">採用タグ別テンプレート</button><button id="new" class="primary" type="button"><b aria-hidden="true">＋</b> 新規シナリオ</button></div>
+      <div class="controls"><button id="tag-templates" type="button">タグ別テンプレート</button><button id="saved-templates" type="button">保存済みテンプレート</button><button id="new" class="primary" type="button"><b aria-hidden="true">＋</b> 新規シナリオ</button></div>
     </header>
+    <section id="workbar" class="glass workbar" aria-label="シナリオ編集操作"></section>
     <div id="message" role="status" aria-live="polite" hidden></div>
-    <nav class="mobile glass" aria-label="作業画面"><button data-part="library">シナリオ</button><button data-part="workspace" aria-current="true">フロー</button><button data-part="inspector">設定・プレビュー</button></nav>
+    <nav class="mobile glass" aria-label="作業画面"><button data-part="library">シナリオ</button><button data-part="workspace" aria-current="true">フロー</button><button data-part="inspector">編集・テスト</button></nav>
     <div id="layout" class="layout" data-part="workspace">
       <aside id="library" class="panel glass" aria-label="シナリオ一覧"></aside>
       <section id="workspace" class="panel glass" aria-label="配信フロー"></section>
