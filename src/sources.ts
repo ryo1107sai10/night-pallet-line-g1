@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { audit, missing, newId, text, uuid, type Actor, type DB } from './core.js'
+import QRCode from 'qrcode'
+import { audit, Fault, missing, newId, text, uuid, type Actor, type DB } from './core.js'
 import { channel } from './line.js'
 import type { WorkflowSubject } from './forms.js'
 import { lockDispatch } from './dispatch-lock.js'
@@ -8,6 +9,24 @@ import { requireFeature } from './store-features.js'
 export const sourceInput=z.strictObject({channel:uuid,label:text(100)})
 export const sourceStatus=z.strictObject({active:z.boolean()})
 export const sourceReportInput=z.strictObject({days:z.coerce.number().int().min(1).max(365).default(30)})
+
+// Official LINE URL scheme: open the OA chat with a source-specific message
+// prefilled. The user must still send it and redeem the personal link.
+export function sourceInvitationUrl(basicId:string|null,use:WorkflowSubject['purpose'],id:string){
+  if(!basicId||!/^@[A-Za-z0-9._-]{1,30}$/.test(basicId)||!uuid.safeParse(id).success)return null
+  const phrase=(use==='recruitment'?'面談予約':'来店予約')+' '+id
+  return 'https://line.me/R/oaMessage/'+encodeURIComponent(basicId)+'/?'+encodeURIComponent(phrase)
+}
+export async function sourceQR(db:DB,store:string,use:WorkflowSubject['purpose'],id:string){
+  await requireFeature(db,store,'sources_enabled')
+  const {rows:[entry]}=await db.query<{basic_id:string|null}>(`SELECT c.basic_id FROM workflow_source w
+    JOIN channel c ON c.id=w.channel_id WHERE w.id=$1 AND w.store_id=$2 AND w.purpose=$3`,[id,store,use])
+  if(!entry)throw missing()
+  const url=sourceInvitationUrl(entry.basic_id,use,id)
+  if(!url)throw new Fault(409,'SOURCE_LINE_ID_REQUIRED','公式LINEの@IDを確認してからQRコードを発行してください。')
+  return {image:await QRCode.toDataURL(url,{width:256,margin:2,errorCorrectionLevel:'M'})}
+}
+
 
 export async function recordSource(db:DB,identity:WorkflowSubject,source:string|undefined) {
   if(!source)return
@@ -22,8 +41,8 @@ export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpo
   // 流入元の帰属は、リッチメニューの postback に含まれる source= をトークン発行時に紐づけて記録する。
   const {rows:channels}=await db.query(`SELECT id,label FROM channel WHERE purpose IN ($1,'shared')
     ORDER BY label,id`,[use])
-  const {rows}=await db.query<{id:string}>(`
-    SELECT w.id,w.label,w.active,c.label AS channel_label,
+  const {rows}=await db.query<{id:string;basic_id:string|null}>(`
+    SELECT w.id,w.label,w.active,c.label AS channel_label,c.basic_id,
       coalesce(stats.opened,0) AS opened,coalesce(stats.forms,0) AS forms,
       coalesce(stats.booked,0) AS booked,coalesce(stats.interviewed,0) AS interviewed,
       coalesce(stats.trials,0) AS trials,coalesce(stats.hired,0) AS hired
@@ -47,8 +66,8 @@ export async function sourceReport(db:DB,store:string,use:WorkflowSubject['purpo
       LEFT JOIN recruitment_case k ON t.purpose='recruitment' AND k.channel_id=t.channel_id AND k.applicant_key=t.subject
       WHERE t.source_id=w.id AND t.attributed_at>=now()-make_interval(days=>$2)
     ) stats ON true WHERE w.purpose=$1 ORDER BY w.label,w.id`,[use,days])
-  return {channels,entries:rows.map(row=>({
-    ...row,
+  return {channels,entries:rows.map(({basic_id,...row})=>({
+    ...row,url:sourceInvitationUrl(basic_id,use,row.id),
     // 入口はリッチメニューの postback データにこの文字列を設定する（トークン発行時に紐づける）。
     postback:'action='+(use==='recruitment'?'interview_link':'customer_link')+'&source='+row.id,
   }))}

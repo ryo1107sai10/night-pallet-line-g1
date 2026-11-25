@@ -277,7 +277,7 @@ function tagManager(root,data,store,path,refresh){
 }
 
 function sources(root,report,path,refresh,use){
-  root.append(el('h2','流入分析'),el('p','直近30日間に、経路リンクを開いてLINEの本人確認を完了した人数を集計します。'))
+  root.append(el('h2','流入分析'),el('p','経路リンクまたはQRからLINEを開き、表示されたメッセージを送信して個人別の予約リンクを開いた人を集計します。集計期間は直近30日間です。'))
   if(report.channels.length)root.append(form([
     field('経路名','label'),field('公式LINE','channel','',report.channels[0].id,channelOptions(report.channels)),
   ],'経路リンクを発行',async data=>{await api(path+'/sources','POST',data);await refresh('経路リンクを発行しました。')}))
@@ -286,28 +286,36 @@ function sources(root,report,path,refresh,use){
     row.append(el('h3',entry.label),el('p',entry.channel_label+(entry.active?' · 集計中':' · 停止中')),
       el('p','本人確認 '+entry.opened+'人 · 回答 '+entry.forms+'人 · 予約 '+entry.booked+'人'+
         (use==='recruitment'?' · 面談実施 '+entry.interviewed+'人 · 体入 '+entry.trials+'人 · 入店 '+entry.hired+'人':'')))
-    const link=el('input')
-    link.type='url'
-    link.readOnly=true
-    link.value=entry.url
-    link.setAttribute('aria-label',entry.label+'の流入リンク')
     const qr=el('div')
-    row.append(link,controls(button('リンクをコピー',async()=>{await navigator.clipboard.writeText(entry.url);notice('リンクをコピーしました。')}),
-      button('QRコードを表示',async()=>{
-        const data=await api(path+'/sources/'+entry.id+'/qr')
-        const image=el('img')
-        image.src=data.image
-        image.width=210
-        image.height=210
-        image.alt=entry.label+'の流入QRコード'
-        const download=el('a','QRコードを保存')
-        download.href=data.image
-        download.download='night-pro-line-'+entry.id+'.png'
-        qr.replaceChildren(image,download)
-      }),
+    if(entry.url){
+      const link=el('input')
+      link.type='url'
+      link.readOnly=true
+      link.value=entry.url
+      link.setAttribute('aria-label',entry.label+'の流入リンク')
+      row.append(link,controls(button('リンクをコピー',async()=>{await navigator.clipboard.writeText(entry.url);notice('リンクをコピーしました。')}),
+        button('QRコードを表示',async()=>{
+          const data=await api(path+'/sources/'+entry.id+'/qr')
+          const image=el('img')
+          image.src=data.image
+          image.width=210
+          image.height=210
+          image.alt=entry.label+'の流入QRコード'
+          const download=el('a','QRコードを保存')
+          download.href=data.image
+          download.download='night-pro-line-'+entry.id+'.png'
+          qr.replaceChildren(image,download)
+        })),qr)
+    }else row.append(el('p','公式LINEの@IDが未確認です。接続確認後にリンクとQRコードを発行できます。','muted'))
+    const postback=el('input')
+    postback.readOnly=true
+    postback.value=entry.postback
+    postback.setAttribute('aria-label',entry.label+'のリッチメニュー用データ')
+    row.append(el('p','リッチメニューで使うデータ','muted'),postback,controls(
+      button('データをコピー',async()=>{await navigator.clipboard.writeText(entry.postback);notice('リッチメニュー用データをコピーしました。')}),
       button(entry.active?'計測を停止':'計測を再開',async()=>{
         await api(path+'/sources/'+entry.id,'PATCH',{active:!entry.active});await refresh('経路を更新しました。')
-      })),qr)
+      })))
     root.append(row)
   }
   if(!report.entries.length)root.append(el('p','発行した経路リンクはまだありません。'))

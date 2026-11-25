@@ -91,11 +91,14 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
     if (event.kind==='postback'&&event.action==='interview_link'&&event.user_key&&event.recipient_box) {
       await tryIssueInterviewLink(db,cfg,c,event)
     }
-    if (event.kind==='message'&&event.action==='interview_link'&&event.user_key&&event.recipient_box&&
+    if (event.kind==='message'&&['interview_link','customer_link'].includes(event.action)&&event.user_key&&event.recipient_box&&
         automationForStore(cfg,c.store_id)&&Date.now()-+event.occurred_at<10*60000) {
       const store=await locationOf(db,c.store_id)
       if(store.auto_enabled&&store.auto_enabled_at&&+event.occurred_at>=+store.auto_enabled_at&&
-        store.contract_active&&store.eligible_at&&channelTestReady(c))await tryIssueInterviewLink(db,cfg,c,event)
+        store.contract_active&&store.eligible_at&&channelTestReady(c)){
+        if(event.action==='interview_link')await tryIssueInterviewLink(db,cfg,c,event)
+        else await tryIssueCustomerLink(db,cfg,c,event)
+      }
     }
     if (event.kind==='postback'&&event.action==='customer_link'&&event.user_key&&event.recipient_box) {
       await tryIssueCustomerLink(db,cfg,c,event)

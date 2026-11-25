@@ -1025,8 +1025,8 @@ test('採用と顧客の回答フォーム・版・流入元を分離し、店�
   assert.doesNotMatch(JSON.stringify(response),/answers_box|applicant_key/)
   assert.deepEqual(expect(await request(guest+'/responses',{cookie:admin}),200),[])
   expect(await request(candidate+'/responses',{cookie:other}),404)
-  // 流入元QR（LIFF URL前提）は撤去済みで、入口は postback 文字列のみ。
-  expect(await request(candidate+'/sources/'+entry.id+'/qr',{cookie:admin}),404)
+  // 公式LINEの@IDが未確認ならQRは出さず、他用途からも取得させない。
+  assert.equal(expect(await request(candidate+'/sources/'+entry.id+'/qr',{cookie:admin}),409).code,'SOURCE_LINE_ID_REQUIRED')
   expect(await request(guest+'/sources/'+entry.id+'/qr',{cookie:admin}),404)
   let [record]=expect(await request(root+'/recruitment',{cookie:admin}),200)
   assert.equal(record.applicant_name,'面談テスト')
@@ -1038,7 +1038,7 @@ test('採用と顧客の回答フォーム・版・流入元を分離し、店�
   }
   const report=expect(await request(candidate+'/sources',{cookie:admin}),200)
   assert.match(report.entries.find(source=>source.id===entry.id).postback,/source=/)
-  assert.equal(report.entries.find(source=>source.id===entry.id).url,undefined)
+  assert.equal(report.entries.find(source=>source.id===entry.id).url,null)
   assert.deepEqual(report.entries.map(source=>[source.opened,source.forms,source.interviewed,source.trials,source.hired]),[[1,1,1,1,1],[0,0,0,0,0]])
   assert.equal(expect(await request(guest+'/sources',{cookie:admin}),200).entries.find(source=>source.id===channelOnly.id).opened,0)
 })

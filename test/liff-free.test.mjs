@@ -118,7 +118,7 @@ before(async () => {
         return Response.json({ client_id: clients[options.body.get('access_token')] })
       case '/v2/bot/info': {
         const tokenValue = options.headers.Authorization?.replace('Bearer ', '')
-        return Response.json({ userId: bots[tokenValue] })
+        return Response.json({ userId: bots[tokenValue], basicId:tokenValue==='access-token-recruit'?'@test-recruit':'@test-customer' })
       }
       case '/v2/bot/message/quota': return Response.json({ type: 'limited', value: 200 })
       case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0 })
@@ -296,7 +296,9 @@ test('項目4: 流入元をトークン発行時に紐づけ、引換で帰属�
   const entry = expect(await post(workflow + '/sources', admin, { channel: recruit, label: '求人媒体X' }, idempotency()), 201)
   const report = expect(await request(workflow + '/sources?days=30', { cookie: admin }), 200)
   const found = report.entries.find(item => item.id === entry.id)
-  assert.equal(found.url, undefined, '流入元の入口はURLではなく postback 文字列のみ')
+  assert.equal(found.url,'https://line.me/R/oaMessage/%40test-recruit/?'+encodeURIComponent('面談予約 '+entry.id))
+  assert.match(expect(await request(workflow+'/sources/'+entry.id+'/qr',{cookie:admin}),200).image,/^data:image\/png;base64,/)
+
   assert.equal(found.postback, 'action=interview_link&source=' + entry.id)
   assert.ok(report.channels.some(item => item.id === recruit), '流入元の対象になること')
 
@@ -374,4 +376,36 @@ test('項目3ガード: ブロック中ユーザーと機能フラグOFFでは�
   await worker()
   assert.equal(await count(), before, 'フラグOFFでは発行されないこと')
   await setFeatures({ token_customers_enabled: true })
+})
+
+test('LIFFなしの流入リンク・QR: 利用者が送った経路メッセージだけを照合し、用途と初回帰属を保持する',async()=>{
+  const root='/stores/'+storeId+'/workflows/'
+  const recruitPath=root+'recruitment',customerPath=root+'customer'
+  const rs=expect(await post(recruitPath+'/sources',admin,{channel:recruit,label:'QR採用テスト'},idempotency()),201)
+  const cs=expect(await post(customerPath+'/sources',admin,{channel:customer,label:'QR来店テスト'},idempotency()),201)
+  const rUser='U'+'d'.repeat(32),cUser='U'+'e'.repeat(32),inactiveUser='U'+'f'.repeat(32)
+  const message=(id,who,text)=>eventFor(id,'message',who,{message:{id:id+'-msg',type:'text',text}})
+  await inbound(recruit,botR,[message('source-wrong-purpose',rUser,'面談予約 '+cs.id),message('source-unknown',rUser,'面談予約 '+randomUUID())])
+  await worker()
+  assert.ok(!pushes.some(x=>x.to===rUser&&x.text.includes('/reserve/')))
+  expect(await request(customerPath+'/sources/'+rs.id+'/qr',{cookie:admin}),404)
+  await inbound(recruit,botR,[message('source-recruit-text',rUser,'面談予約 '+rs.id)])
+  await worker()
+  const rToken=pushes.find(x=>x.to===rUser&&x.text.includes('/reserve/'))
+  assert.ok(rToken)
+  expect(await post('/interview-link/'+recruit+'/redeem',null,{token:rToken.text.match(/\?t=([A-Za-z0-9_-]{43})/)[1]}),200)
+  assert.equal((await read('SELECT count(*)::int n FROM workflow_attribution WHERE source_id=$1',[rs.id])).rows[0].n,1)
+  await inbound(customer,botC,[message('source-customer-text',cUser,'来店予約 '+cs.id)])
+  await worker()
+  const cToken=pushes.find(x=>x.to===cUser&&x.text.includes('/account/'))
+  assert.ok(cToken)
+  expect(await post('/customer-link/'+customer+'/redeem',null,{token:cToken.text.match(/\?t=([A-Za-z0-9_-]{43})/)[1]}),200)
+  assert.equal((await read('SELECT count(*)::int n FROM workflow_attribution WHERE source_id=$1',[cs.id])).rows[0].n,1)
+  expect(await patch(recruitPath+'/sources/'+rs.id,admin,{active:false}),200)
+  await inbound(recruit,botR,[message('source-inactive-text',inactiveUser,'面談予約 '+rs.id)])
+  await worker()
+  const ordinary=pushes.find(x=>x.to===inactiveUser&&x.text.includes('/reserve/'))
+  assert.ok(ordinary,'停止した経路も通常の予約案内には使える')
+  expect(await post('/interview-link/'+recruit+'/redeem',null,{token:ordinary.text.match(/\?t=([A-Za-z0-9_-]{43})/)[1]}),200)
+  assert.equal((await read('SELECT count(*)::int n FROM workflow_attribution WHERE source_id=$1',[rs.id])).rows[0].n,1,'停止中の経路へ帰属しない')
 })

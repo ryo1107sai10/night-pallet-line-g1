@@ -381,15 +381,29 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     // postback は認識した action と、実在する流入元IDだけを保存する（生データは保存しない）。
     const params=kind==='postback'&&event.postback?new URLSearchParams(event.postback.data):null
     const actionParam=params?.get('action')
-    const action=actionParam==='interview_link'||actionParam==='customer_link'?actionParam:
+    let action=actionParam==='interview_link'||actionParam==='customer_link'?actionParam:
       kind==='message'&&user&&phrase==='面談予約'&&c.purpose!=='customer'?'interview_link':null
     let sourceId:string|null=null
-    const sourceParam=params?.get('source')
-    if (action&&sourceParam&&uuid.safeParse(sourceParam).success) {
-      // 流入元はこのチャネル・用途のものだけを信用する。不正なIDは黙って捨てる。
-      const {rowCount}=await db.query('SELECT 1 FROM workflow_source WHERE id=$1 AND channel_id=$2 AND purpose=$3',
-        [sourceParam,c.id,action==='interview_link'?'recruitment':'customer'])
-      if (rowCount) sourceId=sourceParam
+    const typedSource=kind==='message'&&user?phrase?.match(/^(面談予約|来店予約) ([0-9a-f-]{36})$/i):null
+    if(typedSource){
+      const requested=typedSource[1]==='面談予約'?'interview_link':'customer_link'
+      const use=requested==='interview_link'?'recruitment':'customer'
+      if((c.purpose==='shared'||c.purpose===use)&&uuid.safeParse(typedSource[2]).success){
+        const {rows:[entry]}=await db.query<{active:boolean}>(`SELECT w.active AND s.sources_enabled AS active
+          FROM workflow_source w JOIN store s ON s.id=w.store_id
+          WHERE w.id=$1 AND w.channel_id=$2 AND w.purpose=$3`,[typedSource[2],c.id,use])
+        // Only a real route for this OA and purpose is recognized. A stopped
+        // tracking route still permits ordinary booking, without attribution.
+        if(entry){action=requested;if(entry.active)sourceId=typedSource[2]}
+      }
+    }else{
+      const sourceParam=params?.get('source')
+      if (action&&sourceParam&&uuid.safeParse(sourceParam).success) {
+        // Existing postback links remain usable when a source is unrecognized.
+        const {rowCount}=await db.query('SELECT 1 FROM workflow_source WHERE id=$1 AND channel_id=$2 AND purpose=$3 AND active',
+          [sourceParam,c.id,action==='interview_link'?'recruitment':'customer'])
+        if (rowCount) sourceId=sourceParam
+      }
     }
     // 兼用OAでは action が用途の振り分けそのものになるため、どちらのリンク postback でも宛先を封緘する（フェーズ4）。
     // 採用OAの友だち追加でも宛先を封緘する: 採用シナリオの実配信（026）が follow を起点に

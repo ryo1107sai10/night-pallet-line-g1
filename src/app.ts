@@ -39,7 +39,7 @@ import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, t
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
 import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
   type WorkflowSubject } from './forms.js'
-import { saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInput, sourceStatus } from './sources.js'
+import { saveSource, setSourceStatus, sourceInput, sourceReport, sourceReportInput, sourceStatus, sourceQR } from './sources.js'
 import { applicantTagCatalog, tagOverview, tagListQuery, saveApplicantTagSettings, tagSettingsInput, saveApplicantTag, tagDefinitionInput, saveSubjectTags, subjectTagsInput, tagCampaignInput, tagCampaignConfirm, previewTagCampaign, queueTagCampaign, stopTagCampaign } from './applicant-tags.js'
 import { approvalInput, approveCampaign, campaignInput, campaignOverview, prepareCampaign, stopCampaign } from './campaigns.js'
 import { listMenus, menuInput, saveMenus, validateMenus } from './rich-menus.js'
@@ -562,6 +562,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     sourceReport(db,idOf(req,'store'),workPurpose(req),sourceReportInput.parse(req.query).days)))
   api.post(workflow+'/sources',workflowStaff((db,actor,req)=>
     saveSource(db,actor,idOf(req,'store'),workPurpose(req),sourceInput.parse(req.body)),201))
+  api.get(workflow+'/sources/:source/qr',workflowStaff((db,_actor,req)=>sourceQR(db,idOf(req,'store'),workPurpose(req),idOf(req,'source'))))
   api.patch(workflow+'/sources/:source',workflowStaff((db,actor,req)=>
     setSourceStatus(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'source'),sourceStatus.parse(req.body).active)))
   api.get(workflow+'/rich-menus',workflowStaff((db,_actor,req)=>listMenus(db,idOf(req,'store'),workPurpose(req))))
