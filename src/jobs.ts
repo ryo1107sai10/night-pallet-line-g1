@@ -1,3 +1,4 @@
+import {processIntake} from './recruitment-intake.js'
 import {resolveRichButtons} from '../public/studio/message-format.mjs'
 import type pg from 'pg'
 import { type Actor, type Config, type DB, type Route, audit, automationForStore, conflict, scope, seal, tx, unseal } from './core.js'
@@ -34,6 +35,7 @@ export async function setStop(db: DB, actor: Actor, level: keyof typeof targets,
   let cancelled = 0
   if (stopped) {
     const args = level === 'tenant' ? [] : [id]
+    await db.query(`UPDATE recruitment_intake_run SET stage='cancelled',answers_box=NULL WHERE stage NOT IN ('complete','cancelled') AND ${target.constraint}`,args)
     const automatic = await endScope(db,target.constraint,args,'緊急停止')
     const applicant = await endApplicantScope(db,target.constraint,args,'緊急停止')
     const active = await db.query(`SELECT count(*)::int AS count FROM test_send
@@ -67,6 +69,8 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
   await lockDispatch(db,r.tenant_id)
   const c=await channel(db,r.id)
   const channelId=r.id
+  // Expired partial answers are erased even if the applicant never replies again.
+  await db.query("UPDATE recruitment_intake_run SET stage='cancelled',answers_box=NULL WHERE channel_id=$1 AND expires_at<=now() AND stage NOT IN ('complete','cancelled')",[channelId])
   const { rows } = await db.query(`SELECT * FROM webhook_event WHERE channel_id=$1 AND processed_at IS NULL
     ORDER BY occurred_at,event_id LIMIT 100 FOR UPDATE SKIP LOCKED`,[channelId])
   for (const event of rows) {
@@ -108,9 +112,10 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
     }
     await processCustomerWebhook(db,cfg,c,event)
     await processRecruitmentWebhook(db,cfg,c,event)
+    await processIntake(db,cfg,c,event)
     if(event.user_key&&event.stop_signal==='all')await db.query(`UPDATE workflow_contact SET notices=false
       WHERE channel_id=$1 AND user_key=$2 AND notices_changed_at<=$3`,[c.id,event.user_key,event.occurred_at])
-    await db.query('UPDATE webhook_event SET processed_at=now(),recipient_box=NULL WHERE channel_id=$1 AND event_id=$2',
+    await db.query('UPDATE webhook_event SET processed_at=now(),recipient_box=NULL,intake_phrase_box=NULL WHERE channel_id=$1 AND event_id=$2',
       [channelId,event.event_id])
   }
 }

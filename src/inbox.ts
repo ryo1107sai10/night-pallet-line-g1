@@ -148,6 +148,7 @@ export async function changeThread(db:DB,actor:Actor,store:string,use:Use,id:str
         AND EXISTS (SELECT 1 FROM store_grant g WHERE g.store_id=$2 AND g.staff_id=f.id)))`,[data.assigned_to,store,use,actor.platform?actor.id:null])
     if(!valid.rowCount)throw missing()
   }
+  if(data.state==='handling')await cancelIntakeForManualReply(db,thread.channel_id,thread.user_key)
   if(data.state!=='handling'||data.assigned_to!==thread.assigned_to){
     await interruptService(db,'object_id',id,'担当または対応状態が変更されました',['chat_reply'])
   }
@@ -175,6 +176,11 @@ export async function classifyThread(db:DB,actor:Actor,store:string,id:string,da
   return {classified:true}
 }
 
+async function cancelIntakeForManualReply(db:DB,channel:string,userKey:string){
+  await db.query(`UPDATE recruitment_intake_run r SET stage='cancelled',answers_box=NULL FROM workflow_contact c
+    WHERE r.channel_id=$1 AND c.channel_id=r.channel_id AND c.subject=r.applicant_key AND c.purpose='recruitment'
+      AND c.user_key=$2 AND r.stage NOT IN ('complete','cancelled')`,[channel,userKey])
+}
 export async function changeHandoff(db:DB,actor:Actor,store:string,use:Use,id:string,data:z.infer<typeof handoffInput>){
   if(!['admin','manager'].includes(actor.role))throw forbidden()
   await lockDispatch(db,actor.tenant_id)
@@ -188,6 +194,7 @@ export async function changeHandoff(db:DB,actor:Actor,store:string,use:Use,id:st
       ON CONFLICT(channel_id,user_key) DO UPDATE SET until_at=excluded.until_at RETURNING until_at`,
     [actor.tenant_id,store,thread.channel_id,thread.user_key,data.minutes])
     until=saved.until_at
+    await cancelIntakeForManualReply(db,thread.channel_id,thread.user_key)
     // Replies queued by the agency must not compete with the store manager.
     const {rows:threads}=await db.query<{id:string}>(`UPDATE inbox_thread
       SET state=CASE WHEN state='handling' THEN 'open' ELSE state END,revision=revision+1

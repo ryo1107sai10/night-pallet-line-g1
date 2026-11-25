@@ -1,3 +1,5 @@
+import {activeIntake} from './recruitment-intake.js'
+import {channel} from './line.js'
 import { z } from 'zod'
 import { localInstant, localPart } from '../public/studio/engine.mjs'
 import { audit, Fault, type Config, type DB } from './core.js'
@@ -6,7 +8,7 @@ import { interruptService, queueService } from './service-delivery.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
 
-const allNotices=['interview_confirm','interview_reminder','interview_waitlist'] as const
+const allNotices=['interview_confirm','interview_reminder','interview_waitlist','interview_reminder_3h'] as const
 export const noticeInput=z.strictObject({enabled:z.boolean()})
 export const waitlistInput=z.strictObject({method:z.literal('onsite').default('onsite'),days:z.int().min(1).max(30)})
 const day=86400000
@@ -53,6 +55,10 @@ export async function scheduleInterviewNotices(db:DB,cfg:Config,identity:Workflo
   const eve=new Date(Date.parse(civilDate+'T00:00:00Z')-day).toISOString().slice(0,10)
   const due=localInstant(eve+'T18:00',booking.timezone)
   if(due!==null&&due>Date.now()+15*60000)await queueService(db,cfg,identity,{...input,kind:'interview_reminder',due:new Date(due)})
+  const template=await activeIntake(db,await channel(db,identity.channel_id))
+  const threeHours=+booking.starts_at-3*3600000
+  if(template?.live.reminder3h&&threeHours>Date.now()+60000)
+    await queueService(db,cfg,identity,{...input,kind:'interview_reminder_3h',due:new Date(threeHours),expiry:new Date(threeHours+30*60000)})
 }
 
 export async function setWaitlist(db:DB,identity:WorkflowSubject,data:z.infer<typeof waitlistInput>|null){

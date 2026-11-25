@@ -26,7 +26,7 @@ export async function listForms(db:DB,store:string,use:WorkflowSubject['purpose'
   const {rows:channels}=await db.query(`SELECT id,label FROM channel
     WHERE purpose=$1 OR purpose='shared' ORDER BY label,id`,[use])
   const {rows:forms}=await db.query<Form>(`SELECT id,channel_id,title,description,fields,published,revision
-    FROM workflow_form WHERE purpose=$1 ORDER BY created_at,id`,[use])
+    FROM workflow_form WHERE purpose=$1 AND NOT chat_only ORDER BY created_at,id`,[use])
   return {channels,forms}
 }
 
@@ -45,22 +45,26 @@ async function writeForm(db:DB,actor:Actor,store:string,use:WorkflowSubject['pur
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,revision`,
       [...values,newId(),actor.tenant_id,store])
     : await db.query(`UPDATE workflow_form SET fields=$1,title=$2,description=$3,published=$4,revision=revision+1
-      WHERE channel_id=$5 AND purpose=$6 AND revision=$7 AND id=$8 RETURNING id,revision`,[...values,data.revision,data.id])
+      WHERE channel_id=$5 AND purpose=$6 AND revision=$7 AND id=$8 AND NOT chat_only RETURNING id,revision`,[...values,data.revision,data.id])
   const [saved]=result.rows
   if(!saved)throw conflict()
   await audit(db,actor.tenant_id,store,actor.id,'form.save',saved.id,null,{purpose:use,published:data.published})
   return saved
 }
 
-async function liveForm(db:DB,identity:WorkflowSubject,id?:string) {
+async function liveForm(db:DB,identity:WorkflowSubject,id?:string,chatOnly=false) {
   const {rows:[form]}=await db.query<Form>(`SELECT id,channel_id,title,description,fields,published,revision
-    FROM workflow_form WHERE channel_id=$1 AND purpose=$2 AND published AND ($3::uuid IS NULL OR id=$3)
-    ORDER BY created_at,id LIMIT 1`,[identity.channel_id,identity.purpose,id??null])
+    FROM workflow_form WHERE channel_id=$1 AND purpose=$2 AND published AND chat_only=$4 AND ($3::uuid IS NULL OR id=$3)
+    ORDER BY created_at,id LIMIT 1`,[identity.channel_id,identity.purpose,id??null,chatOnly])
   return form
 }
 
 export async function formFor(db:DB,identity:WorkflowSubject,id?:string) {
   if(!(await storeFeatures(db,identity.store_id)).forms_enabled)return null
+  // A chat intake already collected its three answers. Do not present a second
+  // generic form on the booking page unless a specific form URL was requested.
+  if(!id&&identity.purpose==='recruitment'&&(await db.query(`SELECT 1 FROM workflow_response r JOIN workflow_form f ON f.id=r.form_id
+    WHERE r.channel_id=$1 AND r.subject=$2 AND f.chat_only LIMIT 1`,[identity.channel_id,identity.subject])).rowCount)return null
   const form=await liveForm(db,identity,id)
   if(!form)return null
   const {rowCount}=await db.query(`SELECT 1 FROM workflow_response WHERE form_id=$1 AND subject=$2 AND form_revision=$3`,
@@ -75,10 +79,10 @@ export async function ensureRecruitmentCase(db:DB,identity:WorkflowSubject) {
   [newId(),identity.tenant_id,identity.store_id,identity.channel_id,identity.subject])
 }
 
-export async function submitForm(db:DB,cfg:Config,identity:WorkflowSubject,data:z.infer<typeof formResponse>) {
+export async function submitForm(db:DB,cfg:Config,identity:WorkflowSubject,data:z.infer<typeof formResponse>,chatOnly=false) {
   await lockDispatch(db,identity.tenant_id)
   await requireFeature(db,identity.store_id,'forms_enabled')
-  const form=await liveForm(db,identity,data.form)
+  const form=await liveForm(db,identity,data.form,chatOnly)
   if(!form||form.id!==data.form)throw missing()
   if(form.revision!==data.revision)throw conflict()
   const invalid=()=>new Fault(422,'FORM_ANSWER','必須項目と回答の形式をご確認ください。')

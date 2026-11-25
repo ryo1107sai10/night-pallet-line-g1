@@ -142,6 +142,7 @@ export async function staffInterviewOverview(db:DB,store:string,cfg:Config,googl
   const hosts=features.interviewers_enabled?await hostsFor(db,store):[]
   const {rows:channels}=await db.query("SELECT id,label FROM channel WHERE store_id=$1 AND purpose<>'customer' ORDER BY label",[store])
   const {rows:slots}=await db.query(`SELECT f.*,c.label AS channel_label,b.applicant_name,b.id AS booking_id,b.guest_email_box,h.name AS host_name,
+    CASE WHEN b.arrival_confirmed_revision=b.revision THEN b.arrival_confirmed_at END AS arrival_confirmed_at,
     g.status AS calendar_status,g.last_error AS calendar_error
     FROM interview_slot f JOIN channel c ON c.id=f.channel_id
     LEFT JOIN interview_booking b ON b.slot_id=f.id AND b.status='confirmed'

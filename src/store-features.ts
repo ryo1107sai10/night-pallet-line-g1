@@ -77,10 +77,16 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
     await db.query(`UPDATE service_delivery SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
       next_at='infinity',reason='店舗で機能を停止' WHERE store_id=$1 AND status IN ('queued','submitting','unknown')
       AND (NOT $7 OR purpose='recruitment')
-      AND (($2 AND kind IN ('interview_confirm','interview_reminder')) OR ($3 AND kind='interview_waitlist') OR ($4 AND kind='chat_reply')
+      AND (($2 AND kind IN ('interview_confirm','interview_reminder','interview_reminder_3h')) OR ($3 AND kind='interview_waitlist') OR ($4 AND kind='chat_reply')
         OR ($5 AND kind='interview_link') OR ($6 AND kind='customer_link'))`,
     [store,features.reminders_enabled===false,features.waitlist_enabled===false,features.inbox_enabled===false,
       features.token_interviews_enabled===false,features.token_customers_enabled===false,recruitmentOnly])
+  }
+  if([features.reminders_enabled,features.forms_enabled,features.recruitment_enabled,features.interviews_enabled,features.token_interviews_enabled].includes(false)){
+    await db.query("UPDATE recruitment_intake_run SET stage='cancelled',answers_box=NULL WHERE store_id=$1 AND stage NOT IN ('complete','cancelled')",[store])
+    await db.query(`UPDATE service_delivery SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
+      next_at='infinity',reason='店舗で機能を停止' WHERE store_id=$1 AND kind IN ('intake_prompt','interview_reminder_3h')
+      AND status IN ('queued','submitting','unknown')`,[store])
   }
   if(features.recruitment_tags_enabled!==undefined||features.recruitment_enabled!==undefined||features.rich_menus_enabled===true){
     await db.query(`UPDATE workflow_contact w SET menu_due_at=now() FROM workflow_menu m

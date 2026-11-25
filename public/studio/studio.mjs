@@ -1,3 +1,4 @@
+import {intakeTemplate,consentPrompt,intakeVariable} from './interview-intake-template.mjs'
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
 import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links,branchRules,timelineActions} from './engine.mjs'
 import {reorderGroups,reorderStep,adjacentMove} from './step-order.mjs'
@@ -1507,6 +1508,64 @@ function openWizard(empty=false,option={}){
   }
   render()
 }
+async function openInterviewIntake(){
+  const available=channels.filter(c=>c.purpose==='recruitment')
+  if(!available.length){dialog('面談までの基本の型','採用専用の公式LINEを接続すると、このテンプレートを利用できます。',node('p','来店と採用の兼用LINEには自動の応募質問を開始しません。'));return}
+  const targetStore=store.id, path='/stores/'+targetStore+'/recruitment-intake'
+  let channel=available.find(c=>c.id===graph?.channel)?.id??available[0].id,record,pending=false,changed=false,draft,checked=false
+  const box=node('div',null,'intake-template'),notice=node('p','読み込み中…','field-hint'),editor=node('div')
+  const picker=field('対象の公式LINE',channel,async v=>{if(pending)return;if(changed&&!confirm('保存していない編集を破棄しますか？')){picker.querySelector('select').value=channel;return}channel=v;await load()},{items:Object.fromEntries(available.map(c=>[c.id,c.label]))})
+  box.append(node('p','友だち追加 → 応募の同意 → 名前 → 最寄駅 → 年齢 → Googleカレンダーと照合した対面面談 → 確定カード → 3時間前の確認。','intake-summary'),picker,notice,editor)
+  if($('#dialog').open)$('#dialog').close()
+  dialog('面談までの基本の型（LINEトーク型）','実店舗の参考フローを個人名・店舗名・URLを匿名化して再構成しました。店舗ごとに文面を変更できます。',box)
+  $('#dialog').classList.add('template-dialog')
+  async function load(){
+    editor.replaceChildren();notice.textContent='読み込み中…';pending=true
+    try{record=demo?{revision:0,draft:intakeTemplate,active:false,readiness:['公開デモでは実LINEに配信できません。']}:await api(path+'/'+channel)
+      draft=structuredClone(record.draft);changed=false;checked=false;draw()
+    }finally{pending=false}
+  }
+  function draw(){
+    notice.textContent=record.active?'● 公開中'+(record.revision!==record.live_revision+1?' · 未公開の変更あり':''):'○ 未公開（配信していません）'
+    const fields=node('div',null,'intake-fields'),preview=node('section',null,'intake-preview'),actions=node('div',null,'intake-actions')
+    const steps=[['greeting','1　友だち追加のご挨拶'],['name','2　名前を聞く'],['station','3　最寄駅を聞く'],['age','4　年齢を聞く（数字のみ）'],['thanks','5　回答後の予約案内'],['confirm','6　面談確定通知'],['reminder','7　3時間前のリマインド']]
+    const mark=()=>{changed=true;checked=false;refresh()}
+    for(const [key,title] of steps){
+      fields.append(field(title,draft[key],v=>{draft[key]=v;mark()},{type:'textarea',event:'input',attributes:{maxlength:'850',rows:'3'}}))
+    }
+    fields.append(node('p','予約日時：{{booking}} ／ 店舗名：{{store}} ／ 回答した名前：{{name}}（回答後の文面だけ）を自動差し込みします。予約URLは自動発行されるため入力不要です。','field-hint'),
+      field('よくある質問のURL（任意）',draft.faqUrl,v=>{draft.faqUrl=v;mark()},{event:'input',attributes:{placeholder:'https://…',type:'url'}}),
+      field('お店の地図URL（任意）',draft.mapUrl,v=>{draft.mapUrl=v;mark()},{event:'input',attributes:{placeholder:'https://…',type:'url'}}),
+      field('3時間前リマインドとOK確認を使う',draft.reminder3h,v=>{draft.reminder3h=v;mark()},{type:'checkbox'}),
+      node('p','応募の同意確認と停止操作は共通で追加されます。通知を希望しなくても応募できます。既存の前日通知は維持します。','field-hint'))
+    const status=node('div',null,'intake-status')
+    const proof=field('プレビューで質問・予約・通知の順序を確認した',checked,v=>{checked=v;refreshButtons()},{type:'checkbox'})
+    const proofCheck=proof.querySelector('input')
+    const save=button('店舗の下書きに保存',async()=>{if(pending)return;pending=true;refreshButtons();try{if(demo){record={...record,revision:1,draft:structuredClone(draft)}}else record=await api(path,'PUT',{channel,revision:record.revision,settings:draft});changed=false;checked=false;draw();announce('下書きを保存しました。まだ配信は行っていません。')}finally{pending=false;refreshButtons()}},'primary')
+    const publish=button(record.active?'変更を公開する':'この型を公開する',async()=>{if(pending||changed||!checked||!record.revision)return;if(!confirm('選択した公式LINEで、新しい応募者向けのトークを開始します。公開してよろしいですか？'))return;pending=true;refreshButtons();try{record=await api(path+'/action','POST',{channel,revision:record.revision,action:'publish'});changed=false;checked=false;draw();announce('面談の基本の型を公開しました。')}finally{pending=false;refreshButtons()}},'primary')
+    const stop=button('この型の自動案内を停止',async()=>{if(pending||!record.active)return;if(!confirm('この店舗のLINEトーク型だけを停止します。確定済みの予約は残ります。よろしいですか？'))return;pending=true;refreshButtons();try{record=await api(path+'/action','POST',{channel,revision:record.revision,action:'stop'});draft=structuredClone(record.draft);changed=false;checked=false;draw();announce('面談の基本の型を停止しました。')}finally{pending=false;refreshButtons()}})
+    const reset=button('標準文面に戻す',()=>{if(confirm('編集欄を標準の文面に戻します。保存するまで変更は反映されません。')){draft=structuredClone(intakeTemplate);changed=true;checked=false;draw()}})
+    actions.append(reset,save,publish);if(record.active)actions.append(stop)
+    function refreshButtons(){save.disabled=pending||!changed&&!!record.revision;publish.disabled=demo||pending||changed||!checked||!record.revision||!!record.readiness.length;stop.disabled=pending||!record.active;picker.querySelector('select').disabled=pending}
+    function refresh(){
+      const example={name:'応募者サンプル',store:'店舗（サンプル）',booking:'11月30日 19:00'}
+      preview.replaceChildren(node('h3','LINEの流れ（架空のプレビュー）'))
+      const bubble=(title,text,mine=false)=>{const c=node('div',null,'intake-bubble'+(mine?' mine':''));c.append(node('small',title),node('p',text));preview.append(c)}
+      bubble('店舗',intakeVariable(draft.greeting,example));bubble('応募者','応募する',true);bubble('店舗',consentPrompt);bubble('応募者','通知ありで応募',true)
+      for(const [key,value] of [['name','応募者サンプル'],['station','サンプル駅'],['age','25']]){bubble('店舗',draft[key]);bubble('応募者',value,true)}
+      bubble('店舗',intakeVariable(draft.thanks,example)+'\n［この店舗専用の予約URL］')
+      bubble('予約確定',intakeVariable(draft.confirm,example)+'\n［予約の変更・キャンセル］'+(draft.faqUrl?'\n［よくある質問］':'')+(draft.mapUrl?'\n［お店の地図］':''))
+      if(draft.reminder3h){bubble('3時間前',intakeVariable(draft.reminder,example)+'\n［OK］');bubble('応募者','OK',true)}
+      proofCheck.checked=checked;refreshButtons()
+    }
+    if(record.readiness.length){status.append(node('strong','公開前に確認する項目'));for(const issue of record.readiness)status.append(node('p',issue,'held-note'))}
+    else status.append(node('p','LINE・機能・自動配信の公開条件はそろっています。','field-hint'))
+    const layout=node('div',null,'intake-columns');layout.append(fields,preview);editor.replaceChildren(layout,status,proof,actions);refresh()
+    // A render triggered by a completed API request must not retain disabled controls.
+    pending=false;refreshButtons()
+  }
+  await load()
+}
 function openPurposePicker(){
   const box=node('div',null,'purpose-picker'),cards=node('div',null,'purpose-cards')
   const has=(purpose,dedicated=false)=>channels.some(c=>c.purpose===purpose||!dedicated&&c.purpose==='shared')
@@ -1514,6 +1573,7 @@ function openPurposePicker(){
     const b=button('',fn,'purpose-card'+(recommended?' recommended':''));b.append(node('span',icon,'purpose-icon'),node('strong',title),node('small',desc));if(recommended)b.append(node('span','おすすめ','purpose-recommend'));cards.append(b)
   }
   if(has('recruitment')){
+    if(has('recruitment',true))card('面談までの基本の型を使いたい','LINEトークで名前・最寄駅・年齢 → 予約 → 確定 → 3時間前確認','✦',openInterviewIntake,true)
     card('応募者に面談予約を案内したい','応募フォーム送信 → 初回案内 → 未予約の人へ翌日再案内','✉',()=>openWizard(),true)
     if(has('recruitment',true))card('友だち追加した人に面談を案内したい','友だち追加がきっかけ。予約リンクを案内','＋',()=>openWizard(false,{...recruitmentTemplates[0],follow:'',purpose:'recruitment'}))
     for(const [i,title,desc,icon] of [[1,'面談予約後の案内を送りたい','予約が確定したときに準備や持ち物を案内','✓'],[2,'面談日程の変更に対応したい','面談日程変更後のフォロー','↗'],[3,'面談キャンセル後に再案内したい','取消後の案内・日程調整','↻']]){
@@ -1658,6 +1718,7 @@ async function start() {
     if(navigationBusy||!await finishBeforeLeave())return
     openTagTemplates()
   }
+  $('#interview-intake').onclick=async()=>{if(!ready||!store||navigationBusy||!await finishBeforeLeave())return;try{await openInterviewIntake()}catch(error){announce(error.message,true)}}
   $('#new').onclick=async()=>{
     if (!ready || !store) return
     if(navigationBusy||!await finishBeforeLeave())return

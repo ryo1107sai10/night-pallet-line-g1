@@ -1,3 +1,7 @@
+import {activeIntake,intakePromptLive,intakeAck} from './recruitment-intake.js'
+import {intakeVariable} from '../public/studio/interview-intake-template.mjs'
+import type {RichFormat} from '../public/studio/message-format.mjs'
+import {issueManageInterviewLink} from './interview-link.js'
 import type pg from 'pg'
 import { audit, automationForScopedStore, Fault, newId, scope, seal, tx, unseal, type Actor, type Config, type DB, type Route } from './core.js'
 import { channel, channelCredentials, channelReady, messagingReady, testDeliveryConfirmed, type Channel, type LineAPI } from './line.js'
@@ -10,7 +14,7 @@ import type { WorkflowSubject } from './forms.js'
 import { contactAddress } from './rich-menus.js'
 import { issueInterviewLinkToken } from './interview-link.js'
 
-type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'|'interview_link'|'customer_link'
+type Kind='interview_confirm'|'interview_reminder'|'interview_waitlist'|'chat_reply'|'interview_link'|'customer_link'|'intake_prompt'|'interview_reminder_3h'
 type Scheduled={kind:Kind;object:string;revision:number;due:Date;expiry:Date;body?:string;actor?:string}
 type ServiceJob=WorkflowSubject & {id:string;kind:Kind;object_id:string;object_revision:number;body_box:string|null;
   actor_id:string|null;generation:number;scope_version:string;status:string;attempt:number;next_at:Date|number;expires_at:Date;
@@ -43,7 +47,8 @@ async function testRecipient(db:DB,connection:Channel,userKey:string) {
   return !!rowCount
 }
 
-async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connection:Channel,verificationOnly:boolean){
+type Outbound={userKey:string;to:string;body:string;rich?:RichFormat;quickReplies?:{label:string;text:string}[]}
+async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connection:Channel,verificationOnly:boolean):Promise<Outbound|undefined>{
   if(job.kind==='chat_reply'){
     const {rows:[thread]}=await db.query<{address_box:string;user_key:string}>(`
       SELECT t.address_box,t.user_key FROM inbox_thread t JOIN staff f ON f.id=t.assigned_to
@@ -64,7 +69,7 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   [job.channel_id,job.purpose,job.subject])
   if(!contact)return
   // 本人が依頼したリンクの返信には、面談通知のオプトインを要求しない。
-  if(job.kind!=='interview_link'&&job.kind!=='customer_link'&&!contact.notices)return
+  if(job.kind!=='interview_link'&&job.kind!=='customer_link'&&job.kind!=='intake_prompt'&&!contact.notices)return
   if(verificationOnly&&job.kind!=='interview_link'&&job.kind!=='customer_link'&&!await testRecipient(db,connection,contact.user_key))return
   const {rows:[activity]}=await db.query<{kind:string|null;following:boolean|null;stop:boolean;recent_message:boolean}>(`SELECT
     EXISTS (SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$4
@@ -79,6 +84,13 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   const recentContact=activity.recent_message&&(verificationOnly||activity.following===true)
   if(activity.stop||activity.following===false||activity.kind==='unfollow'||(!activity.kind&&!recentContact))return
   const to=contactAddress(cfg,{...job,recipient_box:contact.recipient_box})
+  if(job.kind==='intake_prompt'){
+    const run=await intakePromptLive(db,cfg,connection,contact.user_key,job)
+    if(!run||!job.body_box)return
+    const quickReplies=run.stage==='invited'?[{label:'応募する',text:'応募する'}]:
+      run.stage==='consent'?[{label:'通知ありで応募',text:'通知ありで応募'},{label:'通知なしで応募',text:'通知なしで応募'},{label:'応募取消',text:'応募取消'}]:undefined
+    return {userKey:contact.user_key,to,body:unseal(cfg,'service:'+job.id,job.body_box),quickReplies}
+  }
   if(job.kind==='interview_link'||job.kind==='customer_link'){
     if(!job.body_box)return
     return {userKey:contact.user_key,to,body:unseal(cfg,'service:'+job.id,job.body_box)}
@@ -103,6 +115,24 @@ async function messageFor(db:DB,cfg:Config,job:ServiceJob,timezone:string,connec
   [job.object_id,job.channel_id,job.subject,job.object_revision])
   if(!booking)return
   const at=new Intl.DateTimeFormat('ja-JP',{dateStyle:'long',timeStyle:'short',timeZone:timezone}).format(booking.starts_at)
+  const intake=(job.kind==='interview_confirm'||job.kind==='interview_reminder_3h')?await activeIntake(db,connection):undefined
+  if(job.kind==='interview_reminder_3h'&&(!intake?.live.reminder3h||+booking.starts_at-Date.now()>3*3600000||+booking.starts_at-Date.now()<30*60000))return
+  if(intake&&['interview_confirm','interview_reminder_3h'].includes(job.kind)){
+    const current=job.kind==='interview_confirm'?intake.live.confirm:intake.live.reminder
+    const store=(await locationOf(db,job.store_id)).name
+    const body=[intakeVariable(current,{booking:at,store}),booking.instructions].filter(Boolean).join('\n')
+    let manage=job.body_box?unseal(cfg,'service:'+job.id,job.body_box):undefined
+    if(!manage){
+      manage=await issueManageInterviewLink(db,cfg,job,job.object_id)
+      if(manage)await db.query('UPDATE service_delivery SET body_box=$2 WHERE id=$1',[job.id,seal(cfg,'service:'+job.id,manage)])
+    }
+    const buttons=[...(manage?[{label:'予約の変更・キャンセル',url:manage}]:[]),
+      ...(intake.live.faqUrl?[{label:'よくある質問',url:intake.live.faqUrl}]:[]),
+      ...(intake.live.mapUrl?[{label:'お店の地図',url:intake.live.mapUrl}]:[])]
+    const rich:RichFormat|undefined=buttons.length?{kind:'buttons',buttons}:undefined
+    return {userKey:contact.user_key,to,body,rich,
+      quickReplies:job.kind==='interview_reminder_3h'?[{label:'OK',text:intakeAck}]:undefined}
+  }
   const prefix=job.kind==='interview_reminder'?'面談のリマインドです。':'面談予約が確定しました。'
   // D4: 確定通知には、変更・取消用トークンURL（body_box）を同梱する。
   const manage=job.kind==='interview_confirm'&&job.body_box?unseal(cfg,'service:'+job.id,job.body_box):null
@@ -164,7 +194,7 @@ export async function retryService(db:DB,cfg:Config,actor:Actor,store:string,pur
 }
 
 async function markStopped(db:DB,job:ServiceJob,reason:string){
-  await db.query("UPDATE service_delivery SET status=$2,next_at='infinity',reason=$3 WHERE id=$1",
+  await db.query("UPDATE service_delivery SET status=$2,next_at='infinity',reason=$3,body_box=CASE WHEN kind='intake_prompt' THEN NULL ELSE body_box END WHERE id=$1",
     [job.id,job.attempt>1?'unknown':'cancelled',reason])
 }
 
@@ -178,12 +208,12 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
   const claim=await locked(async db=>{
     const {rows:[pending]}=await db.query<ServiceJob>(`SELECT * FROM service_delivery
       WHERE channel_id=$1 AND status IN ('queued','submitting','unknown') AND next_at<=now()
-      AND (NOT $2::boolean OR kind<>'interview_reminder')
+      AND (NOT $2::boolean OR kind NOT IN ('interview_reminder','interview_reminder_3h'))
       ORDER BY next_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[r.id,immediate])
     if(!pending)return
     if(pending.attempt>=3||+pending.expires_at<=Date.now()||
       pending.first_attempt_at&&Date.now()-+pending.first_attempt_at>=30*60000){
-      await db.query("UPDATE service_delivery SET status=$2,next_at='infinity',reason='配信期限切れ' WHERE id=$1",
+      await db.query("UPDATE service_delivery SET status=$2,next_at='infinity',reason='配信期限切れ',body_box=CASE WHEN kind='intake_prompt' THEN NULL ELSE body_box END WHERE id=$1",
         [pending.id,pending.attempt?'unknown':'cancelled'])
       return null
     }
@@ -205,6 +235,7 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     const enabled=job.kind==='chat_reply'?features.inbox_enabled:
       job.kind==='interview_link'?features.interviews_enabled&&features.token_interviews_enabled:
       job.kind==='customer_link'?features.token_customers_enabled:
+      job.kind==='intake_prompt'?features.forms_enabled&&features.recruitment_enabled&&features.interviews_enabled&&features.token_interviews_enabled:
       job.kind==='interview_waitlist'?features.waitlist_enabled&&features.interviews_enabled:features.reminders_enabled
     const belongs=connection.purpose==='shared'||connection.purpose===job.purpose
     const connected=job.kind==='chat_reply'||job.kind==='interview_link'||job.kind==='customer_link'?messagingReady(connection):channelReady(connection)
@@ -221,7 +252,7 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
       await messageBudget(db,location,null,undefined,job.id)||
       (quota===null?'LINEの通数を確認できません':quota<=0?'LINEの月間通数に達しました':null)
     if(!message||hold){await markStopped(db,fresh,hold??'通知対象外');return}
-    return {promise:api.push(channelCredentials(cfg,connection),message.to,job.id,message.body)
+    return {promise:api.push(channelCredentials(cfg,connection),message.to,job.id,message.body,message.rich,message.quickReplies)
       .catch(()=>({status:'unknown',requestId:null,authError:false,statusCode:undefined}))}
   })
   if(!send)return true
@@ -234,7 +265,8 @@ export async function deliverService(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     await db.query(`UPDATE service_delivery SET status=$3,line_request_id=$4,
       accepted_at=CASE WHEN $3='accepted' THEN now() ELSE accepted_at END,
       next_at=CASE WHEN $3='unknown' AND $6 AND attempt<3 AND next_at<>'infinity' THEN now()+interval '1 minute' ELSE 'infinity' END,
-      reason=coalesce(reason,$5) WHERE id=$1 AND attempt=$2 AND status='submitting'`,
+      reason=coalesce(reason,$5),body_box=CASE WHEN kind='intake_prompt' AND $3 IN ('accepted','failed') THEN NULL ELSE body_box END
+      WHERE id=$1 AND attempt=$2 AND status='submitting'`,
     [job.id,job.attempt,status,result.requestId,reason,result.status==='unknown'])
   })
   return true

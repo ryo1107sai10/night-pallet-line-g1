@@ -1,3 +1,4 @@
+import {intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
 import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
@@ -607,6 +608,21 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     if(queued)await wakeLine(store,channel,'applicant')
     res.json({handoff_until})
   })
+  api.get('/stores/:store/recruitment-intake/:channel',staff(async(db,actor,req)=>{
+    const store=idOf(req,'store')
+    await interviewAccess(db,actor,store)
+    return intakeView(db,actor,store,idOf(req,'channel'))
+  }))
+  api.put('/stores/:store/recruitment-intake',staff(async(db,actor,req)=>{
+    const store=idOf(req,'store')
+    await interviewAccess(db,actor,store)
+    return saveIntake(db,actor,store,intakeSaveInput.parse(req.body))
+  }))
+  api.post('/stores/:store/recruitment-intake/action',staff(async(db,actor,req)=>{
+    const store=idOf(req,'store')
+    await interviewAccess(db,actor,store)
+    return changeIntake(db,cfg,actor,store,intakeActionInput.parse(req.body))
+  }))
   api.get(workflow+'/forms',workflowStaff((db,_actor,req)=>listForms(db,idOf(req,'store'),workPurpose(req))))
   api.put(workflow+'/forms',workflowStaff((db,actor,req)=>saveForm(db,cfg,actor,idOf(req,'store'),workPurpose(req),keyOf(req),formInput.parse(req.body))))
   api.get(workflow+'/responses',workflowStaff((db,_actor,req)=>responses(db,cfg,idOf(req,'store'),workPurpose(req))))

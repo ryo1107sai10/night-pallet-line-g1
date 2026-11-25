@@ -32,6 +32,7 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   if(includesRoute(interviews,route)||includesRoute(scenarios,route))return
   if(includesRoute('/stores/:store/intake',route)&&['admin','manager'].includes(actor.role))return
   if(['admin','manager'].includes(actor.role)&&includesRoute('/stores/:store/recruitment',route))return
+  if(['admin','manager'].includes(actor.role)&&includesRoute('/stores/:store/recruitment-intake',route))return
   if(req.params.purpose?.toString().toLowerCase()==='recruitment'){
     if(reads&&['settings','delivery'].some(page=>route===workflow+'/'+page))return
     if(actor.role==='admin'&&req.method==='PATCH'&&route===workflow+'/settings/acquisition')return

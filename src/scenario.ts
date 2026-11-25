@@ -184,9 +184,12 @@ export async function scenarioReadiness(context:Context,cfg:Config,id:string){
       const c=await channel(db,g.channel)
       if(c.stopped)add('line_stop','公式LINEの配信が停止中です。','line','stop')
       if(!channelReady(c)||(!c.module_channel_id&&!c.credentials)||(c.module_channel_id&&cfg.lineModule?.id!==c.module_channel_id))add('line','公式LINEの接続・一般利用者への送信確認が未完了です。','line')
+      if(g.purpose==='recruitment'&&['follow','form'].includes(g.trigger)&&
+        (await db.query('SELECT 1 FROM recruitment_intake WHERE channel_id=$1 AND live IS NOT NULL',[g.channel])).rowCount)
+        add('intake_duplicate','LINEトーク型の面談テンプレートが公開中です。開始案内の重複を避けるため先に停止してください。','settings')
       if(g.trigger==='form'){
         if(!features.forms_enabled)add('forms_off','回答フォームがオフです。','forms')
-        const {rows:[form]}=await db.query('SELECT EXISTS(SELECT 1 FROM workflow_form WHERE store_id=$1 AND channel_id=$2 AND purpose=$3 AND published) AS present',[store,g.channel,g.purpose])
+        const {rows:[form]}=await db.query('SELECT EXISTS(SELECT 1 FROM workflow_form WHERE store_id=$1 AND channel_id=$2 AND purpose=$3 AND published AND NOT chat_only) AS present',[store,g.channel,g.purpose])
         if(!form.present)add('form_missing','この公式LINEに公開済みの回答フォームがありません。','forms')
       }
       const messages=g.nodes.filter(n=>n.type==='message')
@@ -226,6 +229,11 @@ export async function publicationReview(context:Context,id:string){
   return {revision:current.revision,published,related}
 }
 
+async function rejectIntakeConflict(db:DB,g:Graph){
+  if(g.purpose==='recruitment'&&['follow','form'].includes(g.trigger)&&
+    (await db.query('SELECT 1 FROM recruitment_intake WHERE channel_id=$1 AND live IS NOT NULL',[g.channel])).rowCount)
+      throw new Fault(409,'INTAKE_DUPLICATE','LINEトーク型の面談テンプレートと開始案内が重複します。')
+}
 export async function transitionScenario({db,actor,store}:Context,id:string,input:unknown) {
   const data = z.strictObject({ revision, action:z.enum(['test','approve','publish','stop','resume']), reason:text(200).optional(),fixture:fixture.optional() }).parse(input)
   await lockDispatch(db,actor.tenant_id)
@@ -251,6 +259,7 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
       if(current.is_template)throw new Fault(409,'TEMPLATE_ONLY','テンプレートは配信されません。新しいシナリオへ複製して公開してください。')
       if (state!=='approved') throw conflict()
       canPublish(current.graph)
+      await rejectIntakeConflict(db,current.graph)
       complete(current.graph)
       await allowedChannel(db,store,current.graph)
       await allowApplicantTagGraph(db,actor,store,current.graph)
@@ -263,6 +272,10 @@ export async function transitionScenario({db,actor,store}:Context,id:string,inpu
     case 'resume':
       if (!version || !data.reason || stopped===(data.action==='stop')) throw conflict()
       stopped=data.action==='stop'
+      if(!stopped){
+        const {rows:[published]}=await db.query<{graph:Graph}>('SELECT graph FROM scenario_version WHERE scenario_id=$1 AND version=$2',[id,version])
+        if(published)await rejectIntakeConflict(db,published.graph)
+      }
       if (stopped) {
         await db.query(`UPDATE enrollment SET ended_at=now(),end_reason='シナリオ停止'
           WHERE scenario_id=$1 AND ended_at IS NULL`,[id])

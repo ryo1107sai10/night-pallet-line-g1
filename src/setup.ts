@@ -12,7 +12,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
     '020_tour_revisions','021_supervisor_handoff','022_interview_link_tokens','023_liff_free_links',
     '024_registration_flow','025_remove_liff','026_recruitment_delivery','027_agency_master_self_service',
-    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master']
+    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -44,6 +44,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.applicant_tag,night.applicant_tag_subject,night.applicant_tag_assignment,night.applicant_tag_campaign TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.customer_tag_rule TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.customer_tag_filter TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE ON night.recruitment_intake,night.recruitment_intake_run TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.workflow_form,night.recruitment_case,night.workflow_source TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.workflow_response,night.workflow_attribution TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE ON night.campaign,night.campaign_delivery TO ${role}`)

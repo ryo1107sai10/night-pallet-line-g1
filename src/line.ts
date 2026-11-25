@@ -1,3 +1,4 @@
+import {activeIntake,intakePhrase} from './recruitment-intake.js'
 import {lineMessage,type RichFormat} from '../public/studio/message-format.mjs'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { lockDispatch } from './dispatch-lock.js'
@@ -286,12 +287,14 @@ export class LineAPI {
     return {ok:response.ok||!id&&response.status===404,retry:response.status>=500||response.status===429}
   }
 
-  async push(cred: SendCredentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。',rich?:RichFormat) {
+  async push(cred: SendCredentials, recipient: string, attemptID: string, testBody='Night PRO LINEの接続テストです。',rich?:RichFormat,quickReplies?:{label:string;text:string}[]) {
     const authorization = 'module' in cred ? await this.headers(cred) : {Authorization:'Bearer '+cred.access_token}
     const response = await this.call('/v2/bot/message/push', { method: 'POST',
       headers: { ...authorization, 'Content-Type': 'application/json',
         'X-Line-Retry-Key': attemptID },
-      body: JSON.stringify({ to: recipient, messages: [lineMessage(testBody,rich)] }),
+      body: JSON.stringify({ to: recipient, messages: [{...lineMessage(testBody,rich),...(quickReplies?.length?{
+        quickReply:{items:quickReplies.map(a=>({type:'action',action:{type:'message',label:a.label,text:a.text}}))}
+      }:{})}] }),
     })
     const acceptedId = response.headers.get('x-line-accepted-request-id')
     const requestId = response.headers.get('x-line-request-id')
@@ -394,6 +397,7 @@ async function inboxEnabled(db:DB,store:string) {
 
 async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typeof eventSchema>[],inbox:boolean) {
   let requestedLink=false
+  const intake=c.purpose==='recruitment'?await activeIntake(db,c):undefined
   for (const event of events) {
     if (event.timestamp>Date.now()+5*60000) continue
     const source=event.source?.type==='user' ? event.source.userId : undefined
@@ -432,7 +436,10 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     // 兼用OAでは action が用途の振り分けそのものになるため、どちらのリンク postback でも宛先を封緘する（フェーズ4）。
     // 採用OAの友だち追加でも宛先を封緘する: 採用シナリオの実配信（026）が follow を起点に
     // workflow_contact を登録し、応募者を特定するために必要（従来は postback 時のみ封緘していた）。
-    const recipient=key&&user&&((['customer','recruitment'].includes(c.purpose)&&['follow','refollow'].includes(kind))||
+    const captured=intake&&key&&kind==='message'&&!stopSignal&&!action&&!phrase?.startsWith('接続テスト ')
+      ? await intakePhrase(db,cfg,c,event.webhookEventId,key,phrase??null,event.timestamp):null
+    const intakeFollow=!!intake&&kind==='follow'
+    const recipient=key&&user&&(captured||(['customer','recruitment'].includes(c.purpose)&&['follow','refollow'].includes(kind))||
       (c.purpose==='recruitment'&&action==='interview_link')||
       (c.purpose==='customer'&&action==='customer_link')||
       (c.purpose==='shared'&&(action==='interview_link'||action==='customer_link')))
@@ -441,11 +448,11 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     // テスター本人確認はメッセージ方式（接続テスト {code}）で行う。
     const test=phrase?.match(/^接続テスト ([A-Za-z0-9_-]{43})$/)
     const written=await db.query(`INSERT INTO webhook_event(tenant_id,store_id,channel_id,event_id,generation,
-      occurred_at,kind,purpose,user_key,recipient_box,stop_signal,action,source_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      occurred_at,kind,purpose,user_key,recipient_box,stop_signal,action,source_id,intake_phrase_box) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       ON CONFLICT(channel_id,event_id) DO NOTHING`,
-    [c.tenant_id,c.store_id,c.id,event.webhookEventId,c.generation,new Date(event.timestamp),test?'test_link':kind,eventPurpose,key,recipient,stopSignal,action,sourceId])
+    [c.tenant_id,c.store_id,c.id,event.webhookEventId,c.generation,new Date(event.timestamp),test?'test_link':kind,eventPurpose,key,recipient,stopSignal,action,sourceId,captured])
     if (!written.rowCount || !key || !user) continue
-    if (recipient && action && (kind==='message'||kind==='postback') &&
+    if (recipient && (action && (kind==='message'||kind==='postback')||captured||intakeFollow) &&
         Date.now()-event.timestamp<10*60000) requestedLink=true
     if (test) {
       const hash=digest(test[1])

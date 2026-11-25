@@ -462,7 +462,7 @@ function richMenus(root,entries,path,refresh,use){
 }
 const results={queued:'待機中',submitting:'送信中',accepted:'LINE受付済み',cancelled:'停止・対象外',failed:'失敗',unknown:'結果不明'}
 function deliveries(root,entries,store,path,refresh){
-  const kinds={interview_confirm:'面談確定',interview_reminder:'面談前日',interview_waitlist:'空き枠案内',chat_reply:'個別返信',
+  const kinds={interview_confirm:'面談確定',interview_reminder:'面談前日',interview_reminder_3h:'面談3時間前',intake_prompt:'応募トーク',interview_waitlist:'空き枠案内',chat_reply:'個別返信',
     interview_link:'面談予約リンク',customer_link:'来店予約リンク',step:'ステップ配信',campaign:'絞り込み配信'}
   root.append(el('h2','LINE送信履歴'))
   const failed=field('過去7日間のエラーだけ表示','failures','checkbox',onlyFailures)

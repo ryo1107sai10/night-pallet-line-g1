@@ -110,6 +110,7 @@ export async function updateAutomation(db:DB,cfg:Config,actor:Actor,id:string,in
     revision=revision+1 WHERE id=$1 AND revision=$5 RETURNING revision`,
     [id,input.enabled,input.contract,input.monthly_limit,input.revision])
   if (!updated.rowCount) throw conflict()
+  if(!input.enabled||!input.contract)await db.query("UPDATE recruitment_intake_run SET stage='cancelled',answers_box=NULL WHERE store_id=$1 AND stage NOT IN ('complete','cancelled')",[id])
   if (!input.enabled || !input.contract) {
     await endScope(db,'store_id=$1',[id],'店舗の自動配信を無効化')
     await endApplicantScope(db,'store_id=$1',[id],'店舗の自動配信を無効化')
