@@ -564,6 +564,12 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   const moved=expect(await patch(url+'/folder',admin,{revision:draft.revision,folder:'テスト分類'}),200)
   assert.equal(moved.folder,'テスト分類')
   assert.equal(moved.published_version,1)
+  const stopped=expect(await post(url+'/transition',admin,{action:'stop',revision:moved.revision,reason:'公開状態の表示確認'}),200)
+  const stopReady=expect(await request(url+'/readiness',{cookie:admin}),200)
+  assert.equal(stopReady.draft.status,'stopped');assert.equal(stopReady.published.status,'stopped')
+  assert.ok(stopReady.draft.issues.some(i=>i.code==='scenario_stop'))
+  expect(await post(url+'/transition',admin,{action:'resume',revision:stopped.revision,reason:'検証復帰'}),200)
+
   expect(await request(url+'/publication-review',{cookie:other}),404)
   // テンプレートは別の未公開コピー。通常の公開手順を試しても配信対象にはならない。
   const template=expect(await post(base,admin,{graph:{...graph,name:'自社テンプレート検証'},folder:'共通',is_template:true},idempotency()),201)

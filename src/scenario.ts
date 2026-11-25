@@ -169,7 +169,7 @@ export async function scenarioReadiness(context:Context,cfg:Config,id:string){
   const current=await record(context.db,context.store,id)
   const {db,store,actor}=context
   const [loc,features]=await Promise.all([locationOf(db,store),storeFeatures(db,store)])
-  const assess=async (g:Graph,published:boolean)=>{
+  const assess=async (g:Graph)=>{
     const issues:{code:string;message:string;target:'line'|'settings'|'forms'|'interviews'|'tags';severity:'stop'|'blocked'|'advice'}[]=[]
     const add=(code:string,message:string,target:typeof issues[number]['target'],severity:typeof issues[number]['severity']='blocked')=>issues.push({code,message,target,severity})
     if(!automationForStore(cfg,store,actor.tenant_id))add('process','サーバーの自動配信がこの店舗では有効ではありません。','settings')
@@ -177,7 +177,7 @@ export async function scenarioReadiness(context:Context,cfg:Config,id:string){
     if(!loc.eligible_at)add('eligibility','店舗の利用条件の確認が未完了です。','settings')
     if(!loc.auto_enabled||!loc.auto_enabled_at)add('automation','店舗の自動配信がオフです。','settings')
     if(loc.stopped||loc.tenant_stopped)add('store_stop','店舗または法人の配信が停止中です。','settings','stop')
-    if(published&&current.stopped)add('scenario_stop','このシナリオは停止中です。','settings','stop')
+    if(current.stopped)add('scenario_stop','このシナリオは停止中です。','settings','stop')
     const match=await db.query("SELECT id FROM channel WHERE store_id=$1 AND id=$2 AND (purpose=$3 OR purpose='shared')",[store,g.channel,g.purpose])
     if(!match.rowCount)add('channel','用途に合う公式LINEが登録されていません。','line')
     else{
@@ -211,7 +211,7 @@ export async function scenarioReadiness(context:Context,cfg:Config,id:string){
     return {channel:g.channel,purpose:g.purpose,status:issues.some(i=>i.severity==='stop')?'stopped':issues.some(i=>i.severity==='blocked')?'blocked':'ready',issues}
   }
   const published=current.published_version?await versionDetail(context,id,current.published_version):null
-  return {revision:current.revision,draft:await assess(current.graph,false),published:published?await assess(published.graph as Graph,true):null}
+  return {revision:current.revision,draft:await assess(current.graph),published:published?await assess(published.graph as Graph):null}
 }
 
 export async function publicationReview(context:Context,id:string){

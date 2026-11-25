@@ -120,7 +120,7 @@ function workbar(){
   const auto=button(autosave?'自動保存 ON':'自動保存 OFF',toggleAuto);auto.classList.add('secondary-work');auto.setAttribute('aria-pressed',String(autosave))
   const view=button(viewMode==='basic'?'詳細フロー':'簡単編集',()=>{viewMode=viewMode==='basic'?'graph':'basic';savePrefs();show();choosePiece('workspace')});view.setAttribute('aria-pressed',String(viewMode==='graph'))
   const guide=button('テスト',openTestWorkspace)
-  const publish=button('公開管理',openPublicationJourney)
+  const publish=button('公開管理',async()=>{tab='publish';show();choosePiece('inspector');await refreshReadiness()})
   const utility=button('その他 ▾',openUtilities);utility.classList.add('utility-work')
   const focus=button(focusMode?'集中モード終了':'集中モード',()=>{focusMode=!focusMode;hideLibrary=focusMode;hideInspector=focusMode;savePrefs();applyPanelMode();show()});focus.setAttribute('aria-pressed',String(focusMode));focus.classList.add('desktop-focus')
   if(graph)ops.append(status,undo,redo,auto,view,focus,utility,saveBtn,guide,publish)
@@ -284,7 +284,7 @@ function journeyDialog(title,description,content,actions,kind=''){
 function renderJourney(){
   const root=$('#journey');if(!root)return;root.hidden=!graph;if(!graph){root.replaceChildren();delete root.dataset.key;return}
   const basicOK=!!(graph.name.trim()&&graph.channel&&Object.hasOwn(liveTriggers[graph.purpose]??{},graph.trigger)&&(graph.trigger!=='tag_added'||graph.triggerTag))
-  const valid=basicOK&&!validationIssues().length, saved=!!scenario&&!dirty
+  const valid=basicOK&&graph.nodes.some(n=>n.type!=='end')&&!validationIssues().length, saved=!!scenario&&!dirty
   const tested=saved&&['tested','approved'].includes(scenario.state), approved=saved&&scenario.state==='approved', done=matchingPublished()
   const current=done?4:approved||tested?3:valid&&saved?2:basicOK?1:0
   const key=[current,done,saved].join(':');if(root.dataset.key===key&&root.childElementCount)return;root.dataset.key=key
@@ -1299,7 +1299,7 @@ async function showPublishedCompletion(justPublished=false){
 function publication() {
   const wrap=node('div')
   if (!scenario || dirty) {
-    wrap.append(node('p','承認・公開版の管理には、下書きの保存が必要です。','empty'))
+    wrap.append(node('p','承認・公開版の管理には、下書きの保存が必要です。保存しても公開中の配信内容は変更されません。','empty'),button('下書きを保存して公開管理へ',save,'primary'))
     return wrap
   }
   if(scenario.is_template){wrap.append(node('p','このテンプレート自体は配信されません。複製して配信シナリオを作成します。','field-hint'),button('テンプレートから新規シナリオを作成',()=>openCopy(graph,store,false,scenario.folder),'primary'));return wrap}
