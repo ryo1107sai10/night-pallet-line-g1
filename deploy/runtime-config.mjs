@@ -20,7 +20,7 @@ export function runtimeConfig(service, origin, automationOverride, defaults = ''
   }
   environment.PUBLIC_ORIGIN = new URL(origin).origin
   environment.AUTO_SEND_ENABLED = automationOverride ?? environment.AUTO_SEND_ENABLED ?? 'false'
-  for (const name of ['AUTO_SEND_STORE','GOOGLE_SHARED_CALENDARS','LINE_DISPATCH_QUEUE','LINE_DISPATCH_ACCOUNT']) {
+  for (const name of ['AUTO_SEND_STORE','GOOGLE_SHARED_CALENDARS','LINE_DISPATCH_QUEUE','LINE_DISPATCH_ACCOUNT','SCHEDULE_WORKER_ACCOUNT']) {
     if (overrides[name] !== undefined) environment[name] = overrides[name]
   }
   if (!['true','false'].includes(environment.AUTO_SEND_ENABLED)) throw new Error('AUTO_SEND_ENABLED must be true or false.')

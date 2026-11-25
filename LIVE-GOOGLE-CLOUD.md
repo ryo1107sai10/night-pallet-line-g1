@@ -34,7 +34,7 @@ LINEのチャネルシークレットとアクセストークンは公開後の�
 
 再公開時は配信のON/OFF、共有カレンダー、公開予約の設定を維持します。Webとワーカーには同じ設定と同じ解決済みイメージを配置します。公開前の専用URLでのヘルスチェック後、指定のリビジョンへ100%切り替わったことを確認します。配信の全体設定を意図的に変更する場合だけ、実行時に `AUTO_SEND_ENABLED=true` または `false` を指定してください。店舗の契約・同意・停止状態の確認も必要です。
 
-既存の専用実行アカウント `night-schedule-invoker` にジョブ単位の実行権限を与えたうえで、`bash deploy/schedule-worker.sh <PROJECT_ID> 1` を実行すると、東京時間で1分ごとにワーカーを起動します。すでに `night-pro-line-notices` がある場合はその設定を更新します。定期実行を設定しても配信の全体設定や店舗設定は自動でONになりません。
+低コスト運用では、`SCHEDULE_WORKER_ACCOUNT=night-schedule-invoker@<PROJECT_ID>.iam.gserviceaccount.com` をWebの環境変数に設定してから、`bash deploy/schedule-http-worker.sh <PROJECT_ID>` を実行します。同じ1分間隔で `/internal/scheduled-work` を呼び出し、Cloud Run Jobの1分最低課金を避けます。実行者の署名付きGoogle IDトークンおよび専用の受信先をサーバーで検証します。配信停止・同意・予約確認・重複防止・LINEの即時応答処理は以前のままです。Job起動方式に戻す必要があるときは `bash deploy/schedule-worker.sh <PROJECT_ID> 1` を実行できます。両方式を同時に定期実行しないでください。定期実行を設定しても配信は自動でONになりません。
 
 ## 無料試用中のデータ保護と復旧
 
