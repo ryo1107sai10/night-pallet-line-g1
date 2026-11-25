@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { liveTriggers, simulate, validate } from '../public/studio/engine.mjs'
 import { audit, conflict, Fault, missing, keyed, newId, once, purpose, revision, seal, text, uuid, type Actor, type Config, type DB } from './core.js'
 
-import { channel } from './line.js'
+import { channel, evidence, testDeliveryConfirmed } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { INTERVIEW_LINK_MARKER } from './interview-link.js'
 import { CUSTOMER_LINK_MARKER } from './customer-link.js'
@@ -205,8 +205,13 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
       FOR UPDATE OF t`,[data.tester,c.id,c.generation,current.graph.purpose])
     if (!proof) throw new Fault(404,'TESTER_NOT_AVAILABLE','この店舗・用途の有効なテスト利用者を選択してください。')
     const checks = c.checks
+    // 通常の自動配信には一般利用者の検収が引き続き必要。採用の試験送信だけは、
+    // 接続テストのLINE受付と端末到達を確認済みのチャネルで、改めて本人確認した
+    // 同じ店舗・用途のテスター1人に限定する。公開や契約状態は変更しない。
+    const verifiedTestOnly=current.graph.purpose==='recruitment'&&!c.module_channel_id&&
+      testDeliveryConfirmed(c)&&(await evidence(db,c)).send_accepted
     if (!checks.token_verified || !checks.webhook_verified || !checks.ownership_verified || !checks.provider_verified ||
-      !checks.redelivery_enabled || !checks.auto_reply_checked || !checks.non_developer) {
+      !checks.redelivery_enabled || !checks.auto_reply_checked || (!checks.non_developer&&!verifiedTestOnly)) {
       throw new Fault(409,'TEST_NOT_READY','先に公式アカウントのLINE接続を確認してください。')
     }
     const result=await preview(db,store,current.graph,data.fixture)

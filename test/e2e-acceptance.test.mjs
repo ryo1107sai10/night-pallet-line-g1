@@ -621,8 +621,17 @@ test('段落7: ステップ配信でリンク変数が発行済みの実URLに�
       interview_link: 'https://example.test/reserve/sample',
     },
   }
-  const job = expect(await post(root + '/' + rScenario.id + '/test-sends', master,
-    { revision: rScenario.revision, node: 'welcome', tester: testerInvite.id, fixture }, idempotency()), 202)
+  const connSummary=async()=>expect(await request('/stores/'+storeId+'/connections',{cookie:master}),200).find(c=>c.id===recruit)
+  const testInput={revision:rScenario.revision,node:'welcome',tester:testerInvite.id,fixture}
+  // 開発者権限のある利用者でも、接続テストの端末確認前はステップ試験送信を許可しない。
+  let checked=expect(await patch(testerPrefix+'/console',master,{...manualChecks,non_developer:false,delivery_confirmed:false,
+    reason:'接続検収の試験',revision:(await connSummary()).revision}),200)
+  assert.equal(checked.status,'pending')
+  expect(await post(root+'/'+rScenario.id+'/test-sends',master,testInput,idempotency()),409)
+  checked=expect(await patch(testerPrefix+'/console',master,{...manualChecks,non_developer:false,delivery_confirmed:true,
+    reason:'認証したテスターで接続テストの到着を確認',revision:checked.revision}),200)
+  assert.equal(checked.status,'pending','一般利用者の検収がないので通常配信の接続状態は変わらない')
+  const job = expect(await post(root + '/' + rScenario.id + '/test-sends', master,testInput,idempotency()), 202)
   await flush(3)
   const sent = pushesTo(userT2).filter(item => item.text.includes('面談のご案内です'))
   assert.equal(sent.length, 1, 'テスト送信が1通届くこと')
@@ -639,6 +648,8 @@ test('段落7: ステップ配信でリンク変数が発行済みの実URLに�
     '差し替えられたURLが実際に発行されたトークンであること')
   assert.equal((await read('SELECT status FROM test_send WHERE id=$1', [job.id])).rows[0].status, 'accepted')
   expect(await post('/interview-link/' + recruit + '/redeem', null, { token: sentRaw }), 200)
+  expect(await patch(testerPrefix+'/console',master,{...manualChecks,delivery_confirmed:true,
+    reason:'試験の設定を復元',revision:(await connSummary()).revision}),200)
 })
 
 test('店舗の今日の対応と定型文は権限内で利用でき、安全な失敗だけを同じキーで再送する', async()=>{
