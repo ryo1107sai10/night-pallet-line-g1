@@ -348,3 +348,29 @@ test('登録済み法人に管理会社の運用範囲を適用すると既存�
   const supervisorRoute='/platform/tenants/'+created.tenant.id+'/api/v1'+root+'/setup'
   assert.equal((await send(supervisorRoute,{headers:{Cookie:platform}})).status,200)
 })
+
+test('エールは担当店舗の採用応募フォームを管理できるが、他法人・顧客フォーム・LINE連携は管理できない',async()=>{
+  const root='/stores/'+storeId+'/workflows/recruitment'
+  expect(await request(root+'/forms',{cookie:manager}),409)
+  await tx(owner,async db=>{
+    await scope(db,created.tenant.id,storeId)
+    await db.query('UPDATE store SET forms_enabled=true WHERE id=$1',[storeId])
+  })
+  const current=expect(await request(root+'/forms',{cookie:manager}),200)
+  assert.equal(current.channels.length,1)
+  const draft={channel:current.channels[0].id,revision:0,title:'採用応募フォーム',description:'検証',published:false,
+    fields:[{key:'name',label:'氏名',kind:'text',required:true,options:[],applicant_name:true}]}
+  const save=(cookie,input,path=root+'/forms')=>request(path,{method:'PUT',cookie,headers:idempotency(),data:input})
+  const registered=expect(await save(manager,draft),200)
+  const published=expect(await save(master,{...draft,id:registered.id,revision:registered.revision,published:true}),200)
+  assert.ok(published.revision>registered.revision)
+  assert.equal(expect(await request(root+'/forms',{cookie:manager}),200).forms[0].published,true)
+  expect(await request(root+'/responses',{cookie:manager}),200)
+  expect(await request(root+'/forms',{cookie:agencyAdmin}),404)
+  expect(await save(agencyAdmin,draft),404)
+  const customer=root.replace('/recruitment','/customer')+'/forms'
+  expect(await request(customer,{cookie:master}),403)
+  expect(await save(manager,draft,customer),403)
+  expect(await request('/stores/'+storeId+'/line-module',{cookie:manager}),403)
+  expect(await request('/platform/tours',{cookie:manager}),401)
+})

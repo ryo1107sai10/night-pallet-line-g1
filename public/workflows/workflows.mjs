@@ -87,7 +87,7 @@ const replyDrafts=new Map()
 let actor
 
 function formEditor(root,data,path,refresh,use){
-  root.append(el('h2','回答フォーム'))
+  root.append(el('h2',use==='recruitment'?'応募フォーム':'回答フォーム'))
   if(!data.channels.length){root.append(el('p','先にこの用途の公式LINEを登録してください。'));return}
   const picker=field('公式LINE','channel','',data.channels[0].id,channelOptions(data.channels))
   const choice=picker.querySelector('select')
@@ -590,8 +590,9 @@ async function render(){
   const settings=await api(path+'/settings')
   if(marker!==view)return
   const sections=[]
+  if(settings.forms_enabled&&(!agency||use==='recruitment'&&['admin','manager'].includes(actor.role)))
+    sections.push(['forms',use==='recruitment'?'応募フォーム':'回答フォーム'],['responses','フォーム回答'])
   if(!agency){
-    if(settings.forms_enabled)sections.push(['forms','回答フォーム'],['responses','フォーム回答'])
     if(use==='recruitment'&&settings.recruitment_enabled)sections.push(['recruitment','応募・選考'])
     if(settings.sources_enabled)sections.push(['sources','流入分析'])
     if(use==='customer'&&settings.campaigns_enabled)sections.push(['campaigns','絞り込み配信'])
@@ -602,12 +603,16 @@ async function render(){
   sections.push(['delivery','LINE送信履歴'])
   if(!sections.length){content.replaceChildren(el('p','この店舗で有効な機能はありません。法人管理者が「店舗で使う機能」から設定できます。'));return}
   if(!agency)sections.unshift(['checks','運用チェック'])
+  // The dedicated shortcut must explain an unavailable feature instead of
+  // silently taking the manager to an unrelated inbox tab.
+  const formDisabled=agency&&['forms','responses'].includes(current)&&!settings.forms_enabled
   if(!sections.some(([id])=>id===current))current=sections[0][0]
   for(const [key,label] of sections){
     const tab=button(label,async()=>{current=key;notice();await render()})
     if(current===key)tab.setAttribute('aria-current','page')
     tabs.append(tab)
   }
+  if(formDisabled){content.replaceChildren(el('p','この店舗の応募フォーム機能は無効です。北村さんの管理画面で有効にすると、エールがフォームを管理できます。'));return}
   const key=current
   const endpoint=['recruitment','campaigns','intake'].includes(key)?base+'/'+key:path+'/'+key
   const data=await api(endpoint+(key==='delivery'&&onlyFailures?'?failures=1':''))
