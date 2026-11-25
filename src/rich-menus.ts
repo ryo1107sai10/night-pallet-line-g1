@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { audit, conflict, Fault, forbidden, keyed, missing, once, scope, seal, text, tx, unseal, uuid, type Actor, type Config, type DB, type Route } from './core.js'
 import { automaticRelationshipReady, channel, channelCredentials, channelReady, evidence, testDeliveryConfirmed, userKey, type Channel, type LineAPI } from './line.js'
 import type { WorkflowSubject } from './forms.js'
+import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature,storeFeatures } from './store-features.js'
 import { applicantTags, applyApplicantTagRules } from './applicant-tags.js'
@@ -184,9 +185,9 @@ export async function updateRichMenu(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
     const features=await storeFeatures(db,r.store_id)
     if(!features.rich_menus_enabled)return
     const c=await channel(db,r.id)
-    const {rows:[state]}=await db.query(`SELECT s.stopped OR t.stopped AS stopped
+    const {rows:[state]}=await db.query(`SELECT s.stopped OR t.stopped AS stopped, s.auto_enabled AND s.contract_active AND s.eligible_at IS NOT NULL AS enabled
       FROM store s JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[r.store_id])
-    if(c.stopped||state.stopped||!channelReady(c))return
+    if(c.stopped||state.stopped||!state.enabled||!channelReady(c))return
     const {rows:[w]}=await db.query<Contact>(`SELECT w.*,m.base_menu,m.booked_menu,m.generation,m.tag_rules FROM workflow_contact w
       JOIN workflow_menu m ON m.channel_id=w.channel_id AND m.purpose=w.purpose AND m.generation=$2
       WHERE w.channel_id=$1 AND w.menu_due_at<=now()
@@ -194,6 +195,12 @@ export async function updateRichMenu(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route
           AND newer.user_key=w.user_key AND newer.last_seen_at>w.last_seen_at)
       ORDER BY w.menu_due_at LIMIT 1 FOR UPDATE OF w`,[r.id,c.generation])
     if(!w)return
+    const handoff=await handoffUntil(db,c.id,w.user_key)
+    if(handoff||!await automaticRelationshipReady(db,c,w.user_key)){
+      await db.query('UPDATE workflow_contact SET menu_due_at=$4 WHERE channel_id=$1 AND purpose=$2 AND subject=$3',
+        [r.id,w.purpose,w.subject,handoff])
+      return
+    }
     const {menu,next}=await desiredMenu(db,w,features)
     const result=await api.bindRichMenu(channelCredentials(cfg,c),contactAddress(cfg,w),menu)
       .catch(()=>({ok:false,retry:true}))

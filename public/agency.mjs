@@ -22,10 +22,11 @@ function renderFeatureOptions(settings){
 async function loadStoreSetup(id){
   const n=++setupRequest
   storeSetup=null
+  storeManagementStatus.textContent=''
   $('agency-store-setup').hidden=true
   try{
     const info=await masterCall('/stores/'+encodeURIComponent(id)+'/recruitment/setup')
-    if(n!==setupRequest)return
+    if(n!==setupRequest)return false
     storeSetup={id,...info}
     const store=$('agency-store')
     $('agency-store-setup-name').textContent=store.selectedOptions[0]?.textContent+' の設定'
@@ -41,7 +42,8 @@ async function loadStoreSetup(id){
     form.elements.reason.value=''
     $('agency-automation-ready').textContent=info.process_enabled?'配信処理の準備済み。LINE接続・契約・利用条件を確認してから有効化できます。':'配信処理の店舗登録が未完了です。契約と機能設定は先に保存できます。'
     $('agency-store-setup').hidden=false
-  }catch(error){if(n===setupRequest)storeManagementStatus.textContent=error.message}
+    return true
+  }catch(error){if(n===setupRequest)storeManagementStatus.textContent=error.message;return false}
 }
 async function saveSetup(action){
   const selection=storeSetup
@@ -49,8 +51,8 @@ async function saveSetup(action){
   const buttons=[...$('agency-store-setup').querySelectorAll('button')]
   buttons.forEach(button=>button.disabled=true)
   storeManagementStatus.textContent='保存中…'
-  try{await action(selection);if(selection.id===$('agency-store').value){await loadStoreSetup(selection.id);storeManagementStatus.textContent='店舗設定を保存しました。'}}
-  catch(error){storeManagementStatus.textContent=error.message}
+  try{await action(selection);if(selection.id===$('agency-store').value&&await loadStoreSetup(selection.id)&&selection.id===$('agency-store').value)storeManagementStatus.textContent='店舗設定を保存しました。'}
+  catch(error){if(selection.id===$('agency-store').value)storeManagementStatus.textContent=error.message}
   finally{buttons.forEach(button=>button.disabled=false)}
 }
 async function request(path,method='GET'){
@@ -116,12 +118,16 @@ try{
   }else status.textContent='操作できる店舗がありません。'
 }catch(error){status.textContent=error.message}
 
+let createAttempt=null
 $('agency-store-create').onsubmit=async event=>{
   event.preventDefault()
   const form=event.currentTarget,button=form.querySelector('button[type="submit"]')
   button.disabled=true;storeManagementStatus.textContent='店舗を登録しています…'
   try{
-    const result=await masterCall('/stores','POST',Object.fromEntries(new FormData(form)))
+    const data=Object.fromEntries(new FormData(form)),fingerprint=JSON.stringify(data)
+    if(createAttempt?.fingerprint!==fingerprint)createAttempt={fingerprint,key:crypto.randomUUID()}
+    const result=await masterCall('/stores','POST',data,createAttempt.key)
+    createAttempt=null
     location.assign('/master/?store='+encodeURIComponent(result.id))
   }catch(error){storeManagementStatus.textContent=error.message;button.disabled=false}
 }
@@ -148,10 +154,10 @@ const masterSection=$('agency-master')
 const masterStatus=$('agency-master-status')
 let masterInfo=null
 let lastMasterInvite=null
-async function masterCall(path,method='GET',data){
+async function masterCall(path,method='GET',data,key){
   const response=await fetch('/api/v1'+path,{
     method,
-    headers:{'Content-Type':'application/json',...(method==='POST'?{'Idempotency-Key':crypto.randomUUID()}:{})},
+    headers:{'Content-Type':'application/json',...(method==='POST'?{'Idempotency-Key':key??crypto.randomUUID()}:{})},
     body:data===undefined?undefined:JSON.stringify(data),
   })
   const result=await response.json().catch(()=>({}))

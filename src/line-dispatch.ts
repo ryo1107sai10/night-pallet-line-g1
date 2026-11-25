@@ -72,7 +72,7 @@ export function lineDispatchFromEnvironment(cfg: Config): LineDispatch | undefin
 export async function dispatchLineWork(pool: pg.Pool, cfg: Config, line: LineAPI, input: DispatchInput) {
   const {rows: [r]} = await pool.query<Route>(
     'SELECT * FROM channel_route WHERE id=$1', [input.channel])
-  if (!r || !automationForStore(cfg,r.store_id) ||
+  if (!r || !automationForStore(cfg,r.store_id,r.tenant_id) ||
       r.module_channel_id && r.module_channel_id !== cfg.lineModule?.id) return
   if (input.source === 'webhook') await processChannelEvents(pool,cfg,r)
   const finishBefore = Date.now() + 18000

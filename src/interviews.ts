@@ -16,7 +16,7 @@ import { applyApplicantTagRules } from './applicant-tags.js'
 import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { localInstant } from '../public/studio/engine.mjs'
-import { calendarRecord, googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
+import { calendarRecord, managedCalendarRecord, googleBusy, localBlocks, overlaps, requireFree, type InterviewGoogle } from './interview-availability.js'
 
 export const interviewSlotInput=z.strictObject({
   channel:uuid,starts_at:z.iso.datetime({offset:true}),ends_at:z.iso.datetime({offset:true}),
@@ -217,7 +217,7 @@ async function batchConfiguration(db:DB,store:string,input:BatchInput){
   const host=input.host_id?await requireHost(db,store,input.host_id):null
   return {location:await locationFor(db,store),hostCalendar:host?.calendar_id??null,
     googleEnabled:features.google_calendar_enabled,
-    calendarRevision:features.google_calendar_enabled?(await calendarRecord(db,store))?.refresh_box:null}
+    calendarRevision:features.google_calendar_enabled?JSON.stringify([(await calendarRecord(db,store))?.refresh_box??null,await managedCalendarRecord(db,store)??null]):null}
 }
 
 async function checkBatchSlots(db:DB,store:string,cfg:Config,input:BatchInput,slots:SlotInterval[],

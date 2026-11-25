@@ -94,7 +94,7 @@ async function processEvents(db: DB,cfg:Config,r:Route) {
       await tryIssueInterviewLink(db,cfg,c,event)
     }
     if (event.kind==='message'&&['interview_link','customer_link'].includes(event.action)&&event.user_key&&event.recipient_box&&
-        automationForStore(cfg,c.store_id)&&Date.now()-+event.occurred_at<10*60000) {
+        automationForStore(cfg,c.store_id,c.tenant_id)&&Date.now()-+event.occurred_at<10*60000) {
       const store=await locationOf(db,c.store_id)
       if(store.auto_enabled&&store.auto_enabled_at&&+event.occurred_at>=+store.auto_enabled_at&&
         store.contract_active&&store.eligible_at&&channelTestReady(c)){
@@ -240,7 +240,7 @@ async function claim(db: DB, r: Route) {
 export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=googleFromEnvironment(cfg)) {
   const { rows } = await pool.query<Route>('SELECT * FROM channel_route ORDER BY id')
   for (const r of rows) {
-    const storeCfg={...cfg,automation:automationForStore(cfg,r.store_id)}
+    const storeCfg={...cfg,automation:automationForStore(cfg,r.store_id,r.tenant_id)}
     if (r.module_channel_id && (!cfg.external || r.module_channel_id!==cfg.lineModule?.id)) continue
     await processChannelEvents(pool,cfg,r)
     await runAutomation(pool,storeCfg,api,r)

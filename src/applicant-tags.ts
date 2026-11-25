@@ -315,7 +315,7 @@ async function campaignPlan(db:DB,cfg:Config,actor:Actor,store:string,data:z.inf
   if(!scenario)throw new Fault(409,'TAG_SCENARIO_NOT_READY','公開済みの採用「タグ絞り込み配信」シナリオを選んでください。')
   const c=await channel(db,scenario.channel_id)
   const {rows:[s]}=await db.query(`SELECT s.auto_enabled,s.contract_active,s.eligible_at,s.stopped,t.stopped AS tenant_stopped FROM store s JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[store])
-  const ready=cfg.external&&automationForStore(cfg,store)&&s.auto_enabled&&s.contract_active&&!!s.eligible_at&&!s.stopped&&!s.tenant_stopped&&!c.stopped&&channelReady(c)
+  const ready=cfg.external&&automationForStore(cfg,store,actor.tenant_id)&&s.auto_enabled&&s.contract_active&&!!s.eligible_at&&!s.stopped&&!s.tenant_stopped&&!c.stopped&&channelReady(c)
   await syncSubjects(db,store)
   const {rows}=await db.query<SubjectRow>(`WITH scoped AS (${subjectSelect} WHERE s.store_id=$1 AND s.channel_id=$2) SELECT * FROM scoped
     WHERE (CASE WHEN $3='all' THEN tags @> $4::text[] ELSE tags && $4::text[] END) AND NOT (tags && $5::text[]) ORDER BY id LIMIT 501`,[store,c.id,data.criteria.match,data.criteria.include,data.criteria.exclude])

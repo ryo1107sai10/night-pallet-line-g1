@@ -28,7 +28,28 @@ export function drawAvailability(root,state,zone,controls){
   if(controls.demo){
     busyList.append(button(state.google.connected?'サンプル予定の反映を停止':'サンプル予定を反映',
       event=>run(event.currentTarget,()=>controls.toggleDemo(!state.google.connected))))
-  }else if(state.google_enabled!==false&&state.google.configured&&(!state.google.shared||state.google_write_enabled)){
+  }else if(state.google_enabled!==false&&state.managed_calendar_account&&controls.connectShared){
+    const link=el('details')
+    link.open=!state.google.connected
+    link.append(el('summary',state.google.connected?'店舗専用の共有カレンダーを変更':'店舗専用カレンダーを連携（推奨）'))
+    const f=el('form',null,'stack')
+    const account=field('共有先のメールアドレス','text','account',state.managed_calendar_account)
+    account.querySelector('input').readOnly=true
+    const copy=button('共有先をコピー',event=>run(event.currentTarget,async()=>{await navigator.clipboard.writeText(state.managed_calendar_account);controls.report('共有先をコピーしました。')}))
+    const external=(label,url)=>{const a=el('a',label);a.href=url;a.target='_blank';a.rel='noopener noreferrer';return a}
+    const calendar=field('カレンダーID','text','calendar_id',state.google.calendar_id??'',250)
+    const input=calendar.querySelector('input');input.required=true;input.autocapitalize='off';input.spellcheck=false
+    f.append(el('p','① 店舗専用のカレンダーを作成します。'),external('Google カレンダーを作成する ↗','https://calendar.google.com/calendar/u/0/r/settings/createcalendar'),
+      el('p','② Googleカレンダーの設定と共有から、下のメールアドレスを「予定の表示（時間枠のみ、詳細は非表示）」で追加します。'),account,copy,
+      external('Google カレンダーの設定を開く ↗','https://calendar.google.com/calendar/u/0/r/settings'),
+      el('p','③ カレンダーの統合欄から @group.calendar.google.com のIDをコピーし、連携します。Googleの許可が確認できた場合だけ保存されます。'),calendar,el('button','空き時間を確認して連携する','primary'))
+    f.onsubmit=event=>{event.preventDefault();run(f.querySelector('button:last-child'),async()=>{
+      if(state.google.connected&&!confirm('この店舗の空き状況の照合先を変更します。よろしいですか？'))return
+      await controls.connectShared(input.value.trim())
+    })}
+    link.append(f);busyList.append(link)
+  }
+  if(!controls.demo&&state.google_enabled!==false&&state.google.configured&&(!state.google.shared||state.google_write_enabled)&&(!state.managed_calendar_account||state.google_write_enabled)){
     const link=el('form',null,'stack')
     const calendar=field('GoogleカレンダーID','text','calendar_id',state.google.calendar_id??'primary',250)
     calendar.querySelector('input').required=true
@@ -40,7 +61,7 @@ export function drawAvailability(root,state,zone,controls){
       run(link.querySelector('button'),()=>controls.connect(id))
     }
     busyList.append(link)
-  }else if(state.google_enabled!==false&&!state.google.shared)busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
+  }else if(!controls.demo&&state.google_enabled!==false&&!state.google.shared&&!state.managed_calendar_account)busyList.append(el('p','Google OAuth クライアントをアプリに設定すると連携できます。'))
   if(state.google_enabled!==false&&state.google_write_enabled){
     busyList.append(el('p',state.google_write_granted?'面談が確定すると、予約名を含めずGoogleカレンダーに予定を登録します。':
       '予定の登録・変更を行うには「Googleで連携」から書き込み権限を許可してください。'))

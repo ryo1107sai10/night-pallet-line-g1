@@ -404,12 +404,11 @@ function richMenus(root,entries,path,refresh,use){
     })
     if(use==='recruitment'){
       const template=el('section',null,'record')
-      template.append(el('h3','標準メニューをLINEに作成'),el('p','メニューIDを調べなくても、公式LINEに予約用メニューを作成できます。作成だけでは友だちの表示は変更されません。'))
+      template.append(el('h3','標準メニューをLINEに作成'),el('p','メニューIDを調べなくても、公式LINEに予約用メニューを作成できます。作成ボタンでこの店舗の公式LINEにメニューを1件追加します。設定を保存するまでは友だちの表示は変更されません。'))
       const templateResult=el('p',null,'muted')
       for(const [variant,label,fieldName] of [['normal','対面面談を予約','base_menu'],['booked','面談予約を確認','booked_menu']]){
         const generateKey=crypto.randomUUID()
         template.append(button(label+'を作成',async()=>{
-          if(!confirm('この店舗の公式LINEに標準メニューを1件作成します。既定メニューは変更しません。よろしいですか？'))return
           const result=await api(path+'/rich-menus/'+entry.id+'/templates','POST',{variant},generateKey)
           editor.querySelector('[name='+fieldName+']').value=result.menu
           templateResult.textContent=label+'のメニューを作成しました。下の設定を保存してください。'

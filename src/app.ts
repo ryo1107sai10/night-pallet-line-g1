@@ -34,7 +34,7 @@ import { changeInterviewVisibility, confirmInterview, interviewAccess, interview
   guestInterviewCreate, interviewHours, saveInterviewHours, startGuestInterviewSession,
   updateInterview, recruitmentSubject } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
-  googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
+  googleCalendarInput, managedCalendarInput, linkManagedCalendar, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
 import { featureInput, recruitmentAcquisitionInput, recruitmentSetupInput, recruitmentSetupView, requireFeature, saveRecruitmentAcquisition, saveRecruitmentSetup, saveStoreFeatures, storeFeatures } from './store-features.js'
 import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, tagRuleInput,
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
@@ -98,10 +98,16 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   const api = express.Router({mergeParams:true})
   const workspace = express.Router({mergeParams:true})
   const wakeLine = async (store: string, channel: string, source: 'webhook'|'service'|'applicant') => {
-    if (dispatch && automationForStore(cfg,store)) {
-      try { await dispatch.wake({channel,source}) }
-      catch { console.warn('LINE dispatch enqueue failed; scheduled worker will recover') }
-    }
+    if (!dispatch) return
+    try {
+      let allowed=automationForStore(cfg,store)
+      if(!allowed&&cfg.automationTenants?.length){
+        const {rows:[route]}=await pool.query<{tenant_id:string}>(
+          'SELECT tenant_id FROM channel_route WHERE id=$1 AND store_id=$2',[channel,store])
+        allowed=automationForStore(cfg,store,route?.tenant_id)
+      }
+      if(allowed)await dispatch.wake({channel,source})
+    }catch { console.warn('LINE dispatch enqueue failed; scheduled worker will recover') }
   }
   app.disable('x-powered-by')
   app.use((req,res,next) => {
@@ -686,11 +692,13 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.patch('/stores/:store/interviews/hours',interviewStaff((db,actor,req)=>
     saveInterviewHours(db,actor,idOf(req,'store'),interviewHours.parse(req.body))))
   const availability='/stores/:store/interviews/availability'
-  api.get(availability,interviewStaff((db,_actor,req)=>availabilityOverview(db,idOf(req,'store'),google)))
+  api.get(availability,interviewStaff((db,actor,req)=>availabilityOverview(db,idOf(req,'store'),google,actor.role==='admin')))
   api.post(availability+'/blocks',interviewStaff((db,actor,req)=>
     addBlock(db,cfg,actor,idOf(req,'store'),keyOf(req),blockInput.parse(req.body)),201))
   api.delete(availability+'/blocks/:block',interviewStaff((db,actor,req)=>
     removeBlock(db,actor,idOf(req,'store'),idOf(req,'block'))))
+  api.post(availability+'/google/shared',interviewStaff((db,actor,req)=>
+    linkManagedCalendar(db,actor,idOf(req,'store'),managedCalendarInput.parse(req.body).calendar_id,google)))
   api.post(availability+'/google',interviewStaff((db,actor,req)=>
     beginCalendarLink(db,actor,idOf(req,'store'),googleCalendarInput.parse(req.body).calendar_id,google)))
   api.post(availability+'/google/complete',async(req,res)=>{
@@ -902,7 +910,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const {rows:jobs}=await db.query(`SELECT j.id,j.status,j.reason,j.line_request_id,j.first_attempt_at,
       j.node_id,j.category FROM automatic_send j ORDER BY first_attempt_at DESC LIMIT 60`)
     const {rows:notes}=await db.query(`SELECT kind,node_id,detail,occurred_at FROM delivery_note ORDER BY id DESC LIMIT 60`)
-    return {...settings,process_enabled:automationForStore(cfg,settings.id),jobs,notes}
+    return {...settings,process_enabled:automationForStore(cfg,settings.id,_actor.tenant_id),jobs,notes}
   }))
   api.patch('/stores/:store/automation',inStore(async(db,actor,req)=>{
     requireAdmin(actor)
@@ -918,7 +926,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     requireAgencyMaster(actor)
     const store=idOf(req,'store'),loc=await locationOf(db,store),features=await storeFeatures(db,store)
     return {revision:features.revision,eligible_at:loc.eligible_at,contract_active:loc.contract_active,
-      auto_enabled:loc.auto_enabled,monthly_limit:loc.monthly_limit,process_enabled:automationForStore(cfg,store),
+      auto_enabled:loc.auto_enabled,monthly_limit:loc.monthly_limit,process_enabled:automationForStore(cfg,store,actor.tenant_id),
       features:recruitmentSetupView(features)}
   }))
   api.patch(recruitmentSetup+'/features',inStore((db,actor,req)=>{

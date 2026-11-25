@@ -93,7 +93,7 @@ export async function updateAutomation(db:DB,cfg:Config,actor:Actor,id:string,in
 }) {
   await lockDispatch(db,actor.tenant_id)
   const location=await locationOf(db,id)
-  if (input.enabled && (!automationForStore(cfg,id) || !input.contract || !location.eligible_at)) {
+  if (input.enabled && (!automationForStore(cfg,id,actor.tenant_id) || !input.contract || !location.eligible_at)) {
     throw conflict()
   }
   if (input.enabled) {

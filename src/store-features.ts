@@ -45,7 +45,7 @@ export async function requireFeature(db:DB,store:string,feature:Feature) {
   }
 }
 
-export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:FeatureInput) {
+export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:FeatureInput,recruitmentOnly=false) {
   await lockDispatch(db,actor.tenant_id)
   const {revision,...features}=input
   const updates=newFeatures.map((key,index)=>key+'=coalesce($'+(index+7)+','+key+')')
@@ -65,7 +65,7 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
   if (features.interviewers_enabled===false) {
     await db.query('UPDATE interview_slot SET published=false,revision=revision+1 WHERE store_id=$1 AND host_id IS NOT NULL AND published',[store])
   }
-  if (features.campaigns_enabled===false||!features.tags_enabled) {
+  if (!recruitmentOnly&&(features.campaigns_enabled===false||!features.tags_enabled)) {
     await db.query(`WITH stopped AS (UPDATE campaign SET state='stopped' WHERE store_id=$1 AND state<>'stopped'
       AND ($2 OR jsonb_array_length(criteria->'tags')>0) RETURNING id)
       UPDATE campaign_delivery SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
@@ -76,10 +76,11 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
     ||features.token_interviews_enabled===false||features.token_customers_enabled===false) {
     await db.query(`UPDATE service_delivery SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,
       next_at='infinity',reason='店舗で機能を停止' WHERE store_id=$1 AND status IN ('queued','submitting','unknown')
+      AND (NOT $7 OR purpose='recruitment')
       AND (($2 AND kind IN ('interview_confirm','interview_reminder')) OR ($3 AND kind='interview_waitlist') OR ($4 AND kind='chat_reply')
         OR ($5 AND kind='interview_link') OR ($6 AND kind='customer_link'))`,
     [store,features.reminders_enabled===false,features.waitlist_enabled===false,features.inbox_enabled===false,
-      features.token_interviews_enabled===false,features.token_customers_enabled===false])
+      features.token_interviews_enabled===false,features.token_customers_enabled===false,recruitmentOnly])
   }
   if(features.recruitment_tags_enabled!==undefined||features.recruitment_enabled!==undefined||features.rich_menus_enabled===true){
     await db.query(`UPDATE workflow_contact w SET menu_due_at=now() FROM workflow_menu m
@@ -120,5 +121,5 @@ export function recruitmentSetupView(features:StoreFeatures){
 export async function saveRecruitmentSetup(db:DB,actor:Actor,store:string,input:z.infer<typeof recruitmentSetupInput>){
   if(!actor.agency||actor.role!=='admin')throw forbidden()
   const present=await storeFeatures(db,store)
-  return recruitmentSetupView(await saveStoreFeatures(db,actor,store,{...present,...input}))
+  return recruitmentSetupView(await saveStoreFeatures(db,actor,store,{tags_enabled:present.tags_enabled,visits_enabled:present.visits_enabled,...input},true))
 }

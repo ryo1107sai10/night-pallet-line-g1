@@ -14,12 +14,22 @@ export const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/)
 export type DB = PoolClient
 export type Actor = { id: string; tenant_id: string; role: string; email: string; platform?: boolean; agency?: boolean }
 export type LineModuleConfig = { id: string; secret: string; botHeader: string }
-export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; automationStore?: string; automationStores?: readonly string[]; lineModule?: LineModuleConfig; publicBookingConnection?: string }
-export const automationForStore=(cfg:Config,store:string)=>
+export type Config = { origin: string; master: Buffer; external: boolean; automation?: boolean; automationStore?: string; automationStores?: readonly string[]; automationTenants?: readonly string[]; lineModule?: LineModuleConfig; publicBookingConnection?: string }
+// A tenant boundary permits its authenticated master to onboard additional
+// stores without re-deployment. The actual send paths still require the
+// individual store's contract, eligibility, opt-in and enabled status.
+export const automationForStore=(cfg:Config,store:string,tenant?:string)=>
   cfg.external&&cfg.automation===true&&(
-    (!cfg.automationStore&&cfg.automationStores===undefined)||
-    cfg.automationStore===store||cfg.automationStores?.includes(store)===true
+    (!cfg.automationStore&&cfg.automationStores===undefined&&cfg.automationTenants===undefined)||
+    cfg.automationStore===store||cfg.automationStores?.includes(store)===true||
+    (!!tenant&&cfg.automationTenants?.includes(tenant)===true)
   )
+export async function automationForScopedStore(db:DB,cfg:Config,store:string){
+  if(automationForStore(cfg,store))return true
+  if(!cfg.external||!cfg.automation||!cfg.automationTenants?.length)return false
+  const {rows:[entry]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM store WHERE id=$1',[store])
+  return automationForStore(cfg,store,entry?.tenant_id)
+}
 
 export class Fault extends Error {
   constructor(public status: number, public code: string, message: string, public retryable = false) {
@@ -64,6 +74,9 @@ export function configFromEnvironment(): Config {
     // A malformed or duplicate list fails startup rather than enabling all stores.
     automationStores: process.env.AUTO_SEND_STORES!==undefined
       ? z.array(uuid).min(1).max(100).refine(ids=>new Set(ids).size===ids.length).parse(JSON.parse(process.env.AUTO_SEND_STORES))
+      : undefined,
+    automationTenants: process.env.AUTO_SEND_TENANTS!==undefined
+      ? z.array(uuid).min(1).max(100).refine(ids=>new Set(ids).size===ids.length).parse(JSON.parse(process.env.AUTO_SEND_TENANTS))
       : undefined,
     lineModule:module.success?module.data:undefined }
 }

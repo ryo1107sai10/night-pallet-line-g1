@@ -175,3 +175,16 @@ test('複数店舗の環境設定は厳密に検証し、不正な設定を全�
     for(const key of keys)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key]
   }
 })
+
+test('法人の配信処理設定は指定法人と既存店舗を維持し他法人には広がらない',()=>{
+  const [tenant,store,legacy,foreign]=Array.from({length:4},()=>randomUUID())
+  const cfg={origin:'https://example.test',external:true,automation:true,master:Buffer.alloc(32),automationStores:[legacy],automationTenants:[tenant]}
+  assert.equal(automationForStore(cfg,store,tenant),true)
+  assert.equal(automationForStore(cfg,store,foreign),false)
+  assert.equal(automationForStore(cfg,store),false)
+  assert.equal(automationForStore(cfg,legacy),true)
+  assert.equal(automationForStore({...cfg,automation:false},store,tenant),false)
+  const next=runtimeConfig(current,'https://example.test',undefined,'',{AUTO_SEND_TENANTS:JSON.stringify([tenant]),GOOGLE_STORE_CALENDAR_ACCOUNT:'calendar@project.iam.gserviceaccount.com'})
+  assert.equal(next.environment.AUTO_SEND_TENANTS,JSON.stringify([tenant]))
+  assert.equal(next.environment.GOOGLE_STORE_CALENDAR_ACCOUNT,'calendar@project.iam.gserviceaccount.com')
+})

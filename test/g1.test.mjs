@@ -13,7 +13,7 @@ import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
 import { bootstrap, designateMaster, inviteSupervisor, migrate } from '../dist/setup.js'
 import { prepareSupervisorHandoff } from '../dist/supervisor-handoff.js'
 import { LineAPI, channel as channelRow, userKey } from '../dist/line.js'
-import { InterviewGoogle } from '../dist/interview-availability.js'
+import { InterviewGoogle, googleBusy } from '../dist/interview-availability.js'
 import { workOnce } from '../dist/jobs.js'
 import { issueInterviewLinkToken } from '../dist/interview-link.js'
 import { issueCustomerLinkToken } from '../dist/customer-link.js'
@@ -1767,9 +1767,41 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await request('/stores/'+gamma.stores[0].id+'/recruitment/setup',{cookie:admin}),404)
   expect(await patch('/stores/'+gamma.stores[0].id+'/eligibility',admin,{revision:0,verified:true,reference:'越境拒否'}),404)
   expect(await patch(agencySetup+'/features',admin,{revision:agencySettings.revision,...agencySettings.features,visits_enabled:true}),400)
-  expect(await patch(agencySetup+'/features',admin,{revision:agencySettings.revision,...agencySettings.features,forms_enabled:true,recruitment_enabled:true,interviews_enabled:true,reminders_enabled:true}),200)
+  expect(await patch(agencySetup+'/features',admin,{revision:agencySettings.revision,...agencySettings.features,forms_enabled:true,recruitment_enabled:true,interviews_enabled:true,google_calendar_enabled:true,reminders_enabled:true}),200)
   const afterFeature=expect(await request(agencySetup,{cookie:admin}),200)
   assert.equal(afterFeature.features.reminders_enabled,true);assert.equal(afterFeature.auto_enabled,false)
+  // 店舗専用の共有カレンダーは、Googleが共有を確認できたときだけ保存。
+  const calendarSettings='/stores/'+agencyShop+'/interviews/availability'
+  const otherCalendarSettings='/stores/'+storeId+'/interviews/availability'
+  const businessCalendar='new-agency@group.calendar.google.com'
+  const account='calendar-reader@project.iam.gserviceaccount.com'
+  const originalBusy=google.managedBusy
+  let sharedPermission=false
+  google.managedAccount=account
+  google.managedBusy=async id=>{
+    assert.equal(id,businessCalendar)
+    if(!sharedPermission)throw new Error('permission not granted')
+    return []
+  }
+  try{
+    assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).managed_calendar_account,account)
+    expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),422)
+    assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).google.connected,false)
+    sharedPermission=true
+    expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),200)
+    assert.equal(expect(await request(calendarSettings,{cookie:admin}),200).google.calendar_id,businessCalendar)
+    expect(await post('/stores/'+gamma.stores[0].id+'/interviews/availability/google/shared',admin,{calendar_id:businessCalendar}),404)
+    expect(await post(otherCalendarSettings+'/google/shared',admin,{calendar_id:businessCalendar}),409)
+    expect(await post(calendarSettings+'/google/shared',admin,{calendar_id:'personal@example.test'}),400)
+    const tenant=expect(await request('/session',{cookie:admin}),200).tenant
+    const range={starts_at:new Date(),ends_at:new Date(Date.now()+3600000)}
+    await tx(pool,async db=>{
+      await scope(db,tenant.id,agencyShop)
+      assert.deepEqual(await googleBusy(db,google,agencyShop,range,undefined,true),[])
+      sharedPermission=false
+      await assert.rejects(googleBusy(db,google,agencyShop,range,undefined,true))
+    })
+  }finally{google.managedBusy=originalBusy;delete google.managedAccount}
   const eligible=expect(await patch('/stores/'+agencyShop+'/eligibility',admin,{revision:afterFeature.revision,verified:true,reference:'契約店舗確認の試験'}),200)
   expect(await patch(agencySetup+'/automation',admin,{revision:eligible.revision,enabled:true,contract:true,monthly_limit:100,reason:'未接続のため拒否'}),409)
   expect(await patch(agencySetup+'/automation',admin,{revision:eligible.revision,enabled:false,contract:true,monthly_limit:100,reason:'契約記録を保存'}),200)
@@ -1849,6 +1881,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const manager=await activate(next,managerEmail,'alpha')
   expect(await post('/stores',manager,storeData('権限なし'),idempotency()),403)
   expect(await request('/stores/'+storeId+'/recruitment/setup',{cookie:manager}),403)
+  expect(await post('/stores/'+storeId+'/interviews/availability/google/shared',manager,{calendar_id:'new-agency@group.calendar.google.com'}),403)
   expect(await patch('/stores/'+storeId+'/eligibility',manager,{revision:0,verified:true,reference:'権限なし'}),403)
   expect(await post(manualPath,manager,lineInput,idempotency()),403)
   expect(await request(manualConnection+'/tests',{cookie:manager}),403)

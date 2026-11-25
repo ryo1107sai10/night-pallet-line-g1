@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import { audit, automationForStore, Fault, newId, scope, seal, tx, unseal, type Actor, type Config, type DB, type Route } from './core.js'
+import { audit, automationForScopedStore, Fault, newId, scope, seal, tx, unseal, type Actor, type Config, type DB, type Route } from './core.js'
 import { channel, channelCredentials, channelReady, messagingReady, testDeliveryConfirmed, type Channel, type LineAPI } from './line.js'
 import { deliveryScope, messageBudget } from './delivery-budget.js'
 import { locationOf } from './automation.js'
@@ -146,12 +146,12 @@ export async function serviceHistory(db:DB,cfg:Config,store:string,purpose:Workf
     h.needs_attention,h.retryable,c.label FROM history h JOIN channel c ON c.id=h.channel_id
     WHERE NOT $4 OR needs_attention AND first_attempt_at>=now()-interval '7 days'
     ORDER BY h.sort_at DESC NULLS LAST,h.id LIMIT 100`,
-  [store,purpose,automationForStore(cfg,store),failures])).rows
+  [store,purpose,await automationForScopedStore(db,cfg,store),failures])).rows
 }
 
 export async function retryService(db:DB,cfg:Config,actor:Actor,store:string,purpose:WorkflowSubject['purpose'],id:string){
   const unavailable=()=>new Fault(409,'LINE_RETRY_UNAVAILABLE','再送できる状態ではありません。最新の送信履歴を確認してください。')
-  if(!automationForStore(cfg,store))throw unavailable()
+  if(!await automationForScopedStore(db,cfg,store))throw unavailable()
   await lockDispatch(db,actor.tenant_id)
   const {rows:[job]}=await db.query<{channel_id:string}>(`UPDATE service_delivery d
     SET status='queued',next_at=now(),manual_retry_at=now(),reason=NULL

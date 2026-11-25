@@ -100,6 +100,10 @@ async function show(){
         location.assign(result.url)
       }
     },
+    connectShared:async calendar_id=>{
+      await api(availabilityPath+'/google/shared','POST',{calendar_id})
+      await refresh('Googleカレンダーの共有と空き時間を確認しました。')
+    },
     disconnect:async()=>{
       await api(availabilityPath+'/google','DELETE',{})
       await refresh('Googleカレンダーとの連携を解除しました。')

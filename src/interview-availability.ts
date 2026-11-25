@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { audit, digest, Fault, missing, newId, once, opaque, seal, token, unseal,
+import { audit, digest, Fault, forbidden, missing, newId, once, opaque, seal, token, unseal,
   type Actor, type Config, type DB } from './core.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
@@ -9,12 +9,13 @@ const scope='https://www.googleapis.com/auth/calendar.events.freebusy'
 const writeScope='https://www.googleapis.com/auth/calendar.events'
 const timestamp=z.iso.datetime({offset:true})
 export const calendarID=z.string().trim().max(250).regex(/^(?:primary|[A-Za-z0-9._+%#-]+@[A-Za-z0-9.-]+)$/)
+export const managedCalendarInput=z.strictObject({calendar_id:z.string().trim().toLowerCase().max(250).regex(/^[a-z0-9._+%#-]+@group\.calendar\.google\.com$/)})
 export const googleCalendarInput=z.strictObject({calendar_id:calendarID})
 export const googleCalendarReturn=z.strictObject({state:opaque,code:z.string().min(1).max(4096)})
 export const blockInput=z.strictObject({starts_at:timestamp,ends_at:timestamp,note:z.string().trim().max(120)})
 type GoogleSetup={clientId:string;secret:string}
-const sharedCalendarSettings=z.object({store:z.uuid(),calendar:calendarID.refine(id=>id!=='primary'),
-  account:z.string().regex(/^[a-z][a-z0-9-]*@[a-z0-9-]+\.iam\.gserviceaccount\.com$/)})
+const serviceAccount=z.string().regex(/^[a-z][a-z0-9-]*@[a-z0-9-]+\.iam\.gserviceaccount\.com$/)
+const sharedCalendarSettings=z.object({store:z.uuid(),calendar:calendarID.refine(id=>id!=='primary'),account:serviceAccount})
 type SharedCalendar=z.infer<typeof sharedCalendarSettings>
 export type CalendarCredential={calendar_id:string;refresh_box:string;tenant_id:string;store_id:string;write_granted:boolean}
 export type Interval={starts_at:Date;ends_at:Date}
@@ -30,7 +31,7 @@ export class InterviewGoogle {
   private readonly sharedTokens=new Map<string,{access:string;expires:number}>()
   private readonly sharedCalendars:Map<string,SharedCalendar>
   constructor(private readonly cfg:Config, private readonly settings?:GoogleSetup, private readonly request=fetch,
-    shared:SharedCalendar|SharedCalendar[]=[]){
+    shared:SharedCalendar|SharedCalendar[]=[],readonly managedAccount?:string){
     this.redirect=cfg.origin+'/interview/google-return.html'
     const entries=Array.isArray(shared)?shared:[shared]
     this.sharedCalendars=new Map(entries.map(entry=>[entry.store,entry]))
@@ -42,10 +43,23 @@ export class InterviewGoogle {
 
   sharedCalendar(store:string){return this.sharedCalendars.get(store)?.calendar}
 
+  legacyCalendarOwner(calendar:string){
+    return [...this.sharedCalendars.values()].find(entry=>entry.calendar.toLowerCase()===calendar.toLowerCase())?.store
+  }
+
   async sharedBusy(store:string,range:Interval,calendar:string){
     const shared=this.sharedCalendars.get(store)
     if(!shared || calendar!==shared.calendar)throw unavailable()
-    let cached=this.sharedTokens.get(shared.account)
+    return this.accountBusy(shared.account,calendar,range)
+  }
+
+  async managedBusy(calendar:string,range:Interval){
+    if(!this.managedAccount)throw unavailable()
+    return this.accountBusy(this.managedAccount,calendar,range)
+  }
+
+  private async accountBusy(account:string,calendar:string,range:Interval){
+    let cached=this.sharedTokens.get(account)
     if(!cached || cached.expires<=Date.now()){
       const metadata=await this.json('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',{
         headers:{'Metadata-Flavor':'Google'},
@@ -53,7 +67,7 @@ export class InterviewGoogle {
       const runtime=z.object({access_token:z.string().min(1)}).safeParse(metadata)
       if(!runtime.success)throw unavailable()
       const credentials='https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/'
-      const data=await this.json(credentials+encodeURIComponent(shared.account)+':generateAccessToken',{
+      const data=await this.json(credentials+encodeURIComponent(account)+':generateAccessToken',{
         method:'POST',headers:{Authorization:'Bearer '+runtime.data.access_token,'Content-Type':'application/json'},
         body:JSON.stringify({scope:[scope],lifetime:'900s'}),
       })
@@ -62,7 +76,7 @@ export class InterviewGoogle {
       const expires=Date.parse(token.data.expireTime)-60000
       if(expires<=Date.now())throw unavailable()
       cached={access:token.data.accessToken,expires}
-      this.sharedTokens.set(shared.account,cached)
+      this.sharedTokens.set(account,cached)
     }
     return this.query(cached.access,calendar,range)
   }
@@ -181,14 +195,15 @@ export function googleFromEnvironment(cfg:Config){
   const extra=process.env.GOOGLE_SHARED_CALENDARS
   const shared=extra?z.array(sharedCalendarSettings).max(100).parse(JSON.parse(extra)):[]
   if(store||calendar||account)shared.push(sharedCalendarSettings.parse({store,calendar,account}))
-  return new InterviewGoogle(cfg,clientId&&secret?{clientId,secret}:undefined,fetch,shared)
+  return new InterviewGoogle(cfg,clientId&&secret?{clientId,secret}:undefined,fetch,shared,process.env.GOOGLE_STORE_CALENDAR_ACCOUNT?serviceAccount.parse(process.env.GOOGLE_STORE_CALENDAR_ACCOUNT):undefined)
 }
 export async function beginCalendarLink(db:DB,actor:Actor,store:string,calendar:string,google:InterviewGoogle){
   const state=token(),verifier=token()
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'google_calendar_enabled')
   const write=(await storeFeatures(db,store)).google_write_enabled
-  if(!write&&google.sharedCalendar(store))throw new Fault(409,'GOOGLE_SHARED_CALENDAR','この店舗は共有カレンダーの空き時間を照合しています。')
+  const shared=await sharedCalendarFor(db,google,store)
+  if(shared&&(!write||calendar!==shared.calendar_id))throw new Fault(409,'GOOGLE_SHARED_CALENDAR','共有カレンダーは空き時間を照合済みです。予定の書き込み連携には同じIDを指定してください。')
   const url=google.authorization(store,state,verifier,write)
   await db.query(`INSERT INTO interview_google_session
     (store_id,tenant_id,actor_id,state_hash,calendar_id,verifier,expires_at,write_requested)
@@ -235,17 +250,53 @@ export async function calendarRecord(db:DB,store:string){
   return (await db.query<CalendarCredential>('SELECT * FROM interview_google_calendar WHERE store_id=$1',[store])).rows[0]
 }
 
+export async function managedCalendarRecord(db:DB,store:string){
+  return (await db.query<{calendar_id:string;linked_at:Date}>(
+    'SELECT calendar_id,linked_at FROM interview_shared_calendar WHERE store_id=$1',[store])).rows[0]
+}
+async function sharedCalendarFor(db:DB,google:InterviewGoogle,store:string){
+  const legacy=google.sharedCalendar(store)
+  if(legacy)return {calendar_id:legacy,managed:false}
+  const record=await managedCalendarRecord(db,store)
+  return record?{calendar_id:record.calendar_id,managed:true}:null
+}
+
+export async function linkManagedCalendar(db:DB,actor:Actor,store:string,calendar:string,google:InterviewGoogle){
+  if(actor.role!=='admin')throw forbidden()
+  await lockDispatch(db,actor.tenant_id)
+  await requireFeature(db,store,'google_calendar_enabled')
+  const unavailableLink=()=>new Fault(409,'GOOGLE_SHARED_CALENDAR','別の連携が設定済みです。店舗専用の未登録カレンダーを使用してください。')
+  if(google.sharedCalendar(store)||google.legacyCalendarOwner(calendar))throw unavailableLink()
+  const credential=await calendarRecord(db,store)
+  if(credential&&credential.calendar_id!==calendar)throw unavailableLink()
+  // Reserve only within this store; a unique constraint prevents sharing a
+  // calendar between stores even if both operators act at the same moment.
+  // The transaction rolls back if Google does not confirm access.
+  try{
+    await db.query(`INSERT INTO interview_shared_calendar(store_id,tenant_id,calendar_id,linked_by)
+      VALUES($1,$2,$3,$4) ON CONFLICT (store_id) DO UPDATE SET calendar_id=excluded.calendar_id,
+      linked_by=excluded.linked_by,linked_at=clock_timestamp()`,[store,actor.tenant_id,calendar,actor.id])
+  }catch(error){if((error as {code?:string}).code==='23505')throw unavailableLink();throw error}
+  const now=Date.now()
+  try{await google.managedBusy(calendar,{starts_at:new Date(now),ends_at:new Date(now+day)})}
+  catch{throw new Fault(422,'GOOGLE_SHARED_PERMISSION','Googleカレンダーを確認できません。カレンダーIDと共有権限（時間枠のみ）を確認してください。')}
+  await db.query('DELETE FROM interview_google_session WHERE store_id=$1',[store])
+  await audit(db,actor.tenant_id,store,actor.id,'interview.google.shared.link',store)
+  return {connected:true}
+}
+
 export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range:Interval,alternate?:string,required=false){
   const enabled=(await storeFeatures(db,store)).google_calendar_enabled
   if(!enabled){
     if(required)throw unavailable()
     return []
   }
-  const shared=google.sharedCalendar(store)
-  const record=shared&&(!alternate||alternate===shared)?null:await calendarRecord(db,store)
-  if(!(shared&&(!alternate||alternate===shared))&&!record&&(alternate||required))throw unavailable()
+  const shared=await sharedCalendarFor(db,google,store)
+  const match=shared&&(!alternate||alternate===shared.calendar_id)
+  const record=match?null:await calendarRecord(db,store)
+  if(!match&&!record&&(alternate||required))throw unavailable()
   try{
-    if(shared&&(!alternate||alternate===shared))return await google.sharedBusy(store,range,shared)
+    if(match&&shared)return await (shared.managed?google.managedBusy(shared.calendar_id,range):google.sharedBusy(store,range,shared.calendar_id))
     return record?await google.busy(record,range,alternate):[]
   }catch(error){
     console.warn(JSON.stringify({severity:'WARNING',event:'integration_failure',provider:'google',operation:'availability'}))
@@ -253,15 +304,16 @@ export async function googleBusy(db:DB,google:InterviewGoogle,store:string,range
   }
 }
 
-export async function availabilityOverview(db:DB,store:string,google:InterviewGoogle){
+export async function availabilityOverview(db:DB,store:string,google:InterviewGoogle,canManage=false){
   const record=await calendarRecord(db,store)
-  const shared=google.sharedCalendar(store)
+  const shared=await sharedCalendarFor(db,google,store)
   const features=await storeFeatures(db,store)
   const {rows:blocks}=await db.query(`SELECT id,starts_at,ends_at,note FROM interview_block
     WHERE store_id=$1 AND ends_at>now() ORDER BY starts_at LIMIT 200`,[store])
-  const connection=shared?{configured:true,connected:true,calendar_id:shared,shared:true}:
+  const connection=shared?{configured:shared.managed?!!google.managedAccount:true,connected:true,calendar_id:shared.calendar_id,shared:true}:
     {configured:google.configured,connected:!!record,calendar_id:record?.calendar_id??null}
   return {google:connection,
+    ...(canManage&&google.managedAccount&&(!shared||shared.managed)?{managed_calendar_account:google.managedAccount}:{}),
     google_enabled:features.google_calendar_enabled,google_write_enabled:features.google_write_enabled,
     google_write_granted:record?.write_granted??false,blocks}
 }
