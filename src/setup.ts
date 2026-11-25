@@ -12,7 +12,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
     '020_tour_revisions','021_supervisor_handoff','022_interview_link_tokens','023_liff_free_links',
     '024_registration_flow','025_remove_liff','026_recruitment_delivery','027_agency_master_self_service',
-    '028_registered_supervision','029_operations_usability']
+    '028_registered_supervision','029_operations_usability','030_agency_operations']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -138,6 +138,24 @@ export async function designateMaster(pool:pg.Pool,tenantSlug:string,address:str
   })
 }
 
+export async function limitAgencyOperations(pool:pg.Pool,tenantSlug:string) {
+  return tx(pool,async db=>{
+    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[tenantSlug])
+    if(!tenant)throw new Error('該当する法人が見つかりません。')
+    await scope(db,tenant.tenant_id,undefined,true)
+    const {rowCount}=await db.query(`UPDATE tenant t SET agency_operations_only=true WHERE t.id=$1
+      AND NOT t.supervisor_only AND NOT t.agency_operations_only AND EXISTS (
+        SELECT 1 FROM platform_master p WHERE p.agency_id=t.id OR EXISTS (
+          SELECT 1 FROM platform_registration r WHERE r.tenant_id=t.id AND r.supervisor_tenant_id=p.tenant_id
+        )
+      )`,[tenant.tenant_id])
+    if(rowCount)await audit(db,tenant.tenant_id,null,null,'agency.operations_limited',tenant.tenant_id)
+    const {rows:[state]}=await db.query<{agency_operations_only:boolean}>(
+      'SELECT agency_operations_only FROM tenant WHERE id=$1',[tenant.tenant_id])
+    if(!state?.agency_operations_only)throw new Error('監督対象の法人であることを確認してください。')
+  })
+}
+
 if (import.meta.main) {
   const migrationPool = poolFor(process.env.MIGRATION_DATABASE_URL)
   const url = process.env.DATABASE_URL
@@ -157,6 +175,9 @@ if (import.meta.main) {
     } else if (tenant==='--master') {
       await designateMaster(migrationPool,slug.parse(name),email.parse(address))
       console.log('マスターアカウントを指定しました。')
+    } else if (tenant==='--limit-agency') {
+      await limitAgencyOperations(migrationPool,slug.parse(name))
+      console.log('管理会社の運用権限を適用しました。')
     } else if (tenant) {
       const data = z.object({ slug, name:text(120), email, billing_contact:email.optional() })
         .parse({slug:tenant,name,email:address,billing_contact:billing})

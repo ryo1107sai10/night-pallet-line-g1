@@ -1,5 +1,5 @@
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
-import {starter,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
+import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links} from './engine.mjs'
 
 scopeWorkspaceLinks()
 
@@ -183,11 +183,12 @@ async function openScenario(id) {
   announce('')
 }
 
-function newScenario(purpose='customer') {
+function newScenario(purpose='customer',template) {
   scenario=null
   localCreateKey=crypto.randomUUID()
-  graph=starter(purpose)
-  graph.channel=channels.find(item=>item.purpose===purpose || item.purpose==='shared')?.id??''
+  const preferred=channels.find(item=>item.purpose===purpose)??(!template?.dedicated&&channels.find(item=>item.purpose==='shared'))
+  graph=template?recruitmentTemplate(template.id,preferred?.id??''):starter(purpose)
+  graph.channel=preferred?.id??''
   original=''
   selection=graph.entry
   dirty=true
@@ -705,11 +706,20 @@ async function start() {
     if (!ready || !store) return
     if (dirty&&!await ask('保存せずに新規シナリオを作りますか？')) return
     const content=node('div',null,'controls')
-    for(const [value,label] of Object.entries(purposes)) content.append(button(label,()=>{
+    for(const [value,label] of Object.entries(purposes)) content.append(button(label+'の基本シナリオ',()=>{
       $('#dialog').close()
       newScenario(value)
     },'primary'))
-    dialog('新規シナリオ','配信の用途を選んでください。',content)
+    for(const template of recruitmentTemplates){
+      const compatible=channels.some(account=>account.purpose==='recruitment'||!template.dedicated&&account.purpose==='shared')
+      const choice=button(template.name,()=>{
+        $('#dialog').close()
+        newScenario('recruitment',template)
+      })
+      choice.disabled=!compatible
+      content.append(choice)
+    }
+    dialog('新規シナリオ','用途や面談の進捗に合うテンプレートを選び、文面・時間を確認してから保存してください。',content)
   }
   addEventListener('beforeunload',event=>{if(dirty) event.preventDefault()})
   const session=demo?sessionDemo:await api('/session')

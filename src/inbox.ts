@@ -157,6 +157,7 @@ export async function changeThread(db:DB,actor:Actor,store:string,use:Use,id:str
 }
 
 export async function classifyThread(db:DB,actor:Actor,store:string,id:string,data:z.infer<typeof inboxClassify>){
+  if(actor.agency&&data.purpose!=='recruitment')throw forbidden()
   await lockDispatch(db,actor.tenant_id)
   await requireFeature(db,store,'inbox_enabled')
   const thread=await getThread(db,id,'unclassified')

@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres'
 import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, digest, poolFor, scope, tx } from '../dist/core.js'
-import { bootstrap, inviteSupervisor, migrate } from '../dist/setup.js'
+import { bootstrap, inviteSupervisor, limitAgencyOperations, migrate } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 
 // 登録フロー再設計（設計書 §12）の結合試験。
@@ -330,4 +330,21 @@ test('管理者以外はセットアップを確定できず、他法人の店�
   expect(await request(base + '/setup', { cookie: agencyAdmin }), 403)
   expect(await post('/platform/registrations', master,
     { legal_name: '不正法人', store_name: '不正店', email: 'x@example.test' }, idempotency()), 401)
+})
+
+test('登録済み法人に管理会社の運用範囲を適用すると既存セッションも制限される',async()=>{
+  await limitAgencyOperations(owner,created.tenant.slug)
+  assert.equal(expect(await request('/session',{cookie:master}),200).actor.agency,true)
+  assert.equal(expect(await request('/session',{cookie:manager}),200).actor.agency,true)
+  const root='/stores/'+storeId
+  expect(await request(root+'/setup',{cookie:master}),403)
+  expect(await request(root+'/line-module',{cookie:master}),403)
+  expect(await request(root+'/workflows/customer/inbox',{cookie:manager}),403)
+  expect(await request(root+'/intake',{cookie:manager}),200)
+  expect(await request(root+'/interviews',{cookie:manager}),200)
+  expect(await request(root+'/scenarios',{cookie:manager}),200)
+  expect(await request('/agency-master',{cookie:manager}),403)
+  expect(await request('/agency-master',{cookie:master}),200)
+  const supervisorRoute='/platform/tenants/'+created.tenant.id+'/api/v1'+root+'/setup'
+  assert.equal((await send(supervisorRoute,{headers:{Cookie:platform}})).status,200)
 })

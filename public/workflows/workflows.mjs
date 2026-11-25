@@ -422,7 +422,7 @@ function inbox(root,data,store,path,refresh,intake=false){
         panel.append(box)
       }
       if(intake){
-        panel.append(form([field('振り分け先','purpose','','customer',[['customer','顧客'],['recruitment','採用']]),field('分類の根拠','reason')],
+        panel.append(form([field('振り分け先','purpose','',agency?'recruitment':'customer',agency?[['recruitment','採用']]:[['customer','顧客'],['recruitment','採用']]),field('分類の根拠','reason')],
           '受信箱へ振り分ける',async values=>{
             await api(threadPath,'PATCH',{...values,revision:thread.revision});await refresh('会話を振り分けました。')
           }))
@@ -598,7 +598,7 @@ async function render(){
     if(settings.rich_menus_enabled)sections.push(['rich-menus','リッチメニュー'])
   }
   if(settings.inbox_enabled)sections.push(['inbox','LINE受信箱'])
-  if(!agency&&use==='customer'&&settings.inbox_enabled)sections.push(['intake','受付保留'])
+  if(settings.inbox_enabled&&(agency&&['admin','manager'].includes(actor.role)||!agency&&use==='customer'))sections.push(['intake','受付保留'])
   sections.push(['delivery','LINE送信履歴'])
   if(!sections.length){content.replaceChildren(el('p','この店舗で有効な機能はありません。法人管理者が「店舗で使う機能」から設定できます。'));return}
   if(!agency)sections.unshift(['checks','運用チェック'])

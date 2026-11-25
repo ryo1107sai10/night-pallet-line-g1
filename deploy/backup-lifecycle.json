@@ -1,0 +1,6 @@
+{
+  "rule": [
+    {"action":{"type":"Delete"},"condition":{"age":15,"matchesPrefix":["night/daily/"]}},
+    {"action":{"type":"Delete"},"condition":{"age":120,"matchesPrefix":["night/weekly/","night/initial-"]}}
+  ]
+}
