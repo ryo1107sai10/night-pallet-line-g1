@@ -18,6 +18,7 @@ import { workOnce } from '../dist/jobs.js'
 import { issueInterviewLinkToken } from '../dist/interview-link.js'
 import { issueCustomerLinkToken } from '../dist/customer-link.js'
 import { starter } from '../public/studio/engine.mjs'
+import { reorderStep } from '../public/studio/step-order.mjs'
 import { lineSetupLinks } from '../public/line-setup.mjs'
 
 const origin = 'https://example.test'
@@ -490,11 +491,19 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   const approved=expect(await post(url+'/transition',admin,{action:'approve',revision:tested.revision}),200)
   const published=expect(await post(url+'/transition',admin,{action:'publish',revision:approved.revision}),200)
   expect(await patch(url,admin,{revision:approved.revision,graph}),409)
-  const draft=expect(await patch(url,admin,{revision:published.revision,graph:{...graph,name:'新しい下書き'}}),200)
+  const reordered=reorderStep(graph,'wait','welcome','before')
+  const draft=expect(await patch(url,admin,{revision:published.revision,graph:{...reordered,name:'新しい下書き'}}),200)
   assert.equal(draft.state,'draft')
   assert.equal(draft.published_version,1)
+  assert.equal(draft.graph.entry,'wait')
+  assert.equal(draft.graph.nodes.find(node=>node.id==='wait').next,'welcome')
+  const saved=expect(await request(url,{cookie:admin}),200)
+  assert.equal(saved.graph.entry,'wait')
+  assert.equal(saved.graph.nodes.find(node=>node.id==='welcome').next,'branch')
   const version=expect(await request(url+'/versions/1',{cookie:admin}),200)
   assert.equal(version.graph.name,graph.name)
+  assert.equal(version.graph.entry,'welcome')
+  assert.equal(version.graph.nodes.find(node=>node.id==='welcome').next,'wait')
 })
 
 

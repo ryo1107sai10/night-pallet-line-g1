@@ -85,6 +85,18 @@ label.check{min-height:38px;display:flex;align-items:center;gap:9px;color:#d8d8e
 .node small.excerpt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .node .edge{display:block;font-size:10px;color:#dbcee9;border-radius:6px;background:#17172d9c;padding:3px 6px;max-width:155px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .edges{display:grid;gap:3px}
+.reorder-help{max-width:470px;margin:0 auto 14px;padding:8px 11px;border:1px solid #c9b9ff28;border-radius:10px;background:#c9b9ff0b;color:#cfcae8;font-size:11px;line-height:1.65}
+.node[data-reorderable]{cursor:grab;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:pan-y}
+.step-grip{flex:0 0 28px;align-self:center;display:grid;place-items:center;min-height:38px;border-radius:9px;color:#d2c9f5;background:#ffffff0c;font-size:23px;line-height:1;cursor:grab;touch-action:none}
+.node[data-reorderable]:hover .step-grip,.node[data-reorderable]:focus-visible .step-grip{background:#b6a2ff26;color:#f5edff}
+.sorting-steps,.sorting-steps .node[data-reorderable],.sorting-steps .step-grip{cursor:grabbing}
+.node.drag-origin{opacity:.32;border-style:dashed;box-shadow:none;transform:none}
+.node.drop-before,.node.drop-after{border-color:#9cf1d4;box-shadow:0 0 15px #90edcc38}
+.node.drop-before::before,.node.drop-after::after{content:"";position:absolute;left:5px;right:5px;height:4px;border-radius:4px;background:#90edcc;box-shadow:0 0 9px #90edcc;pointer-events:none}
+.node.drop-before::before{top:2px}.node.drop-after::after{bottom:2px}
+.step-floating.node{position:fixed;z-index:9999;margin:0;pointer-events:none;opacity:.96;border-color:#d6caff;box-shadow:0 18px 42px #090a1dbf,0 0 20px #ae95fe66;transform:scale(1.025);transition:none}
+.step-move-controls{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:2px 0 14px;padding:8px;border:1px solid #c9b9ff24;border-radius:11px;background:#ffffff08}
+.step-move-controls span{flex:1 1 100%}.step-move-controls button{flex:1;min-height:38px;font-size:12px}
 .tabs{padding:9px;border-bottom:1px solid var(--stroke);gap:4px}
 .tabs button{flex:1;background:transparent;border-color:transparent;padding-inline:7px}
 .tabs button.active{background:#c6b2ff20;border-color:#c6b2ff39;color:#f4eaff}
@@ -120,6 +132,7 @@ dialog p{font-size:13px;margin-bottom:12px;color:#c6c7df}
 .branch-label{display:block;text-align:center;margin:0 auto 6px;padding:1px 8px;border-radius:20px;color:#e1d6ff;background:#312852;border:1px solid #b8abef45;font-size:10px}
 .branch-lane .node{padding:7px;gap:7px}
 .branch-lane .node .icon{height:26px;width:26px;flex-basis:26px;font-size:13px}
+.branch-lane .step-grip{flex-basis:22px;min-height:32px;font-size:19px}
 .branch-lane .branch-lanes .branch-lanes{grid-template-columns:1fr}
 .path-ref{width:100%;min-height:40px;font-size:12px;overflow-wrap:anywhere;color:#dbd4f2;text-align:center;background:#181a33;border:1px dashed #a69ad366;border-radius:11px;padding:8px;margin:0}
 .disconnected{border-top:1px dashed #a69ad366;margin-top:20px;padding-top:12px;display:grid;gap:6px}
