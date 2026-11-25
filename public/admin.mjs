@@ -449,6 +449,7 @@ function connectedPanel(base, c, testers) {
   const tests = details('テスト利用者の登録と送信',
     el('p','テストコードのメッセージで本人確認した後、テスト利用者から公式アカウントへメッセージを1通送ってもらいます。'),
     invite,invitation,button('テストの進捗を更新',refresh))
+  tests.id='line-tester';if(location.hash==='#line-tester')tests.open=true
   for (const tester of testers) {
     const row = el('div',null,'record')
     const active = Date.parse(tester.expires_at)>Date.now()
@@ -734,7 +735,7 @@ function onboardingLink(label,store,anchor) {
 }
 
 function revealLineAnchor() {
-  if (!['#quick-line','#line-setup','#line-register','#line-connection'].includes(location.hash)) return
+  if (!['#quick-line','#line-setup','#line-register','#line-connection','#line-tester'].includes(location.hash)) return
   const target = $(location.hash) ?? (location.hash==='#line-setup' ? $('#line-register') : null)
   if (target instanceof HTMLDetailsElement) target.open = true
   target?.scrollIntoView()

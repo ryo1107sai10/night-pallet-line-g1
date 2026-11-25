@@ -1,13 +1,15 @@
 import type { Request } from 'express'
 import { z } from 'zod'
 import { liveTriggers, simulate, validate } from '../public/studio/engine.mjs'
-import { audit, conflict, Fault, missing, keyed, newId, once, purpose, revision, seal, text, uuid, type Actor, type Config, type DB } from './core.js'
+import { audit, automationForStore, conflict, Fault, missing, keyed, newId, once, purpose, revision, seal, text, uuid, type Actor, type Config, type DB } from './core.js'
 
-import { channel, evidence, testDeliveryConfirmed } from './line.js'
+import { channel, channelReady, evidence, testDeliveryConfirmed } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { INTERVIEW_LINK_MARKER } from './interview-link.js'
 import { CUSTOMER_LINK_MARKER } from './customer-link.js'
-import { allowApplicantTagGraph, tagTestFacts } from './applicant-tags.js'
+import { allowApplicantTagGraph, graphUsesApplicantTags, validApplicantTagsForRun, tagTestFacts } from './applicant-tags.js'
+import { locationOf } from './automation.js'
+import { storeFeatures } from './store-features.js'
 
 const nodeId = z.string().regex(/^[a-zA-Z0-9_-]{1,50}$/)
 const base = { id:nodeId, name:z.string().max(100) }
@@ -159,6 +161,57 @@ export async function studioPresence(context:Context,id:string,input:unknown){
   const {rows:[r]}=await db.query(`SELECT count(DISTINCT staff_id) FILTER(WHERE staff_id<>$2)::int AS other_people,count(*) FILTER(WHERE staff_id=$2 AND client_id<>$3)::int AS other_tabs FROM studio_editor
     WHERE scenario_id=$1 AND seen_at>=now()-interval '2 minutes'`,[id,actor.id,client])
   return {...r,revision:current.revision}
+}
+
+// Readiness is advisory and scoped to the stored graph. It neither enables
+// automation nor replaces the recipient-level checks at the actual send.
+export async function scenarioReadiness(context:Context,cfg:Config,id:string){
+  const current=await record(context.db,context.store,id)
+  const {db,store,actor}=context
+  const [loc,features]=await Promise.all([locationOf(db,store),storeFeatures(db,store)])
+  const assess=async (g:Graph,published:boolean)=>{
+    const issues:{code:string;message:string;target:'line'|'settings'|'forms'|'interviews'|'tags';severity:'stop'|'blocked'|'advice'}[]=[]
+    const add=(code:string,message:string,target:typeof issues[number]['target'],severity:typeof issues[number]['severity']='blocked')=>issues.push({code,message,target,severity})
+    if(!automationForStore(cfg,store,actor.tenant_id))add('process','サーバーの自動配信がこの店舗では有効ではありません。','settings')
+    if(!loc.contract_active)add('contract','店舗の契約・配信許可を確認してください。','settings')
+    if(!loc.eligible_at)add('eligibility','店舗の利用条件の確認が未完了です。','settings')
+    if(!loc.auto_enabled||!loc.auto_enabled_at)add('automation','店舗の自動配信がオフです。','settings')
+    if(loc.stopped||loc.tenant_stopped)add('store_stop','店舗または法人の配信が停止中です。','settings','stop')
+    if(published&&current.stopped)add('scenario_stop','このシナリオは停止中です。','settings','stop')
+    const match=await db.query("SELECT id FROM channel WHERE store_id=$1 AND id=$2 AND (purpose=$3 OR purpose='shared')",[store,g.channel,g.purpose])
+    if(!match.rowCount)add('channel','用途に合う公式LINEが登録されていません。','line')
+    else{
+      const c=await channel(db,g.channel)
+      if(c.stopped)add('line_stop','公式LINEの配信が停止中です。','line','stop')
+      if(!channelReady(c)||(!c.module_channel_id&&!c.credentials)||(c.module_channel_id&&cfg.lineModule?.id!==c.module_channel_id))add('line','公式LINEの接続・一般利用者への送信確認が未完了です。','line')
+      if(g.trigger==='form'){
+        if(!features.forms_enabled)add('forms_off','回答フォームがオフです。','forms')
+        const {rows:[form]}=await db.query('SELECT EXISTS(SELECT 1 FROM workflow_form WHERE store_id=$1 AND channel_id=$2 AND purpose=$3 AND published) AS present',[store,g.channel,g.purpose])
+        if(!form.present)add('form_missing','この公式LINEに公開済みの回答フォームがありません。','forms')
+      }
+      const messages=g.nodes.filter(n=>n.type==='message')
+      const uses=(key:string)=>messages.some(n=>new RegExp('\\{\\{\\s*'+key+'\\s*\\}\\}').test(n.body)||n.rich?.buttons.some(b=>b.url==='{{'+key+'}}'))
+      const interview=g.purpose==='recruitment'&&(g.trigger.startsWith('interview_')||uses('interview_link'))
+      if(interview&&!features.interviews_enabled)add('interviews_off','面談予約がオフです。','interviews')
+      if(g.purpose==='recruitment'&&uses('interview_link')){
+        if(!features.token_interviews_enabled)add('interview_url','LINEトークからの面談予約がオフです。','interviews')
+        const {rows:[slots]}=await db.query("SELECT EXISTS(SELECT 1 FROM interview_slot WHERE store_id=$1 AND channel_id=$2 AND published AND starts_at>now() AND method='onsite') AS present",[store,g.channel])
+        if(!slots.present)add('slots','今後の公開面談枠がありません。面談枠を確認してください。','interviews','advice')
+        if(features.google_calendar_enabled){
+          const {rows:[calendar]}=await db.query('SELECT EXISTS(SELECT 1 FROM interview_google_calendar WHERE store_id=$1) OR EXISTS(SELECT 1 FROM interview_shared_calendar WHERE store_id=$1) AS connected',[store])
+          if(!calendar.connected)add('calendar','Googleカレンダーの照合設定を確認してください。','interviews','advice')
+        }
+      }
+      if(g.purpose==='customer'&&(uses('customer_link')||uses('booking_url'))&&!features.token_customers_enabled)add('customer_url','LINEトークからの来店予約・設定がオフです。','settings')
+      if(g.purpose==='customer'&&['booking_created','booking_changed','booking_cancelled','visit'].includes(g.trigger)&&!features.visits_enabled)add('visits','来店予約がオフです。','settings')
+      const usesTags=g.nodes.some(n=>n.type==='tag'||(n.type==='branch'&&(n.condition==='tag'||n.rules?.some(r=>r.condition==='tag')))||(n.type==='message'&&!!n.tagGuard))
+      if(g.purpose==='recruitment'&&graphUsesApplicantTags(g)&&!await validApplicantTagsForRun(db,store,g,new Date()))add('tags','応募・選考管理、採用タグ、または指定したタグの有効状態を確認してください。','tags')
+      if(g.purpose==='customer'&&usesTags&&!features.tags_enabled)add('tags','顧客タグがオフです。','tags')
+    }
+    return {channel:g.channel,purpose:g.purpose,status:issues.some(i=>i.severity==='stop')?'stopped':issues.some(i=>i.severity==='blocked')?'blocked':'ready',issues}
+  }
+  const published=current.published_version?await versionDetail(context,id,current.published_version):null
+  return {revision:current.revision,draft:await assess(current.graph,false),published:published?await assess(published.graph as Graph,true):null}
 }
 
 export async function publicationReview(context:Context,id:string){

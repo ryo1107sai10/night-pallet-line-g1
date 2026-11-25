@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101025">
   <title>シナリオスタジオ | Night PRO LINE</title>
-  <link rel="stylesheet" href="./studio.css?v=workspace-20261126-r5">
-  <script type="module" src="./studio.mjs?v=workspace-20261126-r5"></script>
+  <link rel="stylesheet" href="./studio.css?v=journey-20261126-r2">
+  <script type="module" src="./studio.mjs?v=journey-20261126-r2"></script>
 </head>
 <body>
   <a class="skip" href="#work">編集画面へ移動</a>
@@ -24,6 +24,7 @@
       <div class="controls"><button id="tag-templates" type="button">タグ別テンプレート</button><button id="saved-templates" type="button">保存済みテンプレート</button><button id="new" class="primary" type="button"><b aria-hidden="true">＋</b> 新規シナリオ</button></div>
     </header>
     <section id="workbar" class="glass workbar" aria-label="シナリオ編集操作"></section>
+    <section id="journey" class="journey glass" aria-label="公開までの進行状況" hidden></section>
     <div id="message" role="status" aria-live="polite" hidden></div>
     <nav class="mobile glass" aria-label="作業画面"><button data-part="library">シナリオ</button><button data-part="workspace" aria-current="true">フロー</button><button data-part="inspector">編集・テスト</button></nav>
     <div id="layout" class="layout" data-part="workspace">

@@ -90,7 +90,7 @@ let tagFilters={include:[],exclude:[],match:'all',page:1,store:null}
 function formEditor(root,data,path,refresh,use){
   root.append(el('h2',use==='recruitment'?'応募フォーム':'回答フォーム'))
   if(!data.channels.length){root.append(el('p','先にこの用途の公式LINEを登録してください。'));return}
-  const picker=field('公式LINE','channel','',data.channels[0].id,channelOptions(data.channels))
+  const picker=field('公式LINE','channel','',data.channels.find(c=>c.id===initialQuery.get('channel'))?.id??data.channels[0].id,channelOptions(data.channels))
   const choice=picker.querySelector('select')
   const formPicker=field('編集するフォーム','form','','',[['','新規フォーム']])
   const active=formPicker.querySelector('select')

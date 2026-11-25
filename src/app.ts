@@ -22,7 +22,7 @@ import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, modul
 import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboarding, markOnboardingRegistered,
   onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
 import {uploadStudioImage,listStudioImages,publicStudioImage,imageInputLimit} from './studio-media.js'
-import { createScenario, saveScenario, saveScenarioFolder, scenarioMetrics, studioPresence, publicationReview, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
+import { createScenario, saveScenario, saveScenarioFolder, scenarioMetrics, studioPresence, publicationReview, scenarioReadiness, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
 import { lockDispatch, setStop, workOnce } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, authenticateCustomer,
   customerSessionCookie, setPreferences, customerById, selfPreferenceInput, emitDelivery } from './customer.js'
@@ -974,6 +974,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.patch(scenario+'/folder',inStore((db,actor,req)=>saveScenarioFolder(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
   api.get(scenario+'/metrics',inStore((db,actor,req)=>scenarioMetrics(scenarioContext(db,actor,req),idOf(req,'scenario'),req.query.version===undefined?undefined:z.coerce.number().int().positive().parse(req.query.version))))
   api.post(scenario+'/presence',inStore((db,actor,req)=>studioPresence(scenarioContext(db,actor,req),idOf(req,'scenario'),req.body)))
+  api.get(scenario+'/readiness',inStore((db,actor,req)=>scenarioReadiness(scenarioContext(db,actor,req),cfg,idOf(req,'scenario'))))
   api.get(scenario+'/publication-review',inStore((db,actor,req)=>publicationReview(scenarioContext(db,actor,req),idOf(req,'scenario'))))
   api.get(scenario+'/versions/:version',inStore((db,actor,req)=>versionDetail(scenarioContext(db,actor,req),
     idOf(req,'scenario'),z.coerce.number().int().positive().parse(req.params.version))))

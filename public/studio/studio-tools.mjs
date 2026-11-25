@@ -94,7 +94,8 @@ export function simulationCases(flow,person){
   if(!base.bookingAt&&Number.isFinite(+nextDate))base.bookingAt=nextDate.toISOString().slice(0,16)
   const target=flow.triggerTag??flow.nodes.find(n=>n.tagGuard)?.tagGuard?.tag
   if(target&&!base.tags.includes(target))base.tags=[...base.tags,target]
-  const normal={...base,consent:true,adult:true,blocked:false,stopped:false,human:false,cancelled:false}
+  // Standard cases are independent of the selected preset and custom timeline.
+  const normal={...base,booked:false,consent:true,adult:true,blocked:false,stopped:false,human:false,cancelled:false,responded:false,marketingStopped:false,timeline:[],assigned:true,eligible:true,contractActive:true,budgetAvailable:true,bookingLinkValid:true,bookingCurrent:true,dayCount:0,weekCount:0}
   const cases=[
     ['未予約・同意あり',{...normal,booked:false}],
     ['予約済み・同意あり',{...normal,booked:true}],

@@ -516,6 +516,12 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   const url=base+'/'+first.id
   expect(await request(url,{cookie:other}),404)
   expect(await request('/stores/'+otherStore+'/scenarios/'+first.id,{cookie:admin}),404)
+  const pending=expect(await request(url+'/readiness',{cookie:admin}),200)
+  assert.equal(pending.revision,first.revision);assert.equal(pending.published,null)
+  assert.equal(pending.draft.channel,c);assert.ok(['ready','blocked','stopped'].includes(pending.draft.status))
+  expect(await request(url+'/readiness',{cookie:other}),404)
+  expect(await request('/stores/'+otherStore+'/scenarios/'+first.id+'/readiness',{cookie:admin}),404)
+
   expect(await post(url+'/transition',admin,{action:'test',revision:first.revision},undefined),422)
   const fixture={start:'2026-11-14T12:00',bookingAt:'',dayCount:0,weekCount:0,booked:false,consent:true,adult:true,
     responded:false,assigned:true,stopped:false,marketingStopped:false,blocked:false,human:false,cancelled:false,
@@ -530,6 +536,11 @@ test('AT02/27/28 シナリオの公開版は不変で、店舗外と古い版を
   assert.equal(draft.published_version,1)
   assert.equal(published.draft_matches_published,true);assert.equal(draft.draft_matches_published,false);assert.equal(draft.published_channel,c)
   assert.equal(draft.graph.entry,'wait')
+  const readiness=expect(await request(url+'/readiness',{cookie:admin}),200)
+  assert.equal(readiness.revision,draft.revision);assert.equal(readiness.published.channel,c);assert.equal(readiness.draft.channel,c)
+  assert.deepEqual(readiness.published.issues,readiness.draft.issues)
+  assert.equal(JSON.stringify(readiness).includes('access_token'),false)
+
   assert.equal(draft.graph.nodes.find(node=>node.id==='wait').next,'welcome')
   const saved=expect(await request(url,{cookie:admin}),200)
   assert.equal(saved.graph.entry,'wait')

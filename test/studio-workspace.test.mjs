@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import {test} from 'node:test'
 import {starter,validate,simulate} from '../public/studio/engine.mjs'
-import {moveStepBlock,reconnectEdge,selectOutlineRange,wizardFlow} from '../public/studio/studio-tools.mjs'
+import {moveStepBlock,reconnectEdge,selectOutlineRange,wizardFlow,simulationCases} from '../public/studio/studio-tools.mjs'
 import {sanitizeStudioImage} from '../dist/studio-media.js'
 import sharp from 'sharp'
 
@@ -30,4 +30,12 @@ test('画像処理は許可された画像だけを再エンコードし、元�
  const png=await sharp({create:{width:32,height:24,channels:3,background:'#987ed2'}}).png().toBuffer();const image=await sanitizeStudioImage(png)
  const meta=await sharp(image.data).metadata();assert.equal(meta.format,'jpeg');assert.equal(meta.width,32);assert.equal(image.height,24);assert.equal(meta.exif,undefined)
  await assert.rejects(()=>sanitizeStudioImage(Buffer.from('plain text')));await assert.rejects(()=>sanitizeStudioImage(Buffer.alloc(4*1024*1024+1)))
+})
+
+test('標準ケースの比較は直前の予約状態や個別の時系列・同意・通数条件に左右されない',()=>{
+ const flow=wizardFlow({name:'応募案内',purpose:'recruitment',channel:'test',trigger:'form',first:'初回',follow:'再案内',minutes:1440,skipBooked:true})
+ const person={zone:'Asia/Tokyo',cutoff:'06:00',start:'2026-11-26T18:00',bookingAt:'',booked:false,consent:true,adult:true,assigned:true,dayCount:0,weekCount:0,tags:[],values:{},bookingLinkValid:true}
+ const comparable=r=>r.map(({label,result})=>[label,result.count,result.events.filter(e=>e.state==='held').length])
+ const before=comparable(simulationCases(flow,person)),after=comparable(simulationCases(flow,{...person,booked:true,consent:false,dayCount:20,weekCount:40,timeline:[{afterMinutes:180,action:'book'}]}))
+ assert.deepEqual(after,before);assert.deepEqual(before.slice(0,3),[['未予約・同意あり',2,0],['予約済み・同意あり',1,0],['通知同意なし',0,2]])
 })

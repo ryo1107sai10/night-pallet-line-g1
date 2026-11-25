@@ -14,17 +14,19 @@ const draftKey='night-pallet-studio-v1'
 const $=selector=>document.querySelector(selector)
 const icons={message:'✉',wait:'◷',branch:'⑂',tag:'◇',task:'✓',end:'■'}
 const purposes={customer:'顧客',recruitment:'採用'}
-const waitTypes={delay:'相対時間',fixed:'実日付',business:'営業日・店舗締め',booking:'予約時刻の前'}
+const waitTypes={delay:'前のステップから何分・何時間後',fixed:'指定した日時まで',business:'営業日・店舗締め',booking:'予約時刻の前'}
 const steps={draft:'下書き',tested:'テスト済み',approved:'承認済み'}
+const triggerText=key=>({form:'応募フォームを送信したとき',follow:'友だち追加したとき',interview_booked:'面談予約が確定したとき',interview_changed:'面談日程が変更されたとき',interview_cancelled:'面談予約が取り消されたとき',tag_added:'指定の採用タグが付いたとき',tag_campaign:'タグを選んで配信を開始したとき'}[key]??triggers[key]??key)
 const defaults={zone:'Asia/Tokyo',cutoff:'06:00',start:'',bookingAt:'',booked:false,consent:true,adult:true,responded:false,
   assigned:true,stopped:false,marketingStopped:false,blocked:false,human:false,cancelled:false,
   dayCount:0,weekCount:0,tags:[],timeline:[],bookingLinkValid:true,eligible:true,contractActive:true,budgetAvailable:true,bookingCurrent:true}
-let person={...defaults,values:{name:'水城あおい',store:'銀座店（サンプル）',staff:'橘',booking:'11月16日 23:00',
-  price:'60分 8,000円（税込）',booking_url:'https://example.test/reservations/sample',interview_link:'https://example.test/reserve/sample',customer_link:'https://example.test/account/sample'}}
+const sampleValues={name:'水城あおい',store:'銀座店（サンプル）',staff:'橘',booking:'11月16日 23:00',
+  price:'60分 8,000円（税込）',booking_url:'https://example.test/reservations/sample',interview_link:'https://example.test/reserve/sample',customer_link:'https://example.test/account/sample'}
+let person={...defaults,values:{...sampleValues}}
 let applicantCatalog={enabled:false,definitions:[]}
 let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,original='',dirty=false,tab='edit',part='workspace',simulation
 let busy=false, ready=false, preset='unbooked', localCreateKey
-let currentSession, viewMode='basic', zoom=1, autosave=true, saveTimer, savePromise=null, saveIssue='', historyKey='', historyTime=0
+let readiness=null,readinessSeq=0, currentSession, viewMode='basic', zoom=1, autosave=true, saveTimer, savePromise=null, saveIssue='', historyKey='', historyTime=0
 let undoStack=[],redoStack=[],searchText='',folderFilter='',libraryKind='all',matrix=null,branchOpen=new Map(),pendingMeta={folder:'',is_template:false},recoveryAvailable=true
 let hideLibrary=true,hideInspector=false,focusMode=false,minimapOpen=false,stepClipboard=null,metrics=null,metricsBusy=false,presenceInfo=null,presenceSequence=0
 let selectedSteps=new Set(),multiSelect=false,moveIntent=null,connectIntent=null,navLoading=false,navigationBusy=false,validationFrame=0,libraryWidth=220,inspectorWidth=355,theme='dark',sheetFocus=null
@@ -60,6 +62,35 @@ function historyMove(direction){
   historyKey='';dirty=JSON.stringify(graph)!==original;simulation=null;matrix=null;saveIssue=''
   show();scheduleSave();recoverWrite()
 }
+function resetPerson(){preset='unbooked';person={...defaults,zone:store?.timezone??defaults.zone,cutoff:store?.cutoff??defaults.cutoff,tags:[],timeline:[],values:{...sampleValues,store:store?.name??sampleValues.store}}}
+function matchingPublished(){return !!scenario?.published_version&&!dirty&&(scenario.draft_matches_published??(demo&&scenario.versions?.some(v=>v.version===scenario.published_version&&JSON.stringify(v.graph)===JSON.stringify(graph))))}
+async function refreshReadiness(){
+  const id=scenario?.id,rev=scenario?.revision,storeId=store?.id,seq=++readinessSeq
+  if(!id){readiness=null;syncStatusUI();return null}
+  if(demo){const info={status:'blocked',issues:[{severity:'blocked',message:'公開デモでは実際のLINE配信は行われません。'}]};readiness={revision:rev,draft:info,published:scenario.published_version?info:null};syncStatusUI();return readiness}
+  const r=await api('/stores/'+storeId+'/scenarios/'+id+'/readiness').catch(()=>null)
+  if(seq!==readinessSeq||scenario?.id!==id||scenario?.revision!==rev||store?.id!==storeId)return null
+  readiness=r?.revision===rev?r:null;syncStatusUI();if(tab==='publish'&&!$('#dialog').open&&!dirty)inspector();return readiness
+}
+function readyLabel(info){return !info?'配信準備を未確認':info.status==='ready'?(info.issues?.length?'配信準備OK・確認事項あり':'配信準備OK'):info.status==='stopped'?'配信停止中':'配信準備未完了'}
+function settingsHref(target,channelId=graph?.channel,use=graph?.purpose){
+  const query=new URLSearchParams({store:store.id})
+  if(target==='line'){if(channelId)query.set('line_channel',channelId);return workspacePath((currentSession?.actor.agency?'/agency-line/':'/master/')+'?'+query+(currentSession?.actor.agency?'#line-connections':'#line-connection'))}
+  if(target==='forms'||target==='tags'){query.set('use',use??'recruitment');query.set('tab',target);if(channelId)query.set('channel',channelId);return workspacePath('/workflows/?'+query)}
+  if(target==='interviews'){return workspacePath('/interview/staff.html?'+query)}
+  return workspacePath((currentSession?.actor.agency?'/master/':controlled)+'?'+query)
+}
+function readinessCard(info,channelId=graph?.channel){
+  const root=node('section',null,'readiness-card');root.dataset.state=info?.status??'unknown'
+  root.append(node('strong',readyLabel(info)),node('p',info?.status==='ready'?'店舗・LINE・開始条件の設定を確認しました。実際の送信は対象者の同意・通数・予約状況等により判定されます。':'シナリオの公開と実際のLINE配信準備は別です。公開後、送信条件が成立すると自動配信される場合があります。現在の設定不足は下記をご確認ください。','field-hint'))
+  if(!info)root.append(node('p','現在の設定を確認できませんでした。','held-note'))
+  const targets={line:'LINE接続',settings:'店舗・配信設定',forms:'応募・回答フォーム',interviews:'面談予約・Googleカレンダー',tags:'タグ設定'}
+  const grouped=new Map()
+  for(const issue of info?.issues??[]){const key=issue.target??'other';if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(issue)}
+  for(const [target,issues] of grouped){const row=node('section',null,'readiness-issue'),body=node('div',null,'readiness-item');body.append(node('strong',targets[target]??'確認事項'));for(const issue of issues)body.append(node('p',(issue.severity==='advice'?'確認：':'')+issue.message));row.append(body);if(target!=='other'&&!demo&&currentSession?.actor.role==='admin'){const link=node('a',(targets[target]??'設定')+'を開く ↗');link.href=settingsHref(target,channelId,info?.purpose);link.target='_blank';link.rel='noopener noreferrer';row.append(link)}root.append(row)}
+  if(info?.issues?.length&&currentSession?.actor.role!=='admin'&&!demo)root.append(node('p','必要な接続・店舗設定は管理会社マスターに確認してください。','field-hint'))
+  return root
+}
 function resetEditorState(){selectedSteps.clear();multiSelect=false;moveIntent=null;connectIntent=null;metrics=null;metricsBusy=false;presenceInfo=null;presenceSequence++;minimapOpen=false;clearTimeout(saveTimer);undoStack=[];redoStack=[];historyKey='';historyTime=0;matrix=null;saveIssue='';branchOpen=new Map();const canvas=$('#workspace .canvas-scroll');if(canvas){canvas.scrollTop=0;canvas.scrollLeft=0}$('#inspector').scrollTop=0}
 function scheduleSave(){
   clearTimeout(saveTimer)
@@ -74,7 +105,7 @@ function updateSaveIndicator(){
   const u=$('#undo-work'),r=$('#redo-work')
   if(u)u.disabled=!undoStack.length||busy
   if(r)r.disabled=!redoStack.length||busy
-  syncStatusUI();updateValidation();renderPresence()
+  syncStatusUI();renderJourney();updateValidation();renderPresence()
 }
 function workbar(){
   const root=$('#workbar')
@@ -88,8 +119,8 @@ function workbar(){
   const saveBtn=button('下書き保存',()=>save(),'primary');saveBtn.dataset.saveAction='true'
   const auto=button(autosave?'自動保存 ON':'自動保存 OFF',toggleAuto);auto.classList.add('secondary-work');auto.setAttribute('aria-pressed',String(autosave))
   const view=button(viewMode==='basic'?'詳細フロー':'簡単編集',()=>{viewMode=viewMode==='basic'?'graph':'basic';savePrefs();show();choosePiece('workspace')});view.setAttribute('aria-pressed',String(viewMode==='graph'))
-  const guide=button('テスト',()=>{tab='test';show();choosePiece('inspector')})
-  const publish=button('公開管理',()=>{tab='publish';show();choosePiece('inspector')},'primary')
+  const guide=button('テスト',openTestWorkspace)
+  const publish=button('公開管理',openPublicationJourney)
   const utility=button('その他 ▾',openUtilities);utility.classList.add('utility-work')
   const focus=button(focusMode?'集中モード終了':'集中モード',()=>{focusMode=!focusMode;hideLibrary=focusMode;hideInspector=focusMode;savePrefs();applyPanelMode();show()});focus.setAttribute('aria-pressed',String(focusMode));focus.classList.add('desktop-focus')
   if(graph)ops.append(status,undo,redo,auto,view,focus,utility,saveBtn,guide,publish)
@@ -198,7 +229,7 @@ function choosePiece(value){
   document.body.classList.toggle('sheet-open',sheet);$('#sheet-backdrop').hidden=!sheet
   for(const id of ['library','inspector']){const section=$('#'+id),active=sheet&&id===part;section.toggleAttribute('inert',sheet&&!active);if(active){section.setAttribute('role','dialog');section.setAttribute('aria-modal','true')}else{section.removeAttribute('role');section.removeAttribute('aria-modal')}}
   $('#workspace').toggleAttribute('inert',sheet);for(const selector of ['.top','.hero','.mobile'])$(selector)?.toggleAttribute('inert',sheet)
-  for(const id of ['workbar'])$('#'+id).toggleAttribute('inert',sheet)
+  for(const id of ['workbar','journey'])$('#'+id).toggleAttribute('inert',sheet)
   for (const btn of document.querySelectorAll('.mobile button')) {if(btn.dataset.part===part)btn.setAttribute('aria-current','true');else btn.removeAttribute('aria-current')}
   if(sheet&&previous!==part)requestAnimationFrame(()=>{const panel=$('#'+part);panel.scrollTop=0;panel.querySelector('.sheet-close')?.focus({preventScroll:true})});else if(previous!=='workspace'&&part==='workspace'&&sheetFocus?.isConnected)sheetFocus.focus({preventScroll:true})
 }
@@ -230,10 +261,39 @@ function field(label,value,change,options={}) {
 }
 function dialog(title,text,content) {
   const box=$('#dialog')
-  box.classList.remove('template-dialog','composer-dialog')
+  box.classList.remove('template-dialog','composer-dialog','journey-dialog','test-workspace','publish-workspace','wizard-workspace')
   const heading=node('h2',title);heading.tabIndex=-1
   box.replaceChildren(heading,node('p',text),content,button('閉じる',()=>box.close()))
   box.showModal();heading.focus({preventScroll:true});box.scrollTop=0
+}
+function journeyDialog(title,description,content,actions,kind=''){
+  const box=$('#dialog')
+  box.classList.remove('template-dialog','composer-dialog','journey-dialog','test-workspace','publish-workspace','wizard-workspace')
+  box.classList.add('journey-dialog');if(kind)box.classList.add(kind)
+  const header=node('header',null,'journey-modal-head')
+  const heading=node('h2',title);heading.tabIndex=-1
+  const headingBox=node('div');headingBox.append(heading,node('p',description))
+  const close=button('閉じる ×',()=>box.close());close.setAttribute('aria-label','閉じる')
+  header.append(headingBox,close)
+  const body=node('div',null,'journey-scroll');body.append(content)
+  const foot=node('footer',null,'journey-footer');if(actions)foot.append(actions);else foot.append(button('閉じる',()=>box.close()))
+  box.replaceChildren(header,body,foot)
+  if(!box.open)box.showModal()
+  heading.focus({preventScroll:true});body.scrollTop=0
+}
+function renderJourney(){
+  const root=$('#journey');if(!root)return;root.hidden=!graph;if(!graph){root.replaceChildren();delete root.dataset.key;return}
+  const basicOK=!!(graph.name.trim()&&graph.channel&&Object.hasOwn(liveTriggers[graph.purpose]??{},graph.trigger)&&(graph.trigger!=='tag_added'||graph.triggerTag))
+  const valid=basicOK&&!validationIssues().length, saved=!!scenario&&!dirty
+  const tested=saved&&['tested','approved'].includes(scenario.state), approved=saved&&scenario.state==='approved', done=matchingPublished()
+  const current=done?4:approved||tested?3:valid&&saved?2:basicOK?1:0
+  const key=[current,done,saved].join(':');if(root.dataset.key===key&&root.childElementCount)return;root.dataset.key=key
+  const labels=['基本設定','ステップ作成','テスト','公開確認','公開完了']
+  const acts=[()=>{tab='settings';show();choosePiece('inspector')},()=>{tab='edit';show();choosePiece('workspace')},openTestWorkspace,openPublicationJourney,()=>showPublishedCompletion()]
+  const nav=node('nav',null,'journey-stages');nav.setAttribute('aria-label','作成から公開までの進行状況')
+  for(const [i,label] of labels.entries()){const b=button(label,acts[i],'journey-stage');const badge=node('span',i<current||done?'✓':String(i+1),'journey-number');b.prepend(badge);b.classList.toggle('completed',i<current||done);if(i===current)b.setAttribute('aria-current','step');if(i===4&&!done)b.disabled=true;if(i===3&&!saved)b.disabled=true;nav.append(b)}
+  const nextLabels=['基本設定を確認','ステップを編集','テストへ進む','公開確認へ進む','公開内容を確認']
+  const next=button(nextLabels[current],acts[current],'primary journey-next');root.replaceChildren(nav,next)
 }
 function ask(question,description='現在の画面で保存していない内容は破棄されます。') {
   return new Promise(resolve=>{
@@ -269,7 +329,7 @@ function limits() { return validate(graph,true) }
 const currentNode=()=>graph?.nodes.find(item=>item.id===selection)
 function syncScenarioURL(){if(!store)return;const url=new URL(location.href);url.searchParams.set('store',store.id);if(scenario?.id)url.searchParams.set('scenario',scenario.id);else url.searchParams.delete('scenario');history.replaceState(null,'',url)}
 function setupFlow(data) {
-  resetEditorState();person={...person,timeline:[]}
+  resetEditorState();resetPerson();readiness=null;readinessSeq++
   scenario=data??null
   localCreateKey=null
   pendingMeta={folder:scenario?.folder??'',is_template:scenario?.is_template??false}
@@ -279,7 +339,7 @@ function setupFlow(data) {
   simulation=null
   selection=graph?.entry
   tab='edit'
-  syncScenarioURL();show();pollPresence()
+  syncScenarioURL();show();pollPresence();refreshReadiness().catch(()=>{})
 }
 
 async function refreshStore(next){
@@ -296,11 +356,11 @@ async function refreshStore(next){
   const candidates=recoveryCandidates().filter(r=>{const saved=selected?.id===r.id?selected:null;if(saved&&JSON.stringify(saved.graph)===JSON.stringify(r.graph)){clearRecovery(r.storageKey);return false}return true})
   if(candidates.length){const box=node('div',null,'insert-picker');for(const recovery of candidates.slice(0,15)){const saved=newList.find(s=>s.id===recovery.id),conflict=!!recovery.id&&(!saved||saved.revision!==recovery.revision);const row=node('section',null,'rule-row');row.append(node('strong',recovery.graph.name||'名称未設定'),node('p',new Date(recovery.at).toLocaleString('ja-JP')+(conflict?' · 別の下書きに復元':' · 復元可能'),'field-hint'));row.append(button('この下書きを復元',async()=>{let latest;if(!conflict&&saved)latest=demo?saved:await api(base()+'/'+saved.id);$('#dialog').close();if(latest&&latest.revision===recovery.revision){setupFlow(latest);graph=structuredClone(recovery.graph);dirty=true;selection=graph.entry;show();scheduleSave()}else draftScenario(recovery.graph,null,recovery.meta,!recovery.id&&!conflict&&recovery.key?recovery.key:undefined);recoverWrite();clearRecovery(recovery.storageKey);if(conflict)announce('別の新規下書きとして復元しました。')},'primary'),button('この復元候補を破棄',()=>{clearRecovery(recovery.storageKey);row.remove();if(!box.children.length)$('#dialog').close()}));box.append(row)}dialog('未保存の下書きを復元','別タブや前回の編集を選択できます。サーバー版を上書きしません。',box)}
 }
-async function navigateSafely(action){if(navigationBusy||busy)return false;navigationBusy=true;$('#store').disabled=true;try{if(!await finishBeforeLeave())return false;navLoading=true;$('#layout').inert=true;$('#workbar').inert=true;await action();return true}finally{navLoading=false;navigationBusy=false;$('#store').disabled=false;$('#layout').inert=false;$('#workbar').inert=mobileUI()&&part!=='workspace';scheduleSave()}}
+async function navigateSafely(action){if(navigationBusy||busy)return false;navigationBusy=true;$('#store').disabled=true;try{if(!await finishBeforeLeave())return false;navLoading=true;document.body.classList.add('store-loading');$('#layout').inert=true;$('#workbar').inert=true;await action();return true}finally{navLoading=false;document.body.classList.remove('store-loading');navigationBusy=false;$('#store').disabled=false;$('#layout').inert=false;$('#workbar').inert=mobileUI()&&part!=='workspace';if($('#journey'))$('#journey').inert=mobileUI()&&part!=='workspace';scheduleSave()}}
 async function openScenario(id){if(scenario?.id===id)return choosePiece('workspace');await navigateSafely(async()=>{const next=demo?structuredClone(demoRecords().find(item=>item.id===id)):await api(base()+'/'+id);setupFlow(next);choosePiece('workspace');announce('')})}
 
 function draftScenario(flow,templateInfo,meta={folder:'',is_template:false},createKey){
-  resetEditorState();person={...person,timeline:[]}
+  resetEditorState();resetPerson();readiness=null;readinessSeq++
   scenario=null
   pendingMeta=meta
   localCreateKey=createKey??crypto.randomUUID()
@@ -319,7 +379,7 @@ function draftScenario(flow,templateInfo,meta={folder:'',is_template:false},crea
   syncScenarioURL();show()
   choosePiece('workspace')
   recoverWrite();scheduleSave()
-  announce(templateInfo?'タグ別テンプレートを下書きに読み込みました。文面・待機・分岐を自由に編集できます。':'下書きを作成しました。名称と公式アカウントを確認してください。')
+  announce(templateInfo?'タグ別テンプレートを下書きに読み込みました。文面・待機・分岐を自由に編集できます。':'下書きを作成しました。内容を確認して「テストへ進む」を押してください。')
 }
 function newScenario(purpose='customer',template) {
   const preferred=channels.find(item=>item.purpose===purpose)??(!template?.dedicated&&channels.find(item=>item.purpose==='shared'))
@@ -546,7 +606,7 @@ async function save(automatic=false) {
       recoverWrite()
       library()
       // Saving must not replace the canvas while a pointer is dragging or a field is being edited.
-      if(tab!=='edit'&&!$('#dialog').open)inspector();syncStatusUI()
+      if(tab!=='edit'&&!$('#dialog').open)inspector();syncStatusUI();refreshReadiness().catch(()=>{})
       if(!automatic)announce('下書きを保存しました。公開中の配信には反映されません。')
     }catch(error){
       saveIssue=error.status===409?'他の変更があります。端末の下書きを保持しています。':error.message
@@ -588,7 +648,9 @@ async function transition(action,reason) {
     const labels={test:'テスト結果を記録しました。',approve:'下書きを承認しました。',publish:'公開版を保存しました。',
       stop:'シナリオを停止しました。',resume:'シナリオを再開しました。'}
     announce(labels[action])
-    if(action==='test'||action==='approve')tab='publish'
+    if(action==='test'||action==='approve'||action==='publish')tab='publish'
+    if(action==='publish'){simulation=null;matrix=null}
+    readiness=null;refreshReadiness().catch(()=>{})
     show()
   } finally {busy=false;updateSaveIndicator()}
 }
@@ -921,7 +983,7 @@ function settings() {
     }),{items:Object.fromEntries(Object.entries(purposes).filter(([key])=>key===graph.purpose||channels.some(c=>c.purpose===key||c.purpose==='shared')))}),
     field('配信先の公式アカウント',graph.channel,set('channel'),{items:opts}))
   if (Object.keys(opts).length<2) wrap.append(node('p','対象店舗に対応する公式アカウントを登録してください。','field-hint'))
-  const available={...liveTriggers[graph.purpose]}
+  const available=Object.fromEntries(Object.keys(liveTriggers[graph.purpose]).map(k=>[k,triggerText(k)]))
   if(graph.purpose==='recruitment'&&!applicantCatalog.enabled){delete available.tag_added;delete available.tag_campaign}
   if(!Object.hasOwn(available,graph.trigger)){
     available[graph.trigger]=(triggers[graph.trigger]??graph.trigger)+'（下書き・テスト専用）'
@@ -976,7 +1038,7 @@ async function testDelivery() {
   box.append(field('テスト送信するステップ',selected,value=>{selected=value},{
     items:Object.fromEntries(results.map(item=>[item.id,item.name])),
   }))
-  if (!candidates.length) box.append(node('p','店舗・LINE接続画面で、同じ公式アカウントと用途のテスト利用者を新たに認証してください。'))
+  if (!candidates.length) {box.append(node('p','この公式LINE・用途の認証済みテスト利用者がいません。'));if(currentSession?.actor.role==='admin'){const a=node('a','テスト利用者の登録画面を開く ↗','studio-link');a.href=settingsHref('line').replace(/#line-(connection|connections)$/,'#line-tester');a.target='_blank';a.rel='noopener noreferrer';box.append(a)}else box.append(node('p','管理会社マスターへテスト利用者の登録を依頼してください。','field-hint'))}
   else box.append(field('認証済みテスト利用者',recipient,value=>{recipient=value},{
     items:Object.fromEntries(candidates.map(({id,verified_at})=>[id,'認証 '+new Date(verified_at).toLocaleString('ja-JP')+' · '+id.slice(0,8)])),
   }),button('テスト利用者に1通送る',async()=>{
@@ -990,18 +1052,18 @@ async function testDelivery() {
     for(const item of jobs) statuses.append(node('li',new Date(item.created_at).toLocaleString('ja-JP')+' · '+labels[item.status]))
     box.append(statuses)
   }
-  dialog('登録済み利用者へのテスト送信','シミュレーションで選ばれたメッセージをテスト表示付きで1通送ります。',box)
+  box.append(button('模擬テストに戻る',renderTestWorkspace));dialog('登録済み利用者へのテスト送信','シミュレーションで選ばれたメッセージをテスト表示付きで1通送ります。',box)
 }
 
-function resultView() {
+function resultView(wide=false) {
   const wrap=node('div')
-  wrap.append(node('p','配信を行わない模擬テストです。実際のLINE送信は別のボタンで実施します。','field-hint'))
+  wrap.classList.add('test-content');wrap.append(node('p','実際のLINEには送信しない模擬テストです。応募者ごとの配信順序と送らない条件を確認します。','field-hint'))
   const failures=limits()
   if (failures.length) {
     const list=node('ul',null,'errors')
     for (const failure of failures) {
       const row=node('li')
-      row.append(failure.nodeId?button(failure.message,()=>selectStep(failure.nodeId)):node('p',failure.message,'empty'))
+      row.append(failure.nodeId?button(failure.message,()=>{if(wide)$('#dialog').close();selectStep(failure.nodeId)}):node('p',failure.message,'empty'))
       list.append(row)
     }
     wrap.append(list)
@@ -1021,7 +1083,7 @@ function resultView() {
     person={...person,booked:value==='booked',stopped:value==='stopped',human:value==='human',
       blocked:false,cancelled:false,marketingStopped:false,consent:value!=='noConsent',adult:value!=='unverified'}
     simulation=null;matrix=null
-    show()
+    if(wide){show();renderTestWorkspace()}else show()
   },{items:{unbooked:'未予約・同意あり',booked:'予約済み',unverified:'年齢未確認',noConsent:'同意なし',stopped:'全配信停止',human:'有人対応中'}})
   box.append(presets,field('シミュレーション開始日時（'+person.zone+'）',person.start,set('start'),{type:'datetime-local'}))
   const more=node('details')
@@ -1041,13 +1103,13 @@ function resultView() {
   more.append(counts)
   box.append(more,timelineEditor(),button('シミュレーションを実行',()=>{
     simulation=simulate(graph,person);matrix=simulationCases(graph,person)
-    show()
+    if(wide){show();renderTestWorkspace()}else show()
   },'primary'))
-  wrap.append(box)
+  box.className='test-conditions';wrap.append(box)
   const output=node('div')
   output.id='simulation-result'
   if (simulation) {
-    const trace=button('通過経路をフローで見る',()=>{choosePiece('workspace');refreshCardSelection();if(mobileUI())$('#workspace').scrollIntoView({block:'start'})});output.append(trace)
+    const trace=button('通過経路をフローで見る',()=>{if(wide)$('#dialog').close();choosePiece('workspace');refreshCardSelection();if(mobileUI())$('#workspace').scrollIntoView({block:'start'})});output.append(trace)
     const list=node('ol',null,'log')
     const formatter=new Intl.DateTimeFormat('ja-JP',{timeZone:person.zone,month:'numeric',day:'numeric',
       hour:'2-digit',minute:'2-digit',hourCycle:'h23'})
@@ -1055,7 +1117,7 @@ function resultView() {
       const row=node('li',null,event.state)
       const time=node('time',formatter.format(new Date(event.at)))
       time.dateTime=event.at
-      row.append(time,node('strong',event.name),node('p',(event.state==='held'?'保留・除外　':'')+event.detail));if(event.type!=='event')row.append(button('ステップへ移動',()=>selectStep(event.id)))
+      row.append(time,node('strong',event.name),node('p',(event.state==='held'?'保留・除外　':'')+event.detail));if(event.type!=='event')row.append(button('ステップへ移動',()=>{if(wide)$('#dialog').close();selectStep(event.id)}))
       if (event.message) {
         const detail=node('details')
         detail.append(node('summary','送信内容'),messagePreview(event.message,event.rich))
@@ -1071,7 +1133,7 @@ function resultView() {
       timeline.append(node('time',formatter.format(new Date(event.at))),event.message?messagePreview(event.message,event.rich):node('p','送信なし：'+event.detail,'held-note'))
     }
     if(timeline.children.length===1)timeline.append(node('p','この条件では送信されません。','field-hint'))
-    output.append(timeline,list)
+    const logDetail=node('details',null,'test-log');logDetail.append(node('summary','ステップごとの実行詳細（'+simulation.events.length+'件）'),list);output.append(timeline,logDetail)
   }
   wrap.append(output)
   const matrixRoot=node('div',null,'matrix-result');matrixRoot.id='matrix-result'
@@ -1080,28 +1142,37 @@ function resultView() {
     for(const row of matrix){
       const entry=node('details',null,'matrix-row')
       const held=row.result.events.filter(e=>e.state==='held').length
-      entry.append(node('summary',row.label+' · '+(row.result.errors.length?'要確認':row.result.count+'通／保留 '+held+'件')))
+      entry.append(node('summary',row.label+' · '+(row.result.errors.length?'要確認':row.result.count+'通予定'+(held?' ／ 送信見送り '+held+'件':''))))
       for(const event of row.result.events.filter(e=>e.message||e.state==='held'))entry.append(node('p',event.name+'：'+(event.message??event.detail),'field-hint'))
       for(const error of row.result.errors)entry.append(node('p',error.message,'held-note'))
       matrixRoot.append(entry)
     }
   }
-  wrap.append(matrixRoot)
+  if(wide)box.after(matrixRoot);else wrap.append(matrixRoot)
+  const actions=node('div',null,'test-actions');if(wide)actions.append(button('編集へ戻る',()=>{$('#dialog').close();tab='edit';show();choosePiece('workspace')}));else wrap.append(actions)
   if(person.timeline?.length&&simulation)wrap.append(node('p','時系列テストは模擬専用です。実LINEへテスト送信する場合は状態変化をすべて消して再実行してください。','field-hint'))
   if (!demo && scenario && !dirty && simulation?.count>0 && !person.timeline?.length) {
     const send=button('実LINEテスト送信・履歴',testDelivery)
     send.id='test-delivery'
-    wrap.append(send)
+    actions.append(send)
   }
-  if (scenario?.state==='draft'&&!dirty) {
-    const mark=button('模擬テスト済みにする',()=>transition('test'))
+  if (scenario?.state==='draft'&&!dirty&&!matchingPublished()&&!scenario.is_template) {
+    const mark=button(wide?'テスト完了・公開確認へ':'模擬テスト済みにする',async()=>{await transition('test');if(wide){$('#dialog').close();await openPublicationJourney()}},'primary')
     mark.id='mark-tested'
-    mark.disabled=!simulation||!!simulation.errors.length||!!failures.length
-    wrap.append(mark)
-  }
-  return wrap
+    mark.disabled=!simulation||!!simulation.errors.length||!!failures.length||!!validationIssues().length||!!matrix?.some(row=>row.result.errors.length)
+    actions.append(mark)
+  } else if(wide&&scenario&&!dirty)actions.append(button('公開管理へ',()=>{$('#dialog').close();return openPublicationJourney()},'primary'))
+  return wide?{body:wrap,actions}:wrap
 }
 
+function testEntry(){const w=node('div');w.append(node('h3','配信前テスト'),node('p','模擬テストでメッセージ・待機・分岐を確認します。実際のLINEには送信しません。','field-hint'),button('テスト専用画面を開く',openTestWorkspace,'primary'));if(simulation)w.append(node('p','直前の模擬結果：'+simulation.count+'通／'+simulation.errors.length+'件のエラー'));return w}
+function renderTestWorkspace(){const result=resultView(true);journeyDialog('配信前テスト',store.name+' ／ '+graph.name,result.body,result.actions,'test-workspace')}
+async function openTestWorkspace(){
+  if(!graph||busy||navLoading)return
+  if(dirty||!scenario){try{await save()}catch(e){announce(e.message,true);return}}
+  if(!scenario||dirty){announce('下書きの保存を確認してください。',true);return}
+  tab='test';show();choosePiece('workspace');renderTestWorkspace()
+}
 function stepDescription(flow,n){
   const name=id=>flow.nodes.find(v=>v.id===id)?.name??'接続なし'
   const lines=[n.name+'（'+(kinds[n.type]??n.type)+'）']
@@ -1161,22 +1232,24 @@ async function reviewPublication(){
   if(!scenario||dirty||scenario.is_template)return
   const id=scenario.id,rev=scenario.revision
   let info
+  const prep=await refreshReadiness()
   if(demo){const stored=scenario.versions?.find(v=>v.version===scenario.published_version);info={published:stored,related:[]}}
   else info=await api(base()+'/'+id+'/publication-review')
   if(scenario.id!==id||scenario.revision!==rev||dirty||info.revision!==undefined&&info.revision!==rev)throw new Error('下書きが変更されました。再表示してください。')
   const box=node('div',null,'publish-review')
   const line=channels.find(c=>c.id===graph.channel)
   box.append(node('h3','送信先：'+store.name+' / '+(line?.label??'未設定')),
-    node('p','開始条件：'+(triggers[graph.trigger]??graph.trigger)+(graph.triggerTag?' / '+(applicantTagOptions(graph.triggerTag)[graph.triggerTag]??graph.triggerTag):'')),
+    node('p','開始条件：'+triggerText(graph.trigger)+(graph.triggerTag?' / '+(applicantTagOptions(graph.triggerTag)[graph.triggerTag]??graph.triggerTag):'')),
     node('p','配信対象は開始イベント・同意・店舗設定などにより送信時に判定されます。','field-hint'))
+  box.append(readinessCard(prep?.draft,graph.channel))
   const sample={...person,start:person.start||nowInZone(person.zone)}
   const cases=simulationCases(graph,sample)
   const results=node('div',null,'matrix-result')
-  for(const c of cases)results.append(node('p',c.label+'：'+(c.result.errors.length?'要確認':c.result.count+'通／保留 '+c.result.events.filter(e=>e.state==='held').length+'件')))
-  box.append(results)
+  for(const c of cases)results.append(node('p',c.label+'：'+(c.result.errors.length?'要確認':c.result.count+'通予定 ／ 送信見送り '+c.result.events.filter(e=>e.state==='held').length+'件')))
+  const casesBox=node('details',null,'review-cases');casesBox.append(node('summary','模擬テストの確認（対象者別）'),results);box.append(casesBox)
   const messages=node('details',null,'diff-details')
-  messages.append(node('summary','公開するLINEメッセージ（'+graph.nodes.filter(n=>n.type==='message').length+'ステップ）'))
-  for(const item of graph.nodes.filter(n=>n.type==='message'))messages.append(node('h4',item.name),messagePreview(item.body,item.rich))
+  messages.append(node('summary','公開するLINEメッセージ（'+graph.nodes.filter(n=>n.type==='message').length+'ステップ）'));messages.open=true
+  for(const item of graph.nodes.filter(n=>n.type==='message'))messages.append(node('h4',item.name),messagePreview(renderMessage(item.body,sample).message??item.body,item.rich))
   if(messages.children.length>1)box.append(messages)
   box.append(node('h3',info.published?'現公開版と下書きの差分':'初回公開の内容'),diffSummary(info.published?.graph,graph))
   if(info.related.length){
@@ -1184,17 +1257,45 @@ async function reviewPublication(){
     for(const related of info.related)box.append(node('p',related.name+'（v'+related.version+'）','copy-warning'))
     box.append(node('p','条件が同じため重複する可能性があります。配信内容を確認してください。','field-hint'))
   }else box.append(node('p','同じLINE・開始条件の公開シナリオは見つかりませんでした。異なる開始条件や他機能の通知との重複を保証するものではありません。','field-hint'))
-  const check=field('店舗・LINE・対象条件・配信内容を確認しました',false,value=>{publish.disabled=!value||limits().length>0||cases.some(c=>c.result.errors.length)},{type:'checkbox'})
-  const publish=button('この下書きを公開する',async()=>{
-    if(scenario.id!==id||scenario.revision!==rev||dirty)throw new Error('状態が変わりました。再確認してください。')
-    await transition('publish');$('#dialog').close()
-  },'primary template-use')
-  publish.disabled=true
-  box.append(check,publish)
-  dialog('公開前の最終確認','ここで公開が確定します。テストは実際の配信を行いません。',box)
-  $('#dialog').classList.add('template-dialog')
+  const actions=node('div',null,'publish-actions')
+  if(scenario.state==='tested'){
+    const approve=button('確認して承認する',async()=>{if(scenario.id!==id||scenario.revision!==rev||dirty)throw new Error('状態が変わりました。再確認してください。');await transition('approve');await reviewPublication()},'primary')
+    approve.disabled=!!validationIssues().length||cases.some(c=>c.result.errors.length)
+    actions.append(node('p','承認だけでは公開されません。次に最終確認を行います。','field-hint'),approve)
+  }else{
+    const reason=node('p','確認のチェックを入れると公開できます。','field-hint')
+    const check=field('店舗・LINE・対象条件・配信内容を確認しました',false,value=>{publish.disabled=!value||validationIssues().length>0||cases.some(c=>c.result.errors.length);reason.textContent=publish.disabled?'設定・確認内容を見直してください。':prep?.draft?.status==='ready'?'公開後は新しい開始イベントから、対象者ごとの送信条件に従って配信されます。':'公開版が確定します。設定不足が解消され、送信条件を満たすと配信されます。'},{type:'checkbox'})
+    const publish=button(prep?.draft?.status==='ready'?'この下書きを公開する':'公開版を保存（配信準備要確認）',async()=>{
+      if(scenario.id!==id||scenario.revision!==rev||dirty)throw new Error('状態が変わりました。再確認してください。')
+      publish.disabled=true;try{await transition('publish');$('#dialog').close();await showPublishedCompletion(true)}finally{if(publish.isConnected)publish.disabled=false}
+    },'primary')
+    publish.disabled=true;actions.append(check,reason,publish)
+  }
+  journeyDialog('公開前の最終確認',scenario.state==='tested'?'テスト済みの内容を確認して承認します。':'確認後に公開版が確定します。既存の承認・配信条件は維持されます。',box,actions,'publish-workspace')
 }
 
+async function openPublicationJourney(){
+  if(!graph||busy||navLoading)return
+  if(dirty||!scenario){try{await save()}catch(e){announce(e.message,true);return}}
+  if(!scenario||dirty)return
+  tab='publish';show()
+  if(scenario.is_template){choosePiece('inspector');return}
+  if(matchingPublished()){choosePiece('inspector');await refreshReadiness();if(tab==='publish'&&!mobileUI())inspector();return}
+  if(scenario.state==='draft')return openTestWorkspace()
+  choosePiece('workspace');await reviewPublication()
+}
+async function showPublishedCompletion(justPublished=false){
+  if(!scenario?.published_version)return
+  const id=scenario.id,revision=scenario.revision,version=scenario.published_version
+  const [prep,stored]=await Promise.all([refreshReadiness(),demo?scenario.versions.find(v=>v.version===version):api(base()+'/'+id+'/versions/'+version)])
+  if(scenario?.id!==id||scenario.revision!==revision)return
+  const flow=stored.graph,box=node('div',null,'completion-content')
+  const badge=node('div',null,'completion-badge');badge.append(node('span','✓'),node('h3',justPublished?'公開版の保存が完了しました':'公開版 v'+version));box.append(badge)
+  const details=node('dl',null,'completion-details');for(const [label,value] of [['シナリオ',flow.name],['店舗',store.name],['公式LINE',channels.find(c=>c.id===flow.channel)?.label??'登録情報を確認'],['開始条件',triggerText(flow.trigger)],['公開日時',new Date(stored.published_at).toLocaleString('ja-JP')]]){details.append(node('dt',label),node('dd',value))}box.append(details,readinessCard(prep?.published,flow.channel))
+  if(!matchingPublished())box.append(node('p','現在の下書きにはまだ公開版へ反映していない変更があります。','held-note'))
+  const actions=node('div',null,'completion-actions');actions.append(button('シナリオ一覧へ',()=>{$('#dialog').close();choosePiece('library')}),button('公開版・実績を見る',()=>{$('#dialog').close();tab='metrics';show();choosePiece('inspector');loadMetrics()},'primary'))
+  journeyDialog('公開完了','公開版 v'+version+' · 実際の配信状況は実績画面から確認できます。',box,actions,'publish-workspace')
+}
 function publication() {
   const wrap=node('div')
   if (!scenario || dirty) {
@@ -1202,12 +1303,13 @@ function publication() {
     return wrap
   }
   if(scenario.is_template){wrap.append(node('p','このテンプレート自体は配信されません。複製して配信シナリオを作成します。','field-hint'),button('テンプレートから新規シナリオを作成',()=>openCopy(graph,store,false,scenario.folder),'primary'));return wrap}
-  wrap.append(pill(steps[scenario.state]),node('p',scenario.published_version?'公開版 v'+scenario.published_version+
+  if(matchingPublished()){wrap.append(pill('公開済み v'+scenario.published_version,'good'),readinessCard(readiness?.published,scenario.published_channel??graph.channel),button('公開内容を確認',showPublishedCompletion,'primary'))}
+  else wrap.append(pill(steps[scenario.state]),node('p',scenario.published_version?'公開版 v'+scenario.published_version+
     (scenario.stopped?' · 停止中':''):'公開版はまだありません。','empty'))
   if (!demo) wrap.append(node('p',(graph.purpose==='recruitment'?'採用向け':'顧客向け')+'の対応イベントが発生すると、有効な店舗で対象者と最新の配信条件を照合します。','field-hint'))
   const row=node('div',null,'controls')
-  if (scenario.state==='draft') row.append(button('配信前テストへ',()=>{tab='test';show()}))
-  if (scenario.state==='tested') row.append(button('下書きを承認',()=>transition('approve'),'primary'))
+  if (scenario.state==='draft'&&!matchingPublished()) row.append(button('配信前テストへ',openTestWorkspace))
+  if (scenario.state==='tested') row.append(button('承認・公開確認へ',reviewPublication,'primary'))
   if (scenario.state==='approved') row.append(button('公開前の最終確認',reviewPublication,'primary'))
   if (scenario.published_version) {
     const action=scenario.stopped?'resume':'stop'
@@ -1257,12 +1359,12 @@ function inspector() {
   const tabs=node('nav',null,'tabs')
   tabs.setAttribute('aria-label','シナリオの設定')
   for (const [id,label] of Object.entries({edit:'ステップ',settings:'設定',test:'テスト',publish:'公開版',metrics:'実績'})) {
-    const btn=button(label,()=>{tab=id;show();if(id==='metrics')loadMetrics()},tab===id?'active':'')
+    const btn=button(label,()=>{if(id==='test')return openTestWorkspace();tab=id;show();if(id==='metrics')loadMetrics()},tab===id?'active':'')
     btn.setAttribute('aria-pressed',String(tab===id))
     tabs.append(btn)
   }
   const panel=node('div',null,'panelbody')
-  const chosen={edit:editStep,settings,test:resultView,publish:publication,metrics:metricsView}
+  const chosen={edit:editStep,settings,test:testEntry,publish:publication,metrics:metricsView}
   const validation=node('div',null,'validation-panel');validation.id='validation-panel';panel.append(validation,chosen[tab]())
   const head=panelHead('設定・プレビュー');head.append(sheetClose());root.replaceChildren(head,tabs,panel);updateValidation()
 }
@@ -1297,7 +1399,7 @@ function paintValidation(){
   const panel=$('#validation-panel');if(!panel)return
   const sig=JSON.stringify(issues);if(panel.dataset.signature===sig)return;panel.dataset.signature=sig
   const summary=node('details',null,'live-check '+(issues.length?'has-errors':'no-errors'))
-  summary.append(node('summary',issues.length?'⚠ 設定の確認 '+issues.length+'件':'✓ フローの設定に問題なし'))
+  summary.append(node('summary',issues.length?'⚠ 設定の確認 '+issues.length+'件':'✓ フローの構成に問題なし（配信準備は別）'))
   const list=node('div',null,'validation-list')
   for(const issue of issues){const b=button(issue.message,()=>{if(issue.nodeId)selectStep(issue.nodeId);else{tab='settings';show();choosePiece('inspector')}});list.append(b)}
   if(!issues.length)list.append(node('p','実配信の開始条件・契約・LINE接続は公開前に別途確認します。','field-hint'))
@@ -1357,20 +1459,76 @@ function richEditor(item){
   rich.buttons.forEach((b,i)=>{const r=node('section',null,'rule-row');r.append(node('strong','リンクボタン '+(i+1)),field('表示名',b.label,v=>update(()=>{b.label=v}),{attributes:{maxlength:'20'}}),field('リンク先URL',b.url,v=>update(()=>{b.url=v}),{attributes:{maxlength:'2000',placeholder:'https://…'}}),button('予約URLをボタンに設定',()=>update(()=>{const marker=graph.purpose==='recruitment'?'{{interview_link}}':'{{customer_link}}';b.url=marker;if(!item.body.includes(marker))item.body+='\n'+marker})),button('ボタンを削除',()=>update(()=>{rich.buttons.splice(i,1)})));wrap.append(r)})
   const add=button('＋ リンクボタンを追加',()=>update(()=>{rich.buttons.push({label:'詳細を見る',url:''})}));add.disabled=rich.buttons.length>=3;wrap.append(add);return wrap
 }
-function openWizard(empty=false){
-  const box=node('div',null,'wizard-box')
-  let purpose=channels.some(c=>c.purpose==='recruitment'||c.purpose==='shared')?'recruitment':'customer',name='',channel='',trigger='',tag='',first='',follow='',minutes=1440,unit=1440,amount=1,skipBooked=true,stage=0
+function openWizard(empty=false,option={}){
   const choices=Object.fromEntries(Object.entries(purposes).filter(([key])=>channels.some(c=>c.purpose===key||c.purpose==='shared')))
-  function defaults(){channel=channels.find(c=>c.purpose===purpose)?.id??channels.find(c=>c.purpose==='shared')?.id??'';trigger=purpose==='recruitment'?'form':'follow';name=purpose==='recruitment'?'応募受付・面談予約案内':'友だち追加・ご案内';first=purpose==='recruitment'?'{{store}}の採用窓口です。ご応募ありがとうございます。面談のご予約はこちらからお願いします。\n{{interview_link}}':'{{name}}さん、友だち追加ありがとうございます。{{store}}です。';follow=purpose==='recruitment'?'面談日時のご希望が決まりましたらこちらからご予約ください。\n{{interview_link}}':''}
-  defaults()
-  function candidate(){const flow=wizardFlow({purpose,name,channel,trigger,triggerTag:tag,first,follow,minutes,skipBooked});if(empty){flow.entry='end';flow.nodes=[{id:'end',type:'end',name:'終了'}]}return flow}
-  function render(){box.replaceChildren();box.append(node('p','目的・開始条件 → メッセージ → 確認　 '+(stage+1)+'/3','wizard-progress'))
-    if(stage===0){box.append(field('用途',purpose,v=>{purpose=v;defaults();render()},{items:choices}),field('シナリオ名',name,v=>{name=v},{event:'input',attributes:{maxlength:'100'}}),field('配信する公式LINE',channel,v=>{channel=v},{items:Object.fromEntries(channels.filter(c=>c.purpose===purpose||c.purpose==='shared').map(c=>[c.id,c.label]))}),field('何をきっかけに開始しますか？',trigger,v=>{trigger=v;render()},{items:Object.fromEntries(Object.entries(liveTriggers[purpose]).filter(([k])=>k!=='tag_campaign'&&(k!=='tag_added'||applicantCatalog.enabled)))}));if(trigger==='tag_added')box.append(field('きっかけのタグ',tag,v=>{tag=v},{items:applicantTagOptions(tag)}))}
-    if(stage===1&&!empty){box.append(field('最初に送るメッセージ',first,v=>{first=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内文（不要なら空欄）',follow,v=>{follow=v},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),field('再案内までの時間',amount,v=>{amount=v;minutes=amount*unit},{type:'number',event:'input',attributes:{min:'1',max:'525600'}}),field('時間の単位',String(unit),v=>{unit=Number(v);minutes=amount*unit},{items:{'1':'分','60':'時間','1440':'日'}}),field('予約した方には再案内しない',skipBooked,v=>{skipBooked=v},{type:'checkbox'}),node('p','同意・店長対応・停止など実際の送信直前条件も従来どおり確認します。','field-hint'))}
-    if(stage===2){const flow=candidate(),errs=validate(flow,true);box.append(node('h3',flow.name),node('p','開始：'+triggers[trigger]+' ／ '+channels.find(c=>c.id===channel)?.label));for(const n of stepOutline(flow))box.append(node('p',icons[n.type]+' '+n.name,'wizard-step'));for(const err of errs)box.append(node('p',err.message,'held-note'));const create=button('この内容で下書きを作成',()=>{$('#dialog').close();draftScenario(flow)},'primary');create.disabled=!!errs.length;box.append(create)}
-    const nav=node('div',null,'controls');if(stage>0)nav.append(button('戻る',()=>{stage=empty?0:stage-1;render()}));if(stage<2)nav.append(button('次へ',()=>{if(stage===0&&(!name.trim()||!channel||trigger==='tag_added'&&!tag))throw new Error('名称・LINE・開始条件を選択してください。');stage=empty?2:stage+1;render()},'primary'));box.append(nav)
+  let purpose=option.purpose??(choices.recruitment?'recruitment':'customer'),name='',channel='',trigger='',tag='',first='',follow='',minutes=1440,unit=1440,amount=1,skipBooked=true,stage=0
+  function defaults(presetOption={}){
+    channel=channels.find(c=>c.purpose===purpose)?.id??channels.find(c=>c.purpose==='shared')?.id??''
+    trigger=presetOption.trigger??(purpose==='recruitment'?'form':'follow')
+    name=presetOption.name??(empty?'新規シナリオ':purpose==='recruitment'?'応募受付・面談予約案内':'友だち追加・ご案内')
+    first=presetOption.body??(purpose==='recruitment'?'{{store}}の採用窓口です。ご応募ありがとうございます。面談のご予約はこちらからお願いします。\n{{interview_link}}':'{{name}}さん、友だち追加ありがとうございます。{{store}}です。')
+    follow=presetOption.follow??(purpose==='recruitment'&&!presetOption.trigger?'面談日時のご希望が決まりましたらこちらからご予約ください。\n{{interview_link}}':'')
+    if(presetOption.dedicated)channel=channels.find(c=>c.purpose==='recruitment')?.id??''
+    tag='';amount=1;unit=1440;minutes=1440;skipBooked=true
   }
-  dialog(empty?'新規・空のシナリオ':'かんたん作成ウィザード','目的に合わせて下書きのシナリオを組み立てます。自動公開はしません。',box);render()
+  defaults(option)
+  function candidate(){const flow=wizardFlow({purpose,name,channel,trigger,triggerTag:tag,first,follow,minutes,skipBooked});if(empty){flow.entry='end';flow.nodes=[{id:'end',type:'end',name:'終了'}]}return flow}
+  function render(){
+    const box=node('div',null,'wizard-box'),nav=node('div',null,'wizard-footer')
+    const current=empty?(stage===0?1:2):stage+1,total=empty?2:3
+    box.append(node('p',(empty?'基本設定 → 確認':'基本設定 → メッセージ → 確認')+'　'+current+'/'+total,'wizard-progress'))
+    if(stage===0){
+      box.append(node('div','店舗：'+store.name,'wizard-location'),field('用途',purpose,v=>{purpose=v;defaults();render()},{items:choices}),field('シナリオ名',name,v=>{name=v},{event:'input',attributes:{maxlength:'100'}}),field('配信する公式LINE',channel,v=>{channel=v},{items:{'':'選択してください',...Object.fromEntries(channels.filter(c=>c.purpose===purpose||c.purpose==='shared').map(c=>[c.id,c.label]))}}),field('どのタイミングで始めますか？',trigger,v=>{trigger=v;render()},{items:Object.fromEntries(Object.keys(liveTriggers[purpose]).filter(k=>k!=='tag_campaign'&&(k!=='tag_added'||applicantCatalog.enabled)).map(k=>[k,triggerText(k)]))}))
+      if(trigger==='tag_added')box.append(field('きっかけのタグ',tag,v=>{tag=v},{items:applicantTagOptions(tag)}))
+    }
+    if(stage===1&&!empty){
+      const pair=node('div',null,'wizard-compose')
+      for(const key of ['first','follow']){
+        const section=node('section',null,'wizard-message'),title=key==='first'?'最初に送るメッセージ':'再案内文（不要なら空欄）',preview=node('div',null,'wizard-preview'),label=field(title,key==='first'?first:follow,v=>{if(key==='first')first=v;else follow=v;paint()},{type:'textarea',event:'input',attributes:{maxlength:'5000'}}),textarea=label.querySelector('textarea')
+        function paint(){preview.replaceChildren(node('small','LINEに届く文面（サンプル）'),messagePreview(renderMessage(textarea.value,person).message||'本文を入力してください。'))}
+        const actions=node('div',null,'composer-quick'),vars=purpose==='recruitment'?{name:'お名前',store:'店舗名',interview_link:'面談予約URL',booking:'面談日時'}:{name:'お名前',store:'店舗名',customer_link:'来店予約URL'}
+        for(const [marker,title] of Object.entries(vars))actions.append(button('＋ '+title,()=>{const from=textarea.selectionStart??textarea.value.length,to=textarea.selectionEnd??from,token='{{'+marker+'}}';textarea.setRangeText(token,from,to,'end');if(key==='first')first=textarea.value;else follow=textarea.value;textarea.focus();paint()},'chip'))
+        section.append(label,actions,preview);paint();pair.append(section)
+      }
+      const controls=node('div',null,'row');controls.append(field('再案内までの時間',amount,v=>{amount=v;minutes=amount*unit},{type:'number',event:'input',attributes:{min:'1',max:'525600'}}),field('時間の単位',String(unit),v=>{unit=Number(v);minutes=amount*unit},{items:{'1':'分','60':'時間','1440':'日'}}))
+      box.append(pair,node('p','再案内の文章がある場合のみ、次の待機時間と条件を使います。','field-hint'),controls,field('予約した方には再案内しない',skipBooked,v=>{skipBooked=v},{type:'checkbox'}),node('p','同意・店長対応・停止などは実際の送信直前にも確認します。','field-hint'))
+    }
+    if(stage===2){
+      const flow=candidate(),errs=validate(flow,true),list=node('div',null,'wizard-outline');box.append(node('h3',flow.name),node('p',store.name+' ／ '+(channels.find(c=>c.id===channel)?.label??'LINE未選択')),node('p','開始：'+triggerText(trigger)))
+      if(!empty){for(const n of flow.nodes){const row=node('section',null,'wizard-step');row.append(node('strong',icons[n.type]+' '+n.name));if(n.type==='message')row.append(messagePreview(renderMessage(n.body,person).message??n.body));if(n.type==='wait')row.append(node('p',formatMinutes(n.minutes)+'待機'));if(n.type==='branch')row.append(node('p','予約済み：終了 ／ 未予約：再案内'));list.append(row)}}else list.append(node('p','開始条件 → ＋ でステップ追加 → 終了','wizard-step'))
+      box.append(list);for(const err of errs)box.append(node('p',err.message,'held-note'))
+      const create=button('この内容で下書きを作成',()=>{$('#dialog').close();draftScenario(flow);if(!empty){tab='edit';show()}},'primary');create.disabled=!!errs.length;nav.append(button('戻る',()=>{stage=empty?0:1;render()}),create)
+    }else{
+      if(stage>0)nav.append(button('戻る',()=>{stage--;render()}))
+      else nav.append(button('目的の選択へ',openPurposePicker))
+      nav.append(button(stage===0?'次へ':'内容を確認',()=>{if(stage===0&&(!name.trim()||!channel||trigger==='tag_added'&&!tag))throw new Error('名称・LINE・開始条件を選択してください。');if(stage===1&&(!first.trim()||follow.trim()&&(!Number.isInteger(minutes)||minutes<1||minutes>525600)))throw new Error('本文と再案内の時間を確認してください。');stage=empty?2:stage+1;render()},'primary'))
+    }
+    journeyDialog(empty?'自由にステップを組む':'シナリオをかんたん作成','必要な内容を選んで入力するだけ。下書きなので実際のLINE配信は開始しません。',box,nav,'wizard-workspace')
+  }
+  render()
+}
+function openPurposePicker(){
+  const box=node('div',null,'purpose-picker'),cards=node('div',null,'purpose-cards')
+  const has=(purpose,dedicated=false)=>channels.some(c=>c.purpose===purpose||!dedicated&&c.purpose==='shared')
+  function card(title,desc,icon,fn,recommended=false){
+    const b=button('',fn,'purpose-card'+(recommended?' recommended':''));b.append(node('span',icon,'purpose-icon'),node('strong',title),node('small',desc));if(recommended)b.append(node('span','おすすめ','purpose-recommend'));cards.append(b)
+  }
+  if(has('recruitment')){
+    card('応募者に面談予約を案内したい','応募フォーム送信 → 初回案内 → 未予約の人へ翌日再案内','✉',()=>openWizard(),true)
+    if(has('recruitment',true))card('友だち追加した人に面談を案内したい','友だち追加がきっかけ。予約リンクを案内','＋',()=>openWizard(false,{...recruitmentTemplates[0],follow:'',purpose:'recruitment'}))
+    for(const [i,title,desc,icon] of [[1,'面談予約後の案内を送りたい','予約が確定したときに準備や持ち物を案内','✓'],[2,'面談日程の変更に対応したい','面談日程変更後のフォロー','↗'],[3,'面談キャンセル後に再案内したい','取消後の案内・日程調整','↻']]){
+      card(title,desc,icon,()=>openWizard(false,{...recruitmentTemplates[i],follow:'',purpose:'recruitment'}))
+    }
+  }
+  if(has('customer'))card('友だち追加・来店のご案内','顧客向け公式LINEの案内やフォロー','✉',()=>openWizard(false,{purpose:'customer'}),!has('recruitment'))
+  if(!cards.children.length){box.append(node('p','使える公式LINEがまだありません。先に接続情報を登録してください。','held-note'));const a=node('a','店舗・LINE接続を開く ↗','studio-link');a.href=settingsHref('line',null);a.target='_blank';a.rel='noopener noreferrer';box.append(a)}
+  box.append(cards)
+  const other=node('details',null,'purpose-other');other.append(node('summary','テンプレート・自由編集など'))
+  other.append(button('自分で自由にステップを組む',()=>openWizard(true)),button('保存済みテンプレート',()=>{$('#dialog').close();openSavedTemplates()}))
+  if(has('recruitment'))other.append(button('採用タグ別テンプレートを選ぶ',()=>{$('#dialog').close();openTagTemplates()}),button('採用の基本シナリオ',()=>{$('#dialog').close();newScenario('recruitment')}))
+  if(has('customer'))other.append(button('顧客の基本シナリオ',()=>{$('#dialog').close();newScenario('customer')}))
+  box.append(other)
+  journeyDialog('新規シナリオ','何をしたいですか？ 目的に合う案内を選び、必要な部分だけ調整しましょう。',box,null,'wizard-workspace')
 }
 async function openBatchCopy(source){
   const initial=structuredClone(source),sourceStore=store,sourceCatalog=applicantCatalog,box=node('div',null,'batch-copy'),statuses=node('div'),targets=node('div',null,'batch-targets'),controls=node('div'),configs=new Map(),keys=initial.purpose==='recruitment'?tagKeys(initial):[]
@@ -1423,7 +1581,7 @@ function toggleTheme(){theme=theme==='dark'?'light':'dark';document.documentElem
 function syncStatusUI(){
   if(!graph)return
   const published=scenario?.published_version,stored=scenario?.draft_matches_published??(demo&&!!scenario?.versions?.find(v=>v.version===published&&JSON.stringify(v.graph)===JSON.stringify(graph))),match=!!stored&&!dirty
-  const live=$('#live-status');if(live){live.dataset.status=published?(scenario.stopped?'stopped':'live'):'unpublished';const liveLabel=scenario?.published_channel?channels.find(c=>c.id===scenario.published_channel)?.label:'';live.textContent=published?(scenario.stopped?'■ 公開停止中':'● 稼働中')+' v'+published+(liveLabel&&scenario.published_channel!==graph.channel?'（'+liveLabel+'）':'')+(match?' · 公開版と同じ':' · 下書きは未反映'):(scenario?.is_template?'テンプレート・配信なし':'○ 未公開のシナリオ')}
+  const live=$('#live-status');if(live){const info=readiness?.published;live.dataset.status=published?(scenario.stopped||info?.status==='stopped'?'stopped':info?.status==='ready'?'live':'pending'):'unpublished';const liveLabel=scenario?.published_channel?channels.find(c=>c.id===scenario.published_channel)?.label:'';live.textContent=published?'公開済み v'+published+' · '+(scenario.stopped?'シナリオ停止中':readyLabel(info))+(liveLabel&&scenario.published_channel!==graph.channel?'（'+liveLabel+'）':'')+(match?' · 公開版と一致':' · 下書きは未反映'):(scenario?.is_template?'テンプレート・配信なし':'○ 未公開のシナリオ')}
   const badge=$('#draft-badge');if(badge){badge.textContent=dirty?'編集中・未保存':published?(match?'公開版と一致':'未反映の下書き'):steps[scenario?.state??'draft'];badge.classList.toggle('warn',dirty||!!published&&!match)}
   const title=$('#workbar .work-context strong');if(title)title.textContent=graph.name||'名称未設定'
 }
@@ -1503,25 +1661,7 @@ async function start() {
   $('#new').onclick=async()=>{
     if (!ready || !store) return
     if(navigationBusy||!await finishBeforeLeave())return
-    const content=node('div',null,'controls')
-    content.append(button('保存済みテンプレート',()=>{$('#dialog').close();openSavedTemplates()}))
-    content.append(button('かんたん作成ウィザード',()=>{$('#dialog').close();openWizard()},'primary'))
-    content.append(button('完全に空のシナリオから開始',()=>{$('#dialog').close();openWizard(true)}))
-    for(const [value,label] of Object.entries(purposes).filter(([value])=>channels.some(c=>c.purpose===value||c.purpose==='shared'))) content.append(button(label+'の基本シナリオ',()=>{
-      $('#dialog').close()
-      newScenario(value)
-    },'primary'))
-    content.append(button('採用タグ別テンプレートを選ぶ',()=>{$('#dialog').close();openTagTemplates()},'primary'))
-    for(const template of recruitmentTemplates){
-      const compatible=channels.some(account=>account.purpose==='recruitment'||!template.dedicated&&account.purpose==='shared')
-      const choice=button(template.name,()=>{
-        $('#dialog').close()
-        newScenario('recruitment',template)
-      })
-      choice.disabled=!compatible
-      content.append(choice)
-    }
-    dialog('新規シナリオ','用途や面談の進捗に合うテンプレートを選び、文面・時間を確認してから保存してください。',content)
+    openPurposePicker()
   }
   addEventListener('beforeunload',event=>{if(dirty) event.preventDefault()})
   const session=demo?sessionDemo:await api('/session')
@@ -1543,12 +1683,13 @@ async function start() {
     const next=stores.find(location=>location.id===select.value)
     try{const ok=await navigateSafely(async()=>{searchText='';folderFilter='';libraryKind='all';await refreshStore(next);choosePiece('workspace');announce('')});if(!ok)select.value=store.id}catch(error){select.value=store.id;announce(error.message,true)}
   }
-  const requestedStore=new URLSearchParams(location.search).get('store')
+  const requestedStore=new URLSearchParams(location.search).get('store'),requestedScenario=new URLSearchParams(location.search).get('scenario')
   const initialStore=stores.find(item=>item.id===requestedStore) ?? stores[0]
   select.value=initialStore.id
   await refreshStore(initialStore)
   ready=true
-  setInterval(pollPresence,45000)
+  if(!requestedScenario&&scenarioList.length&&!$('#dialog').open){choosePiece('library')}
+  setInterval(pollPresence,45000);setInterval(()=>{if(!document.hidden&&!$('#dialog').open)refreshReadiness().catch(()=>{})},60000);addEventListener('focus',()=>{if(!$('#dialog').open)refreshReadiness().catch(()=>{})})
   const templateRequest=new URLSearchParams(location.search).get('tag-template')
   if(templateRequest!==null&&initialStore.id===requestedStore&&!$('#dialog').open){const url=new URL(location.href);url.searchParams.delete('tag-template');history.replaceState(null,'',url);openTagTemplates(templateRequest)}
   if (demo) $('#foot').textContent='LINE通信は模擬 · 下書きはこのブラウザに保存'

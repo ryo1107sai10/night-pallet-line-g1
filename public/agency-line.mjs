@@ -91,7 +91,7 @@ async function renderConnection(){
     const data=Object.fromEntries(Object.keys(manualFlags).map(key=>[key,form.elements[key].checked]));data.revision=current.revision;data.reason=reason.value
     await request(prefix+'/console','PATCH',data);await loadConnections();status.textContent='確認記録を保存しました。'
   })}
-  detail.append(form,element('h3','3. 実機の接続テスト'))
+  const testHeading=element('h3','3. 実機の接続テスト');testHeading.id='line-tester';detail.append(form,testHeading)
   detail.append(element('p','発行したコードをテスト利用者本人に渡し、公式LINEへ送ってもらってください。確認済みのテスト利用者に限って1通送信できます。'))
   detail.append(action('テストコードを発行',async()=>{
     const result=await request(prefix+'/tests','POST',{purpose:'recruitment'});issued={channel:current.id,...result};await loadConnections();status.textContent='テストコードを発行しました。'
@@ -117,9 +117,9 @@ async function loadConnections(){
   }
   await renderConnection()
 }
-function storeChanged(){
-  channelId=undefined;issued=null;registration.reset();$('basic-id').value='';updateLinks()
-  const url=new URL(location.href);url.searchParams.set('store',store.value);history.replaceState(null,'',url)
+function storeChanged(wantedChannel){
+  channelId=wantedChannel;issued=null;registration.reset();$('basic-id').value='';updateLinks()
+  const url=new URL(location.href);url.searchParams.set('store',store.value);url.searchParams.delete('line_channel');history.replaceState(null,'',url)
   $('agency-return').href='/master/?store='+encodeURIComponent(store.value)
   return loadConnections()
 }
@@ -131,5 +131,5 @@ try{
   if(!session.stores.length)throw new Error('管理する店舗がありません。')
   const wanted=new URLSearchParams(location.search).get('store');if(session.stores.some(item=>item.id===wanted))store.value=wanted
   store.onchange=()=>perform(async()=>{await storeChanged();status.textContent='店舗を切り替えました。'})
-  $('line-workspace').hidden=false;await perform(async()=>{await storeChanged();status.textContent=''})
+  $('line-workspace').hidden=false;await perform(async()=>{await storeChanged(new URLSearchParams(location.search).get('line_channel'));status.textContent='';if(['#line-connections','#line-tester'].includes(location.hash))$(location.hash.slice(1))?.scrollIntoView({block:'start'})})
 }catch(error){status.textContent=error.message}
