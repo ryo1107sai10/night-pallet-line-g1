@@ -472,16 +472,18 @@ function templateEditor(root,templates,path,refresh){
   }
   root.append(details('この店舗の定型文を管理',pane))
 }
-function checks(root,entries){
+function checks(root,entries,store){
   root.append(el('h2','運用チェック'))
   if(!entries.length){root.append(el('p','現在の設定と処理履歴から、確認が必要な項目は見つかりませんでした。'));return}
   for(const entry of entries){
     const row=el('p',entry.text,'record')
     if(entry.section==='connection'||entry.section==='interviews'){
       const link=el('a','設定を開く')
-      link.href=$(entry.section==='interviews'?'#interviews':'#back').href
+      link.href=entry.section==='connection'&&agency&&actor.role==='admin'?'/agency-line/?store='+encodeURIComponent(store.id):$(entry.section==='interviews'?'#interviews':'#back').href
       row.append(' ',link)
-    }else row.append(' ',button('詳細を開く',async()=>{current=entry.section;await render()}))
+    }else if(entry.section==='studio'){const link=el('a','ステップ配信を開く');link.href=workspacePath('/studio/?store='+store.id);row.append(' ',link)}
+    else if(entry.section==='contract'){row.append(el('p','正式な契約・運用許可を確認し、北村さんの管理画面から設定してください。','muted'))}
+    else row.append(' ',button('詳細を開く',async()=>{current=entry.section;await render()}))
     root.append(row)
   }
 }
@@ -709,7 +711,8 @@ async function render(){
   if(settings.forms_enabled&&(!agency||use==='recruitment'&&['admin','manager'].includes(actor.role)))
     sections.push(['forms',use==='recruitment'?'応募フォーム':'回答フォーム'],['responses','フォーム回答'])
   if(use==='recruitment'&&settings.recruitment_enabled&&['admin','manager'].includes(actor.role))sections.push(['recruitment','応募・選考'],['tags','採用タグ・配信'])
-  if(!agency){
+  const canManageAcquisition=!agency||use==='recruitment'&&['admin','manager'].includes(actor.role)
+  if(canManageAcquisition){
     if(settings.sources_enabled)sections.push(['sources','流入分析'])
     if(use==='customer'&&settings.campaigns_enabled)sections.push(['campaigns','絞り込み配信'])
     if(settings.rich_menus_enabled)sections.push(['rich-menus','リッチメニュー'])
@@ -718,17 +721,19 @@ async function render(){
   if(settings.inbox_enabled&&(agency&&['admin','manager'].includes(actor.role)||!agency&&use==='customer'))sections.push(['intake','受付保留'])
   sections.push(['delivery','LINE送信履歴'])
   if(!sections.length){content.replaceChildren(el('p','この店舗で有効な機能はありません。法人管理者が「店舗で使う機能」から設定できます。'));return}
-  if(!agency)sections.unshift(['checks','運用チェック'])
+  if(canManageAcquisition)sections.unshift(['checks','運用チェック'])
   // The dedicated shortcut must explain an unavailable feature instead of
   // silently taking the manager to an unrelated inbox tab.
   const formDisabled=agency&&['forms','responses'].includes(current)&&!settings.forms_enabled
   const tagsDisabled=use==='recruitment'&&current==='tags'&&!settings.recruitment_enabled
+  const unavailableAcquisition=canManageAcquisition&&((current==='sources'&&!settings.sources_enabled)||(current==='rich-menus'&&!settings.rich_menus_enabled))?current:null
   if(!sections.some(([id])=>id===current))current=sections[0][0]
   for(const [key,label] of sections){
     const tab=button(label,async()=>{current=key;notice();await render()})
     if(current===key)tab.setAttribute('aria-current','page')
     tabs.append(tab)
   }
+  if(unavailableAcquisition){content.replaceChildren(el('p',(unavailableAcquisition==='sources'?'流入分析':'リッチメニュー')+'はこの店舗では無効です。北村さんの管理画面で有効にしてください。'));return}
   if(tagsDisabled){content.replaceChildren(el('p','この店舗の応募・選考管理が無効です。北村さんの管理画面で有効にすると採用タグを利用できます。'));return}
   if(formDisabled){content.replaceChildren(el('p','この店舗の応募フォーム機能は無効です。北村さんの管理画面で有効にすると、エールがフォームを管理できます。'));return}
   const key=current
@@ -749,7 +754,7 @@ async function render(){
   if(key==='rich-menus')richMenus(panel,data,path,refresh,use)
   if(key==='inbox'||key==='intake')inbox(panel,data,store,key==='inbox'?path+'/inbox':base+'/intake',refresh,key==='intake')
   if(key==='delivery')deliveries(panel,data,store,path,refresh)
-  if(key==='checks')checks(panel,data)
+  if(key==='checks')checks(panel,data,store)
   content.replaceChildren(panel)
 }
 

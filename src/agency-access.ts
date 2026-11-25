@@ -34,6 +34,9 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
     // workflowAccess の店舗割当と storeFeatures の有効化判定は引き続き適用する。
     if(['admin','manager'].includes(actor.role)){
       if(includesRoute(workflow+'/tags',route))return
+      if(route===workflow+'/checks'&&reads)return
+      if(includesRoute(workflow+'/sources',route))return
+      if(route===workflow+'/rich-menus'&&(reads||req.method==='PUT'))return
       if(route===workflow+'/forms'&&(reads||req.method==='PUT'))return
       if(route===workflow+'/responses'&&reads)return
     }

@@ -44,12 +44,16 @@ try{
       $('agency-tag-manager').href='/workflows/'+query+'&use=recruitment&tab=tags'
       $('agency-recruitment').href='/workflows/'+query+'&use=recruitment&tab=recruitment'
       $('agency-form-responses').href='/workflows/'+query+'&use=recruitment&tab=responses'
+      $('agency-sources').href='/workflows/'+query+'&use=recruitment&tab=sources'
+      $('agency-menus').href='/workflows/'+query+'&use=recruitment&tab=rich-menus'
+      $('agency-checks').href='/workflows/'+query+'&use=recruitment&tab=checks'
     }
     store.onchange=renderLinks
     renderLinks()
     $('agency-steps').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-line').hidden=!session.actor.agency||session.actor.role!=='admin'
     $('agency-tags').hidden=!['admin','manager'].includes(session.actor.role)
+    $('agency-acquisition').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-forms').hidden=!['admin','manager'].includes(session.actor.role)
     $('agency-interview').hidden=!['admin','manager','recruiter'].includes(session.actor.role)
     $('agency-stores').hidden=false

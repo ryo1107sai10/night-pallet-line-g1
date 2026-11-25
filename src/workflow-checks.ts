@@ -12,7 +12,7 @@ export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowS
     const connection=await channel(db,row.id)
     if(messagingReady(connection))connected++
   }
-  const maySend=flags.inbox_enabled||flags.rich_menus_enabled||
+  const maySend=flags.inbox_enabled||flags.rich_menus_enabled||flags.sources_enabled||flags.recruitment_tags_enabled||
     (use==='customer'?flags.campaigns_enabled:flags.reminders_enabled||flags.waitlist_enabled)
   if(!channels.length)checks.push({section:'connection',text:'この用途の公式LINEが登録されていません。'})
   else if(maySend&&connected<channels.length)checks.push({section:'connection',text:(channels.length-connected)+'件の公式LINEが接続検収待ちです。'})
@@ -32,6 +32,21 @@ export async function workflowChecks(db:DB,cfg:Config,store:string,use:WorkflowS
       checks.push({section:'interviews',text:'Googleへの予定登録にはカレンダー照合をオンにし、書き込み権限を許可してください。'})
     }
     if(status.google_errors)checks.push({section:'interviews',text:status.google_errors+'件の面談でGoogleへの書き込みを確認できませんでした。'})
+  }
+  if(use==='recruitment'){
+    const {rows:[ready]}=await db.query<{contract_active:boolean;eligible:boolean;auto_enabled:boolean;stopped:boolean;active_sources:number;configured_menus:number;tag_campaigns:number}>(`SELECT
+      s.contract_active,s.eligible_at IS NOT NULL AS eligible,s.auto_enabled,(s.stopped OR t.stopped) AS stopped,
+      (SELECT count(*)::int FROM workflow_source WHERE purpose='recruitment' AND active) AS active_sources,
+      (SELECT count(*)::int FROM workflow_menu m JOIN channel c ON c.id=m.channel_id AND c.generation=m.generation
+        WHERE m.purpose='recruitment' AND (m.base_menu IS NOT NULL OR m.booked_menu IS NOT NULL OR jsonb_array_length(m.tag_rules)>0)) AS configured_menus,
+      (SELECT count(*)::int FROM scenario q JOIN scenario_version v ON v.scenario_id=q.id AND v.version=q.published_version
+        WHERE NOT q.stopped AND v.graph->>'purpose'='recruitment' AND v.graph->>'trigger'='tag_campaign') AS tag_campaigns
+      FROM store s JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[store])
+    if(!ready.contract_active||!ready.eligible||!ready.auto_enabled||ready.stopped)
+      checks.push({section:'contract',text:'契約または自動配信開始の確認が未完了です。設定・テストはできますが、通常の自動配信は開始されません。'})
+    if(flags.sources_enabled&&!ready.active_sources)checks.push({section:'sources',text:'有効な流入経路がありません。店舗の求人経路を登録してQRと専用リンクを発行できます。'})
+    if(flags.rich_menus_enabled&&!ready.configured_menus)checks.push({section:'rich-menus',text:'切り替え対象のリッチメニューが未設定です。通常・予約済み・採用タグ別のメニューを登録できます。'})
+    if(flags.recruitment_enabled&&flags.recruitment_tags_enabled&&!ready.tag_campaigns)checks.push({section:'studio',text:'絞り込み配信用に公開された採用ステップがありません。必要に応じてタグ絞り込み配信のテンプレートを作成してください。'})
   }
   return checks
 }
