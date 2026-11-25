@@ -6,11 +6,12 @@ import { automationForStore, type Config, type Route } from './core.js'
 import { processChannelEvents } from './jobs.js'
 import type { LineAPI } from './line.js'
 import { deliverService } from './service-delivery.js'
+import { runRecruitmentAutomation } from './recruitment-automation.js'
 
 export const lineDispatchPath = '/internal/line-dispatch'
 export const lineDispatchInput = z.strictObject({
   channel: z.uuid(),
-  source: z.enum(['webhook','service']),
+  source: z.enum(['webhook','service','applicant']),
 })
 type DispatchInput = z.infer<typeof lineDispatchInput>
 
@@ -77,5 +78,10 @@ export async function dispatchLineWork(pool: pg.Pool, cfg: Config, line: LineAPI
   const finishBefore = Date.now() + 18000
   for (let sent = 0; sent < 8 && Date.now() < finishBefore; sent++) {
     if (!await deliverService(pool,cfg,line,r,true)) break
+  }
+  // Immediate replies retain priority; process due recruitment work in the
+  // same task, without waiting for the next minute scheduler tick.
+  for (let i=0;i<8&&Date.now()<finishBefore;i++) {
+    if (!await runRecruitmentAutomation(pool,cfg,line,r)) break
   }
 }

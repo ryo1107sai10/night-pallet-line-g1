@@ -197,9 +197,9 @@ export async function changeHandoff(db:DB,actor:Actor,store:string,use:Use,id:st
     await db.query('DELETE FROM line_handoff WHERE channel_id=$1 AND user_key=$2',[thread.channel_id,thread.user_key])
     await db.query('UPDATE inbox_thread SET revision=revision+1 WHERE channel_id=$1 AND user_key=$2',[thread.channel_id,thread.user_key])
   }
-  if(use!=='customer')await applyHandoffTags(db,store,thread.channel_id,thread.user_key,until)
+  const queued=use!=='customer'&&await applyHandoffTags(db,store,thread.channel_id,thread.user_key,until)
   await audit(db,actor.tenant_id,store,actor.id,until?'inbox.handoff_started':'inbox.handoff_ended',id,null,{until})
-  return {handoff_until:until}
+  return {handoff_until:until,queued,channel:thread.channel_id}
 }
 
 export async function writeInbox(db:DB,cfg:Config,actor:Actor,store:string,use:Use,id:string,key:string,data:z.infer<typeof inboxText>){

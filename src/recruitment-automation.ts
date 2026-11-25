@@ -141,6 +141,7 @@ async function enrollApplicants(db:DB,c:Channel,s:Location,cfg:Config) {
     }
     await db.query('UPDATE applicant_event SET handled_at=now() WHERE id=$1',[ev.id])
   }
+  return rows.length
 }
 
 const runSelect=`SELECT e.*,v.graph,q.stopped,evt.kind AS event_kind,evt.happened_at AS event_at,evt.campaign_id FROM applicant_enrollment e
@@ -153,10 +154,12 @@ async function note(db:DB,run:ARun,kind:string,detail:string) {
 }
 async function advance(db:DB,run:ARun,next:string,at=new Date()) {
   await db.query('UPDATE applicant_enrollment SET node_id=$2,due_at=$3,wait_node=NULL WHERE id=$1',[run.id,next,at])
+  run.node_id=next;run.due_at=at;run.wait_node=null
 }
 async function end(db:DB,run:ARun,why:string) {
   await db.query(`UPDATE applicant_enrollment SET ended_at=now(),end_reason=$2 WHERE id=$1 AND ended_at IS NULL`,[run.id,why])
   await note(db,run,'end',why)
+  run.ended_at=new Date();run.end_reason=why
 }
 
 async function currentInterview(db:DB,run:ARun) {
@@ -239,13 +242,16 @@ async function step(db:DB,cfg:Config,s:Location,c:Channel,run:ARun):Promise<AJob
       const time=waitUntil(node,anchor,s.timezone,s.cutoff,booking?+booking.starts_at:null)
       if (time===null || time<anchor || node.mode==='booking' && time<Date.now()-30*minute) {
         await end(db,run,'待機の基準時刻を過ぎたため保留')
-      } else await db.query('UPDATE applicant_enrollment SET due_at=$2,wait_node=$3 WHERE id=$1',[run.id,new Date(time),node.id])
+      } else {
+        await db.query('UPDATE applicant_enrollment SET due_at=$2,wait_node=$3 WHERE id=$1',[run.id,new Date(time),node.id])
+        run.due_at=new Date(time);run.wait_node=node.id
+      }
     }
     return null
   }
   if (node.type==='branch') {
     let responded=false
-    if (contact) {
+    if (contact && node.condition==='responded') {
       const reply=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind='message' LIMIT 1`,
         [c.id,contact.user_key])
       responded=!!reply.rowCount
@@ -303,17 +309,28 @@ async function chooseJob(db:DB,cfg:Config,c:Channel,s:Location,campaignOnly=fals
   if (retry) {
     const {rows:[job]}=await db.query<AJob>(`UPDATE applicant_send SET status='submitting',
       attempt=attempt+1,next_at=now()+interval '45 seconds' WHERE id=$1 RETURNING *`,[retry.id])
-    return job
+    return {job,advanced:true}
   }
   const {rows}=await db.query<ARun>(runSelect+` WHERE e.channel_id=$1 AND e.ended_at IS NULL AND e.due_at<=now()
     AND (NOT $2::boolean OR evt.campaign_id IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM applicant_send x WHERE x.enrollment_id=e.id AND x.node_id=e.node_id)
     ORDER BY e.due_at,e.id LIMIT 20 FOR UPDATE OF e SKIP LOCKED`,[c.id,campaignOnly])
+  // Drain zero-delay nodes under the existing tenant dispatch lock. A future
+  // wait is a hard boundary; bounded passes release the lock between claims.
+  const finishBefore=Date.now()+3000
+  let advanced=false,steps=0
   for (const run of rows) {
-    const job=await step(db,cfg,s,c,run)
-    if (job) return job
+    while (!run.ended_at && +run.due_at<=Date.now() && steps<64 && Date.now()<finishBefore) {
+      const before=[run.node_id,+run.due_at,run.wait_node,run.ended_at]
+      steps++
+      const job=await step(db,cfg,s,c,run)
+      if (job) return {job,advanced:true}
+      if(before[0]===run.node_id&&before[1]===+run.due_at&&before[2]===run.wait_node&&before[3]===run.ended_at)break
+      advanced=true
+    }
+    if(steps>=64||Date.now()>=finishBefore)break
   }
-  return null
+  return {job:null,advanced}
 }
 
 export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineAPI,r:Route,campaignOnly=false) {
@@ -322,15 +339,16 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
     await lockDispatch(db,r.tenant_id)
     return work(db)
   })
-  const job=await scoped(async db=>{
+  const {job,worked}=await scoped(async db=>{
     const c=await channel(db,r.id)
-    if (c.purpose==='customer') return null
+    if (c.purpose==='customer') return {job:null,worked:false}
     const s=await locationOf(db,r.store_id)
-    if(!campaignOnly)await enrollApplicants(db,c,s,cfg)
-    if (!cfg.external || !cfg.automation) return null
-    return chooseJob(db,cfg,c,s,campaignOnly)
+    const enrolled=campaignOnly?0:await enrollApplicants(db,c,s,cfg)
+    if (!cfg.external || !cfg.automation) return {job:null,worked:enrolled>0}
+    const chosen=await chooseJob(db,cfg,c,s,campaignOnly)
+    return {job:chosen.job,worked:enrolled>0||chosen.advanced}
   })
-  if (!job) return false
+  if (!job) return worked
   const quota=await tx(pool,async db=>{
     await scope(db,r.tenant_id,r.store_id)
     const c=await channel(db,r.id)
@@ -393,7 +411,7 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
     return {run,next:current?.type==='message'?current.next:'',promise:api.push(channelCredentials(cfg,c),to,job.id,sendBody)
       .catch(()=>({status:'unknown',requestId:null,authError:false}))}
   })
-  if (!submitted) return false
+  if (!submitted) return true
   const result=await submitted.promise
   await scoped(async db=>{
     const finalStatus=job.attempt>1 && result.status==='failed'?'unknown':result.status
@@ -413,5 +431,5 @@ export async function runRecruitmentAutomation(pool:pg.Pool,cfg:Config,api:LineA
       await advance(db,submitted.run,submitted.next)
     } else if (resultRow.next_at===Infinity) await end(db,submitted.run,finalStatus==='failed'?'送信失敗':'送信結果不明')
   })
-  return !!submitted.run.campaign_id
+  return true
 }

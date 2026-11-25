@@ -96,8 +96,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   const app = express()
   const api = express.Router({mergeParams:true})
   const workspace = express.Router({mergeParams:true})
-  const wakeLine = async (store: string, channel: string, source: 'webhook'|'service') => {
-    if (dispatch && automationForStore(cfg,store)) await dispatch.wake({channel,source})
+  const wakeLine = async (store: string, channel: string, source: 'webhook'|'service'|'applicant') => {
+    if (dispatch && automationForStore(cfg,store)) {
+      try { await dispatch.wake({channel,source}) }
+      catch { console.warn('LINE dispatch enqueue failed; scheduled worker will recover') }
+    }
   }
   app.disable('x-powered-by')
   app.use((req,res,next) => {
@@ -453,7 +456,12 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     })
     api.post(path,async(req,res)=>{
       const data=formResponse.parse(req.body)
-      res.status(201).json(await tx(pool,async db=>submitForm(db,cfg,await subject(db,req),data)))
+      const {identity,result}=await tx(pool,async db=>{
+        const identity=await subject(db,req)
+        return {identity,result:await submitForm(db,cfg,identity,data)}
+      })
+      if(result.queued)await wakeLine(identity.store_id,identity.channel_id,'applicant')
+      res.status(201).json({submitted:result.submitted})
     })
   }
 
@@ -515,8 +523,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(workflow+'/inbox/:thread',workflowStaff((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),workPurpose(req),idOf(req,'thread'))))
   api.patch(workflow+'/inbox/:thread',workflowStaff((db,actor,req)=>
     changeThread(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),inboxEdit.parse(req.body))))
-  api.patch(workflow+'/inbox/:thread/handoff',workflowStaff((db,actor,req)=>
-    changeHandoff(db,actor,idOf(req,'store'),workPurpose(req),idOf(req,'thread'),handoffInput.parse(req.body))))
+  api.patch(workflow+'/inbox/:thread/handoff',async(req,res)=>{
+    const store=idOf(req,'store'),use=workPurpose(req)
+    const {channel,queued,handoff_until}=await staffAction(req,async(db,actor)=>{
+      await workflowAccess(db,actor,store,use)
+      return changeHandoff(db,actor,store,use,idOf(req,'thread'),handoffInput.parse(req.body))
+    })
+    if(queued)await wakeLine(store,channel,'applicant')
+    res.json({handoff_until})
+  })
   api.post(workflow+'/inbox/:thread',async(req,res)=>{
     const store = idOf(req,'store'), usage = workPurpose(req)
     const {channel,...message} = await staffAction(req,async(db,actor)=>{
@@ -531,8 +546,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(intake+'/:thread',inStore((db,_actor,req)=>inboxMessages(db,cfg,idOf(req,'store'),'unclassified',idOf(req,'thread'))))
   api.patch(intake+'/:thread',inStore((db,actor,req)=>
     classifyThread(db,actor,idOf(req,'store'),idOf(req,'thread'),inboxClassify.parse(req.body))))
-  api.patch(intake+'/:thread/handoff',inStore((db,actor,req)=>
-    changeHandoff(db,actor,idOf(req,'store'),'unclassified',idOf(req,'thread'),handoffInput.parse(req.body))))
+  api.patch(intake+'/:thread/handoff',async(req,res)=>{
+    const store=idOf(req,'store')
+    const {channel,queued,handoff_until}=await staffAction(req,async(db,actor)=>{
+      await storeAccess(db,actor,store,true)
+      return changeHandoff(db,actor,store,'unclassified',idOf(req,'thread'),handoffInput.parse(req.body))
+    })
+    if(queued)await wakeLine(store,channel,'applicant')
+    res.json({handoff_until})
+  })
   api.get(workflow+'/forms',workflowStaff((db,_actor,req)=>listForms(db,idOf(req,'store'),workPurpose(req))))
   api.put(workflow+'/forms',workflowStaff((db,actor,req)=>saveForm(db,cfg,actor,idOf(req,'store'),workPurpose(req),keyOf(req),formInput.parse(req.body))))
   api.get(workflow+'/responses',workflowStaff((db,_actor,req)=>responses(db,cfg,idOf(req,'store'),workPurpose(req))))
@@ -567,13 +589,39 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get(tags+'/catalog',tagStaff((db,actor,req)=>applicantTagCatalog(db,actor,idOf(req,'store'))))
   api.patch(tags+'/settings',tagStaff((db,actor,req)=>saveApplicantTagSettings(db,actor,idOf(req,'store'),tagSettingsInput.parse(req.body))))
   api.put(tags+'/definitions',tagStaff((db,actor,req)=>saveApplicantTag(db,actor,idOf(req,'store'),tagDefinitionInput.parse(req.body))))
-  api.patch(tags+'/subjects/:subject',tagStaff((db,actor,req)=>saveSubjectTags(db,actor,idOf(req,'store'),idOf(req,'subject'),subjectTagsInput.parse(req.body))))
+  api.patch(tags+'/subjects/:subject',async(req,res)=>{
+    const store=idOf(req,'store')
+    const {saved,queued,channel}=await staffAction(req,async(db,actor)=>{
+      await storeAccess(db,actor,store,true)
+      if(workPurpose(req)!=='recruitment')throw forbidden()
+      return saveSubjectTags(db,actor,store,idOf(req,'subject'),subjectTagsInput.parse(req.body))
+    })
+    // Queue only after the event and tag were committed.
+    if(queued)await wakeLine(store,channel,'applicant')
+    res.json({saved})
+  })
   api.post(tags+'/campaigns/preview',tagStaff((db,actor,req)=>previewTagCampaign(db,cfg,actor,idOf(req,'store'),tagCampaignInput.parse(req.body))))
-  api.post(tags+'/campaigns',tagStaff((db,actor,req)=>queueTagCampaign(db,cfg,actor,idOf(req,'store'),keyOf(req),tagCampaignConfirm.parse(req.body)),201))
+  api.post(tags+'/campaigns',async(req,res)=>{
+    const store=idOf(req,'store')
+    const {id,queued,channel}=await staffAction(req,async(db,actor)=>{
+      await storeAccess(db,actor,store,true)
+      if(workPurpose(req)!=='recruitment')throw forbidden()
+      return queueTagCampaign(db,cfg,actor,store,keyOf(req),tagCampaignConfirm.parse(req.body))
+    })
+    if(queued&&channel)await wakeLine(store,channel,'applicant')
+    res.status(201).json({id,queued})
+  })
   api.post(tags+'/campaigns/:campaign/stop',tagStaff((db,actor,req)=>stopTagCampaign(db,actor,idOf(req,'store'),idOf(req,'campaign'))))
   api.get('/stores/:store/recruitment',interviewStaff((db,_actor,req)=>listRecruitment(db,cfg,idOf(req,'store'))))
-  api.patch('/stores/:store/recruitment/:case',interviewStaff((db,actor,req)=>
-    updateCase(db,actor,idOf(req,'store'),idOf(req,'case'),caseInput.parse(req.body))))
+  api.patch('/stores/:store/recruitment/:case',async(req,res)=>{
+    const store=idOf(req,'store')
+    const {saved,queued,channel}=await staffAction(req,async(db,actor)=>{
+      await interviewAccess(db,actor,store)
+      return updateCase(db,actor,store,idOf(req,'case'),caseInput.parse(req.body))
+    })
+    if(queued)await wakeLine(store,channel,'applicant')
+    res.json(saved)
+  })
   const campaigns='/stores/:store/campaigns'
   api.get(campaigns,inStore((db,_actor,req)=>campaignOverview(db,cfg,idOf(req,'store'))))
   api.post(campaigns,inStore((db,actor,req)=>prepareCampaign(db,cfg,actor,idOf(req,'store'),keyOf(req),campaignInput.parse(req.body)),true,201))

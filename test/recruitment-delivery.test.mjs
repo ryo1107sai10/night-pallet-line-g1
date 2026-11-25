@@ -48,6 +48,9 @@ const consoleChecks = {
 let pg, owner, pool, server, dir, base, tenant, storeId, admin, line, google
 let recruitCh, sharedCh
 const pushes = []
+const dispatches=[]
+let onQuota=null
+const dispatchRequest=(input,authorization='Bearer test-worker')=>send('/internal/line-dispatch',{method:'POST',headers:{'Content-Type':'application/json',Authorization:authorization},body:JSON.stringify(input)})
 const signed = raw => createHmac('sha256', channelSecret).update(raw).digest('base64')
 const send = (url, options = {}) => fetch(base + url, { redirect: 'error',...options})
 const idempotency = () => ({ 'Idempotency-Key': randomUUID()})
@@ -195,7 +198,10 @@ before(async () => {
         const tokenValue = options.headers.Authorization?.replace('Bearer ', '')
         return Response.json({ userId: bots[tokenValue]})
       }
-      case '/v2/bot/message/quota': return Response.json({ type: 'limited', value: 200})
+      case '/v2/bot/message/quota': {
+        if(onQuota){const action=onQuota;onQuota=null;await action()}
+        return Response.json({ type: 'limited', value: 200})
+      }
       case '/v2/bot/message/quota/consumption': return Response.json({ totalUsage: 0})
       case '/v2/bot/message/push': {
         const body = JSON.parse(options.body)
@@ -208,7 +214,7 @@ before(async () => {
   line = new LineAPI(fetchLine)
   google = new InterviewGoogle(cfg, { clientId: 'calendar-client', secret: 'calendar-secret'},
     async () => Response.json({ calendars: {}}))
-  server = createApp(pool, cfg, line, google).listen(0, '127.0.0.1')
+  server = createApp(pool, cfg, line, google,{wake:async input=>{dispatches.push(input)},verify:async authorization=>authorization==='Bearer test-worker'}).listen(0, '127.0.0.1')
   await new Promise(resolve => server.once('listening', resolve))
   base = 'http://127.0.0.1:' + server.address().port
 
@@ -512,9 +518,11 @@ test('採用: 応募フォーム送信から同意済みの応募者へ一度だ
     const cookie=await optInApplicant(who,tag,preconnected)
     if(!consent)expect(await request('/interview/notices',{method:'PUT',cookie,data:{enabled:false}}),200)
     const input={form:form.id,revision:form.revision,answers:{name:'動作確認'}}
+    const at=dispatches.length
     expect(await post('/interview/form',cookie,input),201)
     expect(await post('/interview/form',cookie,input),201)
-    await flush(4)
+    assert.equal(dispatches.length,at+(consent?1:0),'同意済みの新規フォームだけ即時処理を起動する')
+    if(consent)assert.equal((await dispatchRequest(dispatches.at(-1))).status,204)
     return cookie
   }
   // The production test recipient was already a friend when the channel was connected.
@@ -670,15 +678,46 @@ test('採用タグテンプレート: 現在のタグカタログに対応し、
   flow.nodes.find(n=>n.type==='message').body='タグテンプレート送信確認A'
   const published=await publishScenario(flow)
   let p=await personByName('タグ検証A');await assign(p,[...p.tags,created.tag_key])
-  let run
-  for(let i=0;i<5;i++){await worker();run=(await read('SELECT node_id,ended_at FROM applicant_enrollment WHERE scenario_id=$1',[published.id])).rows[0];if(run?.node_id==='message')break}
-  assert.equal(run?.node_id,'message');assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認A').length,0)
-  p=await personByName('タグ検証A');await assign(p,p.tags.filter(k=>k!==created.tag_key));await flush(5)
+  let checked=false
+  onQuota=async()=>{
+    const run=(await read('SELECT node_id,ended_at FROM applicant_enrollment WHERE scenario_id=$1',[published.id])).rows[0]
+    assert.equal(run?.node_id,'message')
+    assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認A').length,0)
+    p=await personByName('タグ検証A');await assign(p,p.tags.filter(k=>k!==created.tag_key));checked=true
+  }
+  await worker()
+  assert.ok(checked,'配信要求の確定後、LINE送信直前の再判定が実行される')
+  await flush(2)
   assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認A').length,0)
   const next=expect(await request(tagsRoot()+'/definitions',{method:'PUT',cookie:admin,data:{revision:0,label:'テンプレート配信成功',category:'対応',add_events:[],remove_events:[],active:true}}),200)
   const ready=buildTagTemplate({tag:{tag_key:next.tag_key,label:'テンプレート配信成功',active:true},channel:recruitCh,pattern:'new_application'})
   ready.nodes.find(n=>n.type==='message').body='タグテンプレート送信確認B'
   await publishScenario(ready)
-  p=await personByName('タグ検証A');await assign(p,[...p.tags,next.tag_key]);await flush(6)
-  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認B').length,1)
+  p=await personByName('タグ検証A');const at=dispatches.length;await assign(p,[...p.tags,next.tag_key])
+  assert.equal(dispatches.length,at+1)
+  const job=dispatches.at(-1);assert.deepEqual(job,{channel:recruitCh,source:'applicant'})
+  assert.equal((await dispatchRequest(job,'Bearer invalid')).status,403)
+  const requests=await Promise.all([dispatchRequest(job),dispatchRequest(job)])
+  assert.deepEqual(requests.map(r=>r.status),[204,204])
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='タグテンプレート送信確認B').length,1,'定期実行なしの即時処理で重複なく配信')
+  p=await personByName('タグ検証A');const count=dispatches.length;await assign(p,p.tags)
+  assert.equal(dispatches.length,count,'変更のない保存は即時処理を発行しない')
+})
+
+test('採用タグ即時処理: 明示的な未来の待機を維持し、時刻到来後に送信する',async()=>{
+  const tag=expect(await request(tagsRoot()+'/definitions',{method:'PUT',cookie:admin,data:{revision:0,label:'待機確認',category:'対応',add_events:[],remove_events:[],active:true}}),200)
+  const graph={...bookedGraph,name:'即時処理待機確認',trigger:'tag_added',triggerTag:tag.tag_key,entry:'branch',nodes:[
+    {id:'branch',type:'branch',name:'付与タグ',condition:'tag',tag:tag.tag_key,yes:'wait',no:'end'},
+    {id:'wait',type:'wait',name:'1時間待機',mode:'delay',minutes:60,next:'notice'},
+    {id:'notice',type:'message',name:'通知',category:'service',body:'予約した待機の後に通知',next:'end'},
+    {id:'end',type:'end',name:'終了'}]}
+  const scenario=await publishScenario(graph)
+  const p=await personByName('タグ検証A');await assign(p,[...p.tags,tag.tag_key])
+  const task=dispatches.at(-1);assert.equal((await dispatchRequest(task)).status,204)
+  let run=(await read('SELECT node_id,wait_node,due_at FROM applicant_enrollment WHERE scenario_id=$1',[scenario.id])).rows[0]
+  assert.equal(run.node_id,'wait');assert.equal(run.wait_node,'wait');assert.ok(+run.due_at>Date.now()+3500000)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='予約した待機の後に通知').length,0)
+  await read("UPDATE applicant_enrollment SET due_at=now()-interval '1 second' WHERE scenario_id=$1",[scenario.id])
+  assert.equal((await dispatchRequest(task)).status,204)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text==='予約した待機の後に通知').length,1)
 })

@@ -109,28 +109,33 @@ export async function applicantTags(db:DB,identity:Pick<ApplicantIdentity,'chann
 }
 async function setAssignment(db:DB,subject:Subject,key:string,add:boolean,at:Date,expires:Date|null,emit:boolean){
   const {rows:[old]}=await db.query<{active:boolean;changed_at:Date;expires_at:Date|null}>('SELECT active,changed_at,expires_at FROM applicant_tag_assignment WHERE subject_id=$1 AND tag_key=$2',[subject.id,key])
-  if(old&&+old.changed_at>+at)return
+  if(old&&+old.changed_at>+at)return false
   const wasActive=!!old?.active&&(!old.expires_at||+old.expires_at>Date.now())
   // Removal leaves a timestamped tombstone, so a late older event cannot reapply the tag.
   await db.query(`INSERT INTO applicant_tag_assignment(tenant_id,store_id,subject_id,tag_key,active,changed_at,expires_at)
     VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(subject_id,tag_key) DO UPDATE SET active=excluded.active,changed_at=excluded.changed_at,expires_at=excluded.expires_at`,
     [subject.tenant_id,subject.store_id,subject.id,key,add,at,add?expires:null])
   if(wasActive!==add||+(old?.expires_at??0)!==+(expires??0))await db.query('UPDATE applicant_tag_subject SET revision=revision+1,updated_at=now() WHERE id=$1',[subject.id])
-  if(emit&&add&&!wasActive&&(!expires||+expires>Date.now())&&(await db.query(`SELECT 1 FROM workflow_contact WHERE channel_id=$1 AND purpose='recruitment' AND subject=$2 AND notices AND notices_changed_at<=$3`,[subject.channel_id,subject.applicant_key,at])).rowCount)await emitApplicantEvent(db,subject,'tag:'+newId(),'tag_added',at,undefined,{tagKey:key})
+  if(emit&&add&&!wasActive&&(!expires||+expires>Date.now())&&(await db.query(`SELECT 1 FROM workflow_contact WHERE channel_id=$1 AND purpose='recruitment' AND subject=$2 AND notices AND notices_changed_at<=$3`,[subject.channel_id,subject.applicant_key,at])).rowCount)return emitApplicantEvent(db,subject,'tag:'+newId(),'tag_added',at,undefined,{tagKey:key})
+  return false
 }
 export async function applyApplicantTagRules(db:DB,identity:ApplicantIdentity,event:TagEvent,at=new Date(),expires:Date|null=null){
   const state=await tagState(db,identity.store_id)
-  if(!state.recruitment_enabled||!state.recruitment_tags_enabled||state.recruitment_tags_enabled_at&&+at<+state.recruitment_tags_enabled_at)return
+  if(!state.recruitment_enabled||!state.recruitment_tags_enabled||state.recruitment_tags_enabled_at&&+at<+state.recruitment_tags_enabled_at)return false
   await seedApplicantTags(db,identity.tenant_id,identity.store_id)
   const subject=await ensureSubject(db,identity)
   const isApplicant=event==='follow'&&(await db.query('SELECT 1 FROM recruitment_case WHERE channel_id=$1 AND applicant_key=$2',[identity.channel_id,identity.applicant_key])).rowCount
   const {rows}=await db.query<Definition>(`SELECT * FROM applicant_tag WHERE store_id=$1 AND active AND ($2=ANY(add_events) OR $2=ANY(remove_events)) ORDER BY tag_key`,[identity.store_id,event])
-  for(const rule of rows){if(isApplicant&&['new_friend','unanswered'].includes(rule.tag_key))continue;await setAssignment(db,subject,rule.tag_key,rule.add_events.includes(event),at,event==='handoff_started'?expires:null,true)}
+  let queued=false
+  for(const rule of rows){if(isApplicant&&['new_friend','unanswered'].includes(rule.tag_key))continue;if(await setAssignment(db,subject,rule.tag_key,rule.add_events.includes(event),at,event==='handoff_started'?expires:null,true))queued=true}
+  return queued
 }
 export async function applyHandoffTags(db:DB,store:string,channelId:string,userKey:string,until:Date|null){
   const {rows}=await db.query<ApplicantIdentity>(`SELECT tenant_id,store_id,channel_id,subject AS applicant_key FROM workflow_contact
     WHERE store_id=$1 AND channel_id=$2 AND user_key=$3 AND purpose='recruitment'`,[store,channelId,userKey])
-  for(const identity of rows)await applyApplicantTagRules(db,identity,until?'handoff_started':'handoff_ended',new Date(),until)
+  let queued=false
+  for(const identity of rows)if(await applyApplicantTagRules(db,identity,until?'handoff_started':'handoff_ended',new Date(),until))queued=true
+  return queued
 }
 export async function setScenarioTag(db:DB,identity:ApplicantIdentity,reference:string,add:boolean){
   await requireTags(db,identity.store_id)
@@ -254,9 +259,10 @@ export async function saveSubjectTags(db:DB,actor:Actor,store:string,id:string,d
   if(!subject)throw missing();if(subject.revision!==data.revision)throw conflict()
   const before=await activeTags(db,id),at=new Date()
   for(const k of before)if(!data.tags.includes(k))await setAssignment(db,subject,k,false,at,null,true)
-  for(const k of data.tags)if(!before.includes(k))await setAssignment(db,subject,k,true,at,null,true)
+  let queued=false
+  for(const k of data.tags)if(!before.includes(k)&&await setAssignment(db,subject,k,true,at,null,true))queued=true
   await audit(db,actor.tenant_id,store,actor.id,'recruitment.tags.change',id,null,{added:data.tags.filter(k=>!before.includes(k)),removed:before.filter(k=>!data.tags.includes(k))})
-  return {saved:true}
+  return {saved:true,channel:subject.channel_id,queued}
 }
 
 type Campaign={id:string;scenario_id:string;scenario_version:number;criteria:Filters;stopped:boolean}
@@ -310,7 +316,7 @@ export async function queueTagCampaign(db:DB,cfg:Config,actor:Actor,store:string
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[id,actor.tenant_id,store,plan.c.id,plan.scenario.id,plan.scenario.published_version,plan.scenario.graph.name,data.criteria,plan.eligible.length,actor.id])
     for(const row of plan.eligible)await emitApplicantEvent(db,{tenant_id:actor.tenant_id,store_id:store,channel_id:plan.c.id,applicant_key:row.applicant_key},'tag-campaign:'+id+':'+row.id,'tag_campaign',at,undefined,{campaignId:id})
     await audit(db,actor.tenant_id,store,actor.id,'recruitment.tag_campaign.queue',id,null,{recipients:plan.eligible.length})
-    return {id,queued:plan.eligible.length}
+    return {id,queued:plan.eligible.length,channel:plan.c.id}
   })
 }
 export async function stopTagCampaign(db:DB,actor:Actor,store:string,id:string){

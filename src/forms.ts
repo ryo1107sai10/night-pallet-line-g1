@@ -95,6 +95,7 @@ export async function submitForm(db:DB,cfg:Config,identity:WorkflowSubject,data:
     (id,tenant_id,store_id,channel_id,purpose,form_id,form_revision,subject,answers_box)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(form_id,subject,form_revision) DO NOTHING`,
   [id,identity.tenant_id,identity.store_id,identity.channel_id,identity.purpose,form.id,form.revision,identity.subject,sealed])
+  let queued=false
   if(identity.purpose==='recruitment'&&rowCount){
     await ensureRecruitmentCase(db,identity)
     const name=form.fields.find(field=>field.applicant_name)
@@ -102,19 +103,19 @@ export async function submitForm(db:DB,cfg:Config,identity:WorkflowSubject,data:
     if(display)await db.query(`UPDATE recruitment_case SET display_name_box=$3 WHERE channel_id=$1 AND applicant_key=$2`,
       [identity.channel_id,identity.subject,seal(cfg,'recruitment-name:'+identity.channel_id+':'+identity.subject,display)])
     const tagIdentity={...identity,applicant_key:identity.subject}
-    await applyApplicantTagRules(db,tagIdentity,'form')
+    queued=await applyApplicantTagRules(db,tagIdentity,'form')
     if(!(await db.query(`SELECT 1 FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id WHERE b.channel_id=$1 AND b.applicant_key=$2 AND b.status='confirmed' AND s.starts_at>now()`,[identity.channel_id,identity.subject])).rowCount)
-      await applyApplicantTagRules(db,tagIdentity,'form_unbooked')
+      queued=await applyApplicantTagRules(db,tagIdentity,'form_unbooked')||queued
     // A submitted form may start a recruitment flow only when the applicant had
     // explicitly enabled LINE notices at submission. The dispatch worker checks
     // the current consent again, so a subsequent opt-out also prevents sending.
     const {rowCount:consented}=await db.query(`SELECT 1 FROM workflow_contact WHERE channel_id=$1
       AND purpose='recruitment' AND subject=$2 AND notices`,[identity.channel_id,identity.subject])
-    if(consented)await emitApplicantEvent(db,{...identity,applicant_key:identity.subject},
-      'form:'+id,'form')
+    if(consented)queued=await emitApplicantEvent(db,{...identity,applicant_key:identity.subject},
+      'form:'+id,'form')||queued
   }
   if(rowCount)await audit(db,identity.tenant_id,identity.store_id,null,'form.submit',id,null,{purpose:identity.purpose})
-  return {submitted:true}
+  return {submitted:true,queued}
 }
 
 export async function responses(db:DB,cfg:Config,store:string,use:WorkflowSubject['purpose']) {
@@ -169,7 +170,7 @@ export async function updateCase(db:DB,actor:Actor,store:string,id:string,data:z
     trial_done_at=CASE WHEN $2='trial_done' THEN now() ELSE trial_done_at END,
     hired_at=CASE WHEN $2='hired' THEN now() ELSE hired_at END
     WHERE id=$1 RETURNING id,revision,stage,trial_at`,[id,data.stage,data.trial_at])
-  if(data.stage!=='applied')await applyApplicantTagRules(db,previous,('stage_'+data.stage) as keyof typeof tagEvents)
+  const queued=data.stage!=='applied'&&await applyApplicantTagRules(db,previous,('stage_'+data.stage) as keyof typeof tagEvents)
   await audit(db,actor.tenant_id,store,actor.id,'recruitment.stage',id,null,{from:previous.stage,to:data.stage})
-  return saved
+  return {saved,queued,channel:previous.channel_id}
 }
