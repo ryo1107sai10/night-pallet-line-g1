@@ -1715,6 +1715,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   assert.match(portalHTML,/id="agency-sources"/)
   assert.match(portalHTML,/id="agency-menus"/)
   assert.match(portalHTML,/id="agency-checks"/)
+  assert.match(portalHTML,/id="agency-store-management"/)
   assert.doesNotMatch(portalHTML,/id="npl-tour"|id="manage-line"/)
   const linePage=await send('/agency-line/?store='+created,{headers:{Cookie:admin}})
   assert.equal(linePage.status,200)
@@ -1756,6 +1757,25 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await request('/stores/'+storeId+'/line-module',{cookie:admin}),403)
   expect(await post('/stores/'+storeId+'/line-module',admin,{purpose:'recruitment'}),403)
   expect(await post('/stores/'+storeId+'/line-module/complete',admin,{state:'a'.repeat(96),code:'unused'}),403)
+  // 現エールマスターの契約店舗登録・採用運用設定。監督者との越境や顧客機能の変更は禁止。
+  const agencyShop=expect(await post('/stores',admin,storeData('エール新規契約検証店'),idempotency()),201).id
+  const agencySetup='/stores/'+agencyShop+'/recruitment/setup'
+  const agencySettings=expect(await request(agencySetup,{cookie:admin}),200)
+  assert.equal(agencySettings.contract_active,false);assert.equal(agencySettings.auto_enabled,false)
+  assert.ok(!Object.hasOwn(agencySettings.features,'visits_enabled'))
+  assert.ok(!expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===agencyShop))
+  expect(await request('/stores/'+gamma.stores[0].id+'/recruitment/setup',{cookie:admin}),404)
+  expect(await patch('/stores/'+gamma.stores[0].id+'/eligibility',admin,{revision:0,verified:true,reference:'越境拒否'}),404)
+  expect(await patch(agencySetup+'/features',admin,{revision:agencySettings.revision,...agencySettings.features,visits_enabled:true}),400)
+  expect(await patch(agencySetup+'/features',admin,{revision:agencySettings.revision,...agencySettings.features,forms_enabled:true,recruitment_enabled:true,interviews_enabled:true,reminders_enabled:true}),200)
+  const afterFeature=expect(await request(agencySetup,{cookie:admin}),200)
+  assert.equal(afterFeature.features.reminders_enabled,true);assert.equal(afterFeature.auto_enabled,false)
+  const eligible=expect(await patch('/stores/'+agencyShop+'/eligibility',admin,{revision:afterFeature.revision,verified:true,reference:'契約店舗確認の試験'}),200)
+  expect(await patch(agencySetup+'/automation',admin,{revision:eligible.revision,enabled:true,contract:true,monthly_limit:100,reason:'未接続のため拒否'}),409)
+  expect(await patch(agencySetup+'/automation',admin,{revision:eligible.revision,enabled:false,contract:true,monthly_limit:100,reason:'契約記録を保存'}),200)
+  assert.equal(expect(await request(agencySetup,{cookie:admin}),200).contract_active,true)
+  expect(await request('/stores/'+agencyShop+'/automation',{cookie:admin}),403)
+  expect(await request('/stores/'+agencyShop+'/features',{cookie:admin}),403)
   const manualStore=expect(await scoped(alpha.tenant.id,'/stores','POST',storeData('エールの初回連携検証店')),201).id
   const manualPath='/stores/'+manualStore+'/connections'
   const lineInput={label:'エール採用検証',purpose:'recruitment',owner_name:'検証担当',provider_id:'2000000010',messaging_id:agencyMessagingId,
@@ -1827,6 +1847,9 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const managerEmail='step-manager@example.test'
   const next=expect(await scoped(alpha.tenant.id,'/staff/invites','POST',{email:managerEmail,role:'manager',stores:[storeId]}),201)
   const manager=await activate(next,managerEmail,'alpha')
+  expect(await post('/stores',manager,storeData('権限なし'),idempotency()),403)
+  expect(await request('/stores/'+storeId+'/recruitment/setup',{cookie:manager}),403)
+  expect(await patch('/stores/'+storeId+'/eligibility',manager,{revision:0,verified:true,reference:'権限なし'}),403)
   expect(await post(manualPath,manager,lineInput,idempotency()),403)
   expect(await request(manualConnection+'/tests',{cookie:manager}),403)
   expect(await request(recruitmentPath+'/checks',{cookie:manager}),404)

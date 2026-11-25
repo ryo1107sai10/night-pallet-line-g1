@@ -35,7 +35,7 @@ import { changeInterviewVisibility, confirmInterview, interviewAccess, interview
   updateInterview, recruitmentSubject } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
   googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
-import { featureInput, recruitmentAcquisitionInput, requireFeature, saveRecruitmentAcquisition, saveStoreFeatures, storeFeatures } from './store-features.js'
+import { featureInput, recruitmentAcquisitionInput, recruitmentSetupInput, recruitmentSetupView, requireFeature, saveRecruitmentAcquisition, saveRecruitmentSetup, saveStoreFeatures, storeFeatures } from './store-features.js'
 import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, tagRuleInput,
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
 import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
@@ -909,6 +909,31 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const settings=z.strictObject({revision,enabled:z.boolean(),contract:z.boolean(),
       monthly_limit:z.int().min(1).max(1000000),reason:text(200)}).parse(req.body)
     return updateAutomation(db,cfg,actor,idOf(req,'store'),settings)
+  }))
+
+  // 現代理店マスター専用。北村さんの全体監督・顧客用途の配信設定は公開しない。
+  const recruitmentSetup='/stores/:store/recruitment/setup'
+  const requireAgencyMaster=(actor:Actor)=>{requireAdmin(actor);if(!actor.agency)throw forbidden()}
+  api.get(recruitmentSetup,inStore(async(db,actor,req)=>{
+    requireAgencyMaster(actor)
+    const store=idOf(req,'store'),loc=await locationOf(db,store),features=await storeFeatures(db,store)
+    return {revision:features.revision,eligible_at:loc.eligible_at,contract_active:loc.contract_active,
+      auto_enabled:loc.auto_enabled,monthly_limit:loc.monthly_limit,process_enabled:automationForStore(cfg,store),
+      features:recruitmentSetupView(features)}
+  }))
+  api.patch(recruitmentSetup+'/features',inStore((db,actor,req)=>{
+    requireAgencyMaster(actor)
+    return saveRecruitmentSetup(db,actor,idOf(req,'store'),recruitmentSetupInput.parse(req.body))
+  }))
+  api.patch(recruitmentSetup+'/automation',inStore(async(db,actor,req)=>{
+    requireAgencyMaster(actor)
+    const settings=z.strictObject({revision,enabled:z.boolean(),contract:z.boolean(),
+      monthly_limit:z.int().min(1).max(1000000),reason:text(200)}).parse(req.body)
+    const store=idOf(req,'store')
+    await lockDispatch(db,actor.tenant_id)
+    // 既存の顧客・兼用LINEを自動配信対象へ切り替える権限までは委任しない。
+    if(settings.enabled&&(await db.query("SELECT 1 FROM channel WHERE purpose<>'recruitment' LIMIT 1")).rowCount)throw forbidden()
+    return updateAutomation(db,cfg,actor,store,settings)
   }))
 
   const scenarios = '/stores/:store/scenarios'

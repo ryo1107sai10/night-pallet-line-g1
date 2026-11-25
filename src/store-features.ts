@@ -104,3 +104,21 @@ export async function saveRecruitmentAcquisition(db:DB,actor:Actor,store:string,
   await audit(db,actor.tenant_id,store,actor.id,'store.recruitment_acquisition',store,null,{sources_enabled:input.sources_enabled,rich_menus_enabled:input.rich_menus_enabled})
   return storeFeatures(db,store)
 }
+
+// 自法人の採用運用で必要な機能のみ。顧客配信・来店予約の設定にはアクセスさせない。
+export const recruitmentSetupFeatures={
+  interviews_enabled:z.boolean(),google_calendar_enabled:z.boolean(),
+  forms_enabled:z.boolean(),recruitment_enabled:z.boolean(),recruitment_tags_enabled:z.boolean(),
+  sources_enabled:z.boolean(),rich_menus_enabled:z.boolean(),reminders_enabled:z.boolean(),
+  waitlist_enabled:z.boolean(),inbox_enabled:z.boolean(),guest_interviews_enabled:z.boolean(),
+  token_interviews_enabled:z.boolean(),interviewers_enabled:z.boolean(),google_write_enabled:z.boolean(),
+}
+export const recruitmentSetupInput=z.strictObject({revision,...recruitmentSetupFeatures})
+export function recruitmentSetupView(features:StoreFeatures){
+  return Object.fromEntries(Object.keys(recruitmentSetupFeatures).map(key=>[key,features[key as Feature]]))
+}
+export async function saveRecruitmentSetup(db:DB,actor:Actor,store:string,input:z.infer<typeof recruitmentSetupInput>){
+  if(!actor.agency||actor.role!=='admin')throw forbidden()
+  const present=await storeFeatures(db,store)
+  return recruitmentSetupView(await saveStoreFeatures(db,actor,store,{...present,...input}))
+}

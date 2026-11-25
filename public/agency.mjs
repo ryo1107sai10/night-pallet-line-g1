@@ -2,6 +2,57 @@ import {mountDashboard} from '/static/dashboard.mjs'
 
 const $=id=>document.getElementById(id)
 const status=$('agency-status')
+const storeManagementStatus=$('agency-store-management-status')
+const recruitmentFeatureLabels={
+  interviews_enabled:'対面面談予約',google_calendar_enabled:'Googleカレンダー空き時間照合',
+  forms_enabled:'応募フォーム',recruitment_enabled:'応募・選考管理',recruitment_tags_enabled:'採用タグ',
+  sources_enabled:'流入分析',rich_menus_enabled:'リッチメニュー',reminders_enabled:'面談確定・リマインド通知',
+  waitlist_enabled:'キャンセル待ち',inbox_enabled:'採用LINE受信箱',guest_interviews_enabled:'公開予約',
+  token_interviews_enabled:'LINEトークからの予約',interviewers_enabled:'担当者別の面談枠',google_write_enabled:'Googleカレンダーへの予定登録',
+}
+let storeSetup=null,setupRequest=0
+function renderFeatureOptions(settings){
+  const box=$('agency-feature-options')
+  box.replaceChildren(...Object.entries(recruitmentFeatureLabels).map(([name,label])=>{
+    const wrapper=document.createElement('label'),input=document.createElement('input')
+    input.type='checkbox';input.name=name;input.checked=settings[name]===true
+    wrapper.append(input,document.createTextNode(' '+label));return wrapper
+  }))
+}
+async function loadStoreSetup(id){
+  const n=++setupRequest
+  storeSetup=null
+  $('agency-store-setup').hidden=true
+  try{
+    const info=await masterCall('/stores/'+encodeURIComponent(id)+'/recruitment/setup')
+    if(n!==setupRequest)return
+    storeSetup={id,...info}
+    const store=$('agency-store')
+    $('agency-store-setup-name').textContent=store.selectedOptions[0]?.textContent+' の設定'
+    $('agency-store-setup-state').textContent=[info.eligible_at?'適格性確認済み':'適格性未確認',info.contract_active?'契約確認済み':'契約未確認',info.auto_enabled?'自動配信有効':'自動配信停止中'].join(' ／ ')
+    $('agency-store-eligibility').elements.verified.checked=!!info.eligible_at
+    $('agency-store-eligibility').elements.reference.value=''
+    renderFeatureOptions(info.features)
+    const form=$('agency-store-automation')
+    form.elements.contract.checked=info.contract_active
+    form.elements.enabled.checked=info.auto_enabled
+    form.elements.enabled.disabled=!info.process_enabled&&!info.auto_enabled
+    form.elements.monthly_limit.value=info.monthly_limit
+    form.elements.reason.value=''
+    $('agency-automation-ready').textContent=info.process_enabled?'配信処理の準備済み。LINE接続・契約・利用条件を確認してから有効化できます。':'配信処理の店舗登録が未完了です。契約と機能設定は先に保存できます。'
+    $('agency-store-setup').hidden=false
+  }catch(error){if(n===setupRequest)storeManagementStatus.textContent=error.message}
+}
+async function saveSetup(action){
+  const selection=storeSetup
+  if(!selection||selection.id!==$('agency-store').value)return
+  const buttons=[...$('agency-store-setup').querySelectorAll('button')]
+  buttons.forEach(button=>button.disabled=true)
+  storeManagementStatus.textContent='保存中…'
+  try{await action(selection);if(selection.id===$('agency-store').value){await loadStoreSetup(selection.id);storeManagementStatus.textContent='店舗設定を保存しました。'}}
+  catch(error){storeManagementStatus.textContent=error.message}
+  finally{buttons.forEach(button=>button.disabled=false)}
+}
 async function request(path,method='GET'){
   const response=await fetch('/api/v1'+path,method==='POST'?{
     method,headers:{'Content-Type':'application/json'},body:'{}',
@@ -24,6 +75,8 @@ try{
   const options=session.stores.map(item=>new Option(item.name,item.id))
   $('agency-name').textContent=session.tenant.legal_name+'の店舗運用'
   $('agency-account').textContent=session.actor.email
+  const canManageStores=session.actor.agency&&session.actor.role==='admin'
+  $('agency-store-management').hidden=!canManageStores
   if(['admin','manager','recruiter'].includes(session.actor.role)){
     mountDashboard($('operations-dashboard'),()=>request('/dashboard'))
   }
@@ -47,6 +100,7 @@ try{
       $('agency-sources').href='/workflows/'+query+'&use=recruitment&tab=sources'
       $('agency-menus').href='/workflows/'+query+'&use=recruitment&tab=rich-menus'
       $('agency-checks').href='/workflows/'+query+'&use=recruitment&tab=checks'
+      if(canManageStores)loadStoreSetup(store.value)
     }
     store.onchange=renderLinks
     renderLinks()
@@ -61,6 +115,32 @@ try{
     if($('agency-steps').hidden&&$('agency-interview').hidden)status.textContent='操作権限が付与された機能はありません。'
   }else status.textContent='操作できる店舗がありません。'
 }catch(error){status.textContent=error.message}
+
+$('agency-store-create').onsubmit=async event=>{
+  event.preventDefault()
+  const form=event.currentTarget,button=form.querySelector('button[type="submit"]')
+  button.disabled=true;storeManagementStatus.textContent='店舗を登録しています…'
+  try{
+    const result=await masterCall('/stores','POST',Object.fromEntries(new FormData(form)))
+    location.assign('/master/?store='+encodeURIComponent(result.id))
+  }catch(error){storeManagementStatus.textContent=error.message;button.disabled=false}
+}
+$('agency-feature-defaults').onclick=()=>{
+  for(const input of $('agency-feature-options').querySelectorAll('input[type="checkbox"]'))
+    input.checked=!['interviewers_enabled','google_write_enabled','waitlist_enabled'].includes(input.name)
+}
+$('agency-store-eligibility').onsubmit=event=>{
+  event.preventDefault();const form=event.currentTarget,data=new FormData(form)
+  saveSetup(s=>masterCall('/stores/'+encodeURIComponent(s.id)+'/eligibility','PATCH',{revision:s.revision,verified:data.has('verified'),reference:data.get('reference')}))
+}
+$('agency-store-features').onsubmit=event=>{
+  event.preventDefault();const form=event.currentTarget,data=new FormData(form)
+  saveSetup(s=>masterCall('/stores/'+encodeURIComponent(s.id)+'/recruitment/setup/features','PATCH',{revision:s.revision,...Object.fromEntries(Object.keys(recruitmentFeatureLabels).map(key=>[key,data.has(key)]))}))
+}
+$('agency-store-automation').onsubmit=event=>{
+  event.preventDefault();const form=event.currentTarget,data=new FormData(form)
+  saveSetup(s=>masterCall('/stores/'+encodeURIComponent(s.id)+'/recruitment/setup/automation','PATCH',{revision:s.revision,contract:data.has('contract'),enabled:form.elements.enabled.checked,monthly_limit:Number(data.get('monthly_limit')),reason:data.get('reason')}))
+}
 
 // マスター管理: 自法人の現マスターだけが GET /agency-master に成功し、この欄が表示される。
 // マスターでない代理店スタッフや他法人のアカウントでは 403 になるため欄は隠れたまま。
