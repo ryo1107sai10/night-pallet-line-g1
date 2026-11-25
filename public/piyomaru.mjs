@@ -67,7 +67,7 @@ export function mountPiyomaru(page='platform'){
   function switchTab(id){tab=id;clearNotice();render()}
   function render(){
     for(const [id,b] of tabs)b.setAttribute('aria-current',id===tab?'page':'false')
-    content.replaceChildren()
+    content.replaceChildren();content.dataset.tab=tab
     if(!info){
       content.append(el('p',loadError||'ピヨ丸の準備中…','piyo-muted'))
       if(loadError)content.append(button('読み込み直す',async()=>{await load();render()}))
@@ -83,6 +83,7 @@ export function mountPiyomaru(page='platform'){
       button('緊急AI導入代行を始める',()=>switchTab('jobs'),'piyo-danger'))
     const log=el('div',null,'piyo-log');log.setAttribute('role','log');log.setAttribute('aria-live','polite')
     const drawMessages=()=>{
+      welcome.hidden=messages.length>0;chips.hidden=messages.length>0;log.hidden=messages.length===0
       log.replaceChildren(...messages.map(m=>{
         const b=el('article',null,'piyo-message '+(m.role==='user'?'is-user':'is-piyo'))
         if(m.role!=='user')b.append(el('small',m.source??'ピヨ丸'))
@@ -94,7 +95,8 @@ export function mountPiyomaru(page='platform'){
     const modeSelect=select([['normal','低コスト（Ember）'],['deep','複雑な相談（Spark）'],['guide','無料の内蔵ナビ']],mode);modeSelect.setAttribute('aria-label','質問のモード');modeSelect.onchange=()=>mode=modeSelect.value
     const send=el('button','送信','piyo-primary');send.type='submit';send.disabled=busy
     const footer=el('div',null,'piyo-row');footer.append(modeSelect,send)
-    form.append(question,footer,el('small','認証コード・パスワード・応募者の個人情報は入力しないでね。','piyo-muted'))
+    const resetChat=button('新しい質問を始める',()=>{if(!busy){messages=[];history=[];drawMessages();question.focus()}},'piyo-chip')
+    form.append(question,footer,resetChat,el('small','認証コード・パスワード・応募者の個人情報は入力しないでね。','piyo-muted'))
     form.onsubmit=async e=>{e.preventDefault();const value=question.value.trim();if(!value||busy)return;question.value='';await ask(value,drawMessages,send)}
     const chips=el('div',null,'piyo-chips')
     for(const q of quickQuestions)chips.append(button(q,()=>{question.value=q;question.focus()},'piyo-chip'))
@@ -112,7 +114,7 @@ export function mountPiyomaru(page='platform'){
       info.spent_microusd=reply.spent_microusd;if(reply.kind==='muse')info.connected=true
       updateBadge();state('happy');drawMessages()
     }catch(error){messages.push({role:'assistant',text:error.message,source:'ピヨ丸・確認事項'});drawMessages();tell(error.message,true)}
-    finally{busy=false;send.disabled=false}
+    finally{busy=false;send.disabled=false;if(tab==='chat')render()}
   }
   function drawJobs(){
     const intro=el('div',null,'piyo-welcome piyo-job-intro')

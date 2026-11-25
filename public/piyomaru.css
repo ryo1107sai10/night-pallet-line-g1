@@ -36,3 +36,6 @@
 @media(prefers-reduced-motion:reduce){.piyo-launcher .piyo-sprite{animation:none!important}}
 
 .piyo-check{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:#4b4e54}.piyo-panel .piyo-check input{width:16px;height:16px;min-height:16px;margin:0;flex:0 0 auto}
+
+/* Prevent a scrolled flex panel from collapsing the conversation track. */
+.piyo-content{display:flex;flex-direction:column;gap:10px;flex:1 1 auto}.piyo-content>*{flex-shrink:0}.piyo-content [hidden]{display:none!important}.piyo-log{max-height:270px;min-height:0;flex:0 1 auto;overflow-y:auto;scrollbar-width:thin}.piyo-question{margin-top:auto;background:#fffdfa}.piyo-question>.piyo-chip{justify-self:start}.piyo-content[data-tab='chat'] .piyo-question{flex-shrink:0}.piyo-content[data-tab='chat'] .piyo-log:not([hidden]){min-height:72px}@media(max-height:650px){.piyo-content[data-tab='chat'] .piyo-log{max-height:155px}}
