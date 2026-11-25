@@ -56,6 +56,22 @@ export const messagingReady = (c:ConnectionState) => testDeliveryConfirmed(c) &&
 // 接続済み判定は Messaging API の検収だけで決まる（本人確認はトークン方式）。
 export const channelReady = (c:Channel) => messagingReady(c)
 
+// A user who was already a friend before the webhook was connected has no
+// follow event in our database. Accept the relationship inferred from a real
+// one-to-one message only within LINE's seven-day message window. Never let
+// inference override a recorded block, even if a newer message is received.
+export async function automaticRelationshipReady(db:DB,c:Channel,userKeyValue:string) {
+  const {rows:[proof]}=await db.query<{kind:string|null;following:boolean|null;recent_message:boolean}>(`SELECT
+    (SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND occurred_at<=now()
+      AND kind IN ('follow','refollow','unfollow') ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1) AS kind,
+    (SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2) AS following,
+    EXISTS (SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$3
+      AND kind='message' AND occurred_at BETWEEN now()-interval '7 days' AND now()) AS recent_message`,
+    [c.id,userKeyValue,c.generation])
+  return proof.kind!=='unfollow'&&proof.following!==false&&
+    (proof.kind==='follow'||proof.kind==='refollow'||(proof.following===true&&proof.recent_message))
+}
+
 export async function channel(db: DB, id: string) {
   const { rows: [row] } = await db.query<Channel>(`SELECT c.*,r.messaging_id,r.module_channel_id,r.module_bot_id FROM channel c
     JOIN channel_route r ON c.id=r.id WHERE c.id=$1`, [id])

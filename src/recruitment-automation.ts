@@ -1,7 +1,7 @@
 import type pg from 'pg'
 import { renderMessage, waitUntil } from '../public/studio/engine.mjs'
 import { audit, keyed, newId, scope, seal, tx, unseal, type Config, type DB, type Route } from './core.js'
-import { channel, channelCredentials, channelReady, type Channel, type LineAPI } from './line.js'
+import { automaticRelationshipReady, channel, channelCredentials, channelReady, type Channel, type LineAPI } from './line.js'
 import { locationOf } from './automation.js'
 import { handoffUntil } from './line-handoff.js'
 import { lockDispatch } from './dispatch-lock.js'
@@ -194,9 +194,7 @@ async function applicantBarred(db:DB,cfg:Config,s:Location,c:Channel,run:ARun,
   if (run.booking_id && (!booking||booking.revision!==run.booking_revision)) return '予約が更新されました'
   if (!contact) return '応募者の連絡先がありません'
   if (!contact.notices) return '通知の同意がありません'
-  const {rows:[last]}=await db.query(`SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2
-    AND occurred_at<=now() AND kind IN ('follow','refollow','unfollow') ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,contact.user_key])
-  if (!last||last.kind==='unfollow') return '友だち状態を確認できないかブロックされています'
+  if (!await automaticRelationshipReady(db,c,contact.user_key)) return '友だち状態を確認できないかブロックされています'
   const pending=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND stop_signal IS NOT NULL
     AND processed_at IS NULL AND occurred_at>=$3 LIMIT 1`,[c.id,contact.user_key,contact.notices_changed_at])
   if (pending.rowCount) return 'LINEで配信停止を受信'

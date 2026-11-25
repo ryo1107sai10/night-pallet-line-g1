@@ -11,7 +11,7 @@ import { Secret, TOTP} from 'otpauth'
 import { createApp} from '../dist/app.js'
 import { assertAppRole, digest, keyed, poolFor, scope, tx} from '../dist/core.js'
 import { bootstrap, migrate} from '../dist/setup.js'
-import { LineAPI, userKey} from '../dist/line.js'
+import { automaticRelationshipReady, channel, LineAPI, userKey} from '../dist/line.js'
 import { InterviewGoogle} from '../dist/interview-availability.js'
 import { workOnce} from '../dist/jobs.js'
 import { validate} from '../public/studio/engine.mjs'
@@ -145,8 +145,10 @@ const stopGraph = {
 
 // 友だち追加→メニューの postback でリンクを受け取り→引換→通知ONまで済ませた応募者を用意する。
 // この時点では通知がOFFのため follow シナリオには登録されない（同意が登録の前提）。
-async function optInApplicant(who, tag) {
-  await inbound(recruitCh, botR, [eventFor(tag + '-follow', 'follow', who)])
+async function optInApplicant(who, tag,preconnected=false) {
+  await inbound(recruitCh, botR, preconnected
+    ? [eventFor(tag+'-message','message',who,{message:{id:tag+'-msg',type:'text',text:'こんにちは'}})]
+    : [eventFor(tag + '-follow', 'follow', who)])
   await worker()
   await inbound(recruitCh, botR, [
     eventFor(tag + '-postback', 'postback', who, { postback: { data: 'action=interview_link'}}),
@@ -414,8 +416,8 @@ test('採用: 受信メッセージが受信箱に残り、友だち追加で宛
 
 test('採用: 実配信に対応しない開始イベントは公開できず、用途違いの開始イベントは検証で拒否される', async () => {
   const root = '/stores/' + storeId + '/scenarios'
-  // 採用 × form（下書き・テスト送信のみ）は公開不可
-  const formGraph = { ...followLinkGraph, name: 'フォーム開始', trigger: 'form' }
+  // 採用 × link（下書き・テスト送信のみ）は公開不可
+  const formGraph = { ...followLinkGraph, name: 'リンク開始', trigger: 'link' }
   const created = expect(await post(root, admin, formGraph, idempotency()), 201)
   const url = root + '/' + created.id + '/transition'
   const tested = expect(await post(url, admin, { revision: created.revision, action: 'test', fixture: pubFixture }), 200)
@@ -492,4 +494,51 @@ test('採用: 兼用OAでも interview_booked シナリオで面談URLが発行�
   assert.ok(tokenRow, 'PushのURLのハッシュが発行記録と一致すること')
   assert.equal(tokenRow.channel_id, sharedCh)
   assert.equal(tokenRow.applicant_key, keyS)
+})
+
+test('採用: 応募フォーム送信から同意済みの応募者へ一度だけ実配信を開始する', async () => {
+  await setFeatures({forms_enabled:true})
+  const form=expect(await request('/stores/'+storeId+'/workflows/recruitment/forms',{
+    method:'PUT',cookie:admin,headers:idempotency(),data:{channel:recruitCh,revision:0,
+      title:'検証用応募フォーム',description:'',published:true,
+      fields:[{key:'name',label:'氏名',kind:'text',required:true,options:[],applicant_name:true}]},
+  }),200)
+  await publishScenario({...followLinkGraph,name:'応募フォーム受付',trigger:'form',nodes:[
+    {id:'welcome',type:'message',name:'応募受付',category:'service',body:'{{name}}さん、応募フォーム受付完了。{{interview_link}}',next:'end'},
+    {id:'end',type:'end',name:'完了'},
+  ]})
+  const optedIn='U'+'d'.repeat(32),optedOut='U'+'e'.repeat(32)
+  const submit=async(who,tag,consent,preconnected=false)=>{
+    const cookie=await optInApplicant(who,tag,preconnected)
+    if(!consent)expect(await request('/interview/notices',{method:'PUT',cookie,data:{enabled:false}}),200)
+    const input={form:form.id,revision:form.revision,answers:{name:'動作確認'}}
+    expect(await post('/interview/form',cookie,input),201)
+    expect(await post('/interview/form',cookie,input),201)
+    await flush(4)
+    return cookie
+  }
+  // The production test recipient was already a friend when the channel was connected.
+  // They had an authenticated incoming message but no follow event.
+  await submit(optedIn,'form-consented',true,true)
+  const key=userKey(cfg,{id:recruitCh},optedIn)
+  assert.equal((await read("SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow')",[recruitCh,key])).rowCount,0)
+  assert.equal((await read('SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2',[recruitCh,key])).rows[0].following,true)
+  const sends=pushesTo(optedIn).filter(item=>item.text.includes('応募フォーム受付完了'))
+  assert.equal(sends.length,1)
+  assert.ok(rawOf(sends[0].text),'面談予約URLは実際に発行された専用URL')
+  assert.equal((await read("SELECT id FROM applicant_event WHERE channel_id=$1 AND applicant_key=$2 AND kind='form'",[recruitCh,applicantKeyOf(optedIn)])).rowCount,1)
+  const cookie=await submit(optedOut,'form-no-consent',false)
+  expect(await request('/interview/notices',{method:'PUT',cookie,data:{enabled:true}}),200)
+  await flush(4)
+  assert.equal(pushesTo(optedOut).filter(item=>item.text.includes('応募フォーム受付完了')).length,0)
+  assert.equal((await read("SELECT id FROM applicant_event WHERE channel_id=$1 AND applicant_key=$2 AND kind='form'",[recruitCh,applicantKeyOf(optedOut)])).rowCount,0)
+  const ready=()=>tx(pool,async db=>{await scope(db,tenant,storeId);return automaticRelationshipReady(db,await channel(db,recruitCh),key)})
+  assert.equal(await ready(),true)
+  await read("UPDATE webhook_event SET occurred_at=now()-interval '8 days' WHERE channel_id=$1 AND user_key=$2 AND kind='message'",[recruitCh,key])
+  assert.equal(await ready(),false,'過去のメッセージだけでは送信できない')
+  await inbound(recruitCh,botR,[eventFor('form-explicit-block','unfollow',optedIn)])
+  await worker()
+  await inbound(recruitCh,botR,[eventFor('form-late-message','message',optedIn,{message:{id:'late-form-msg',type:'text',text:'旧メッセージ'}})])
+  await worker()
+  assert.equal(await ready(),false,'明示的なブロックをメッセージからの推定で上書きしない')
 })
