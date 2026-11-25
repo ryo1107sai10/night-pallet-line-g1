@@ -4,6 +4,7 @@ import { audit, conflict, Fault, missing, newId, once, purpose, revision, seal, 
 import { channel } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature, storeFeatures } from './store-features.js'
+import { emitApplicantEvent } from './recruitment-automation.js'
 
 export type WorkflowSubject = {tenant_id:string;store_id:string;channel_id:string;purpose:z.infer<typeof purpose>;subject:string}
 const fieldKey=z.string().regex(/^[A-Za-z0-9_-]{1,40}$/)
@@ -99,6 +100,13 @@ export async function submitForm(db:DB,cfg:Config,identity:WorkflowSubject,data:
     const display=name&&Object.hasOwn(data.answers,name.key)?data.answers[name.key].slice(0,80):''
     if(display)await db.query(`UPDATE recruitment_case SET display_name_box=$3 WHERE channel_id=$1 AND applicant_key=$2`,
       [identity.channel_id,identity.subject,seal(cfg,'recruitment-name:'+identity.channel_id+':'+identity.subject,display)])
+    // A submitted form may start a recruitment flow only when the applicant had
+    // explicitly enabled LINE notices at submission. The dispatch worker checks
+    // the current consent again, so a subsequent opt-out also prevents sending.
+    const {rowCount:consented}=await db.query(`SELECT 1 FROM workflow_contact WHERE channel_id=$1
+      AND purpose='recruitment' AND subject=$2 AND notices`,[identity.channel_id,identity.subject])
+    if(consented)await emitApplicantEvent(db,{...identity,applicant_key:identity.subject},
+      'form:'+id,'form')
   }
   if(rowCount)await audit(db,identity.tenant_id,identity.store_id,null,'form.submit',id,null,{purpose:identity.purpose})
   return {submitted:true}

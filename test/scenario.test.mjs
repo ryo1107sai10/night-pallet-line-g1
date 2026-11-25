@@ -20,7 +20,8 @@ test('新しい採用シナリオは実配信できる面談予約を起点に�
   graph.channel='account'
   assert.equal(graph.trigger,'interview_booked')
   assert.ok(Object.hasOwn(liveTriggers.recruitment,graph.trigger))
-  assert.ok(!Object.hasOwn(liveTriggers.recruitment,'form'))
+  assert.ok(Object.hasOwn(liveTriggers.recruitment,'form'))
+  assert.ok(!Object.hasOwn(liveTriggers.customer,'form'))
   assert.ok(!Object.hasOwn(liveTriggers.customer,'interview_booked'))
   assert.deepEqual(validate(graph,true),[])
   const result=simulate(graph,{...person,booked:true,bookingAt:'2026-11-20T19:00',values:{...person.values,booking:'11月20日19:00'}})

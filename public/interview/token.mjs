@@ -54,7 +54,7 @@ async function showInterviewNotices() {
     root.hidden = !data.reminders && !data.waitlist_enabled && !data.notices && !data.waitlist
     if (root.hidden) return
     const preferences = item('form')
-    const label = item('label', 'LINEで予約の案内を受け取る')
+    const label = item('label', 'LINEで応募・面談の案内を受け取る')
     const input = item('input')
     input.type = 'checkbox'
     input.checked = data.notices
@@ -98,6 +98,7 @@ async function showWorkflowForm() {
   const published = page
   region.append(item('h2', page.title))
   if (page.description) region.append(item('p', page.description))
+  region.append(item('p', 'LINEで応募・面談の案内を希望する方は、先に「面談のお知らせ」で通知設定を保存してください。通知を希望しない場合も応募できます。'))
   region.hidden = false
   if (page.submitted) { region.append(item('p', '回答を送信済みです。')); return }
   const application = item('form')
@@ -167,8 +168,8 @@ try {
       root.hidden = false
       document.querySelector('#heading').hidden = true
       status.textContent = '本人確認が完了しました。予約が確定すると、内容をLINEにもお送りします。'
-      await showWorkflowForm()
       await showInterviewNotices()
+      await showWorkflowForm()
     }
   }
 } catch {

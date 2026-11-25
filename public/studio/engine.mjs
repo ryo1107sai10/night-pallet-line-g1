@@ -7,7 +7,7 @@ export const triggers = {
 // Keep the editor and server publication gate on the same supported events.
 export const liveTriggers = Object.freeze({
   customer:Object.freeze(Object.fromEntries(['follow','consent','manual','booking_created','booking_changed','booking_cancelled','visit'].map(key=>[key,triggers[key]]))),
-  recruitment:Object.freeze(Object.fromEntries(['follow','interview_booked','interview_changed','interview_cancelled'].map(key=>[key,triggers[key]]))),
+  recruitment:Object.freeze(Object.fromEntries(['follow','form','interview_booked','interview_changed','interview_cancelled'].map(key=>[key,triggers[key]]))),
 })
 export const kinds = { message:'メッセージ',wait:'待機',branch:'条件分岐',tag:'タグ更新',task:'担当タスク',end:'終了' }
 export const conditions = { booked:'予約がある',consent:'目的別の同意がある',adult:'20歳以上の確認済み',
