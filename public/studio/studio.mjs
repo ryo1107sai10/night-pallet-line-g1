@@ -653,6 +653,8 @@ async function testDelivery() {
   let recipient=candidates[0]?.id
   let selected=results[0].id
   const key=crypto.randomUUID()
+  const actualTagTest=graph.trigger==='tag_campaign'&&graph.purpose==='recruitment'&&!!scenario.published_version
+  if(actualTagTest)box.append(node('p','公開済みタグ絞り込みでは、テスター本人の現在のタグを送信直前にも照合します。通常配信や通知同意は変更しません。','field-hint'))
   box.append(field('テスト送信するステップ',selected,value=>{selected=value},{
     items:Object.fromEntries(results.map(item=>[item.id,item.name])),
   }))
@@ -661,7 +663,7 @@ async function testDelivery() {
     items:Object.fromEntries(candidates.map(({id,verified_at})=>[id,'認証 '+new Date(verified_at).toLocaleString('ja-JP')+' · '+id.slice(0,8)])),
   }),button('テスト利用者に1通送る',async()=>{
     const {zone,cutoff,...fixture}=person
-    await api(url+'/test-sends','POST',{revision:scenario.revision,node:selected,tester:recipient,fixture},key)
+    await api(url+'/test-sends','POST',{revision:scenario.revision,node:selected,tester:recipient,fixture,...(actualTagTest?{actual_tags:true}:{})},key)
     $('#dialog').close()
     announce('テスト送信を登録しました。送信結果はテスト送信画面で確認できます。')
   },'primary'))

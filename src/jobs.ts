@@ -13,6 +13,7 @@ import { deliverService } from './service-delivery.js'
 import { googleFromEnvironment } from './interview-availability.js'
 import { runGoogleSync } from './interview-hosts.js'
 import {sourceTestProof} from './sources.js'
+import {tagTestFacts} from './applicant-tags.js'
 export { lockDispatch } from './dispatch-lock.js'
 
 const targets = {
@@ -191,7 +192,7 @@ async function sourceTestMessage(db:DB,cfg:Config,c:Awaited<ReturnType<typeof ch
 }
 
 async function sendCandidate(db: DB, r: Route, id?: string) {
-  const { rows: [job] } = await db.query(`SELECT j.*, t.recipient,t.code_hash,t.user_key,t.expires_at,
+  const { rows: [job] } = await db.query(`SELECT j.*, t.recipient,t.code_hash,t.user_key,t.expires_at,t.verified_at,
     s.stopped AS store_stopped,f.disabled_at,
     (f.role='admin' OR (f.role='manager' AND f.agency_staff AND EXISTS(SELECT 1 FROM store_grant g
       WHERE g.store_id=j.store_id AND g.staff_id=j.actor_id))) AS may_send,
@@ -271,6 +272,11 @@ export async function workOnce(pool: pg.Pool, cfg: Config, api: LineAPI,google=g
       if (mustHold(fresh,current)) {
         await db.query(`UPDATE test_send SET status=$2,next_at='infinity' WHERE id=$1`,
           [job.id,attempt===1 ? 'cancelled' : 'unknown'])
+        return
+      }
+      if(current.tag_test_guard&&!await tagTestFacts(db,fresh,current.user_key,current.tag_test_guard,current.verified_at)){
+        await db.query(`UPDATE test_send SET status=$2,next_at='infinity' WHERE id=$1`,[job.id,attempt===1?'cancelled':'unknown'])
+        await audit(db,r.tenant_id,r.store_id,null,'scenario.tag_test_held',job.id,null,{channel_id:r.id})
         return
       }
       const to = unseal(cfg,'tester:' + current.code_hash,current.recipient)

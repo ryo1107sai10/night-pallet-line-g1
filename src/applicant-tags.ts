@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { audit, automationForStore, conflict, digest, Fault, missing, newId, once, revision, text, unseal, uuid, type Actor, type Config, type DB } from './core.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { emitApplicantEvent, type ApplicantIdentity } from './applicant-events.js'
-import { channel, channelReady } from './line.js'
+import { automaticRelationshipReady, channel, channelReady, type Channel } from './line.js'
 import type { Graph } from './scenario.js'
 import { deliveryScope } from './delivery-budget.js'
 
@@ -362,4 +362,27 @@ export async function stopTagCampaign(db:DB,actor:Actor,store:string,id:string){
   await db.query(`UPDATE applicant_send SET next_at='infinity',reason='絞り込み配信停止' WHERE status IN ('submitting','unknown') AND enrollment_id IN (SELECT n.id FROM applicant_enrollment n JOIN applicant_event e ON e.id=n.event_id WHERE e.campaign_id=$1)`,[id])
   await audit(db,actor.tenant_id,store,actor.id,'recruitment.tag_campaign.stop',id)
   return {stopped:true}
+}
+
+// Explicit per-message test only: use the recipient's actual tags, not a
+// simulated tag list. This never enables general consent or starts a campaign.
+export type TagTestGuard={tag:string;exclude:string[];booked?:boolean}
+export async function tagTestFacts(db:DB,c:Channel,userKey:string,guard:TagTestGuard,verifiedAt:Date){
+  if(c.purpose!=='recruitment'||!await automaticRelationshipReady(db,c,userKey))return null
+  const state=await tagState(db,c.store_id)
+  if(!state.recruitment_enabled||!state.recruitment_tags_enabled)return null
+  const references=[...new Set([guard.tag,...guard.exclude])]
+  const active=await db.query('SELECT tag_key FROM applicant_tag WHERE store_id=$1 AND active AND tag_key=ANY($2::text[])',[c.store_id,references])
+  if(active.rowCount!==references.length)return null
+  const {rows:[contact]}=await db.query<{subject:string;booked:boolean}>(`SELECT w.subject,
+    EXISTS(SELECT 1 FROM interview_booking b JOIN interview_slot s ON s.id=b.slot_id WHERE b.channel_id=w.channel_id AND b.applicant_key=w.subject AND b.status='confirmed' AND s.starts_at>now()) AS booked
+    FROM workflow_contact w WHERE w.channel_id=$1 AND w.user_key=$2 AND w.purpose='recruitment'
+      AND NOT EXISTS(SELECT 1 FROM line_handoff h WHERE h.channel_id=w.channel_id AND h.user_key=w.user_key AND h.until_at>now())
+      AND NOT EXISTS(SELECT 1 FROM inbox_thread i JOIN store st ON st.id=i.store_id WHERE i.channel_id=w.channel_id AND i.user_key=w.user_key AND i.purpose='recruitment' AND i.state='handling' AND st.inbox_enabled)
+      AND NOT EXISTS(SELECT 1 FROM webhook_event e WHERE e.channel_id=w.channel_id AND e.user_key=w.user_key AND e.stop_signal IS NOT NULL AND e.occurred_at>=$3)
+      LIMIT 1`,[c.id,userKey,verifiedAt])
+  if(!contact)return null
+  const tags=await applicantTags(db,{channel_id:c.id,applicant_key:contact.subject})
+  if(!tags.includes(guard.tag)||guard.exclude.some(tag=>tags.includes(tag))||tags.includes('withdrawn')||tags.includes('handoff')||guard.booked!==undefined&&guard.booked!==contact.booked)return null
+  return {tags,booked:contact.booked}
 }

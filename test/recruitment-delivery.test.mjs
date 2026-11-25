@@ -852,5 +852,24 @@ test('テスト専用店舗でも認証済みテスターにだけ実際のタ�
   expect(await post('/interview-link/'+recruitCh+'/redeem',null,{token:rawOf(link.text)}),200)
   const report=expect(await request(sources,{cookie:admin}),200)
   assert.equal(report.entries.find(x=>x.id===entry.id).opened,1)
+  const campaignGraph={...bookedGraph,name:'実タグ限定検証',trigger:'tag_campaign',nodes:[{id:'notice',type:'message',name:'確認',category:'service',body:'絞り込みの動作確認',tagGuard:{tag:'experienced',exclude:['withdrawn','handoff']},next:'end'},{id:'end',type:'end',name:'終了'}]}
+  const scenario=await publishScenario(campaignGraph)
+  const testSend='/stores/'+storeId+'/scenarios/'+scenario.id+'/test-sends'
+  const t1=await freshTester(tagOther)
+  const input={revision:scenario.revision,node:'notice',tester:t1.id,fixture:{...pubFixture,tags:['experienced']},actual_tags:true}
+  // A fabricated simulation tag never authorizes an actual-tag verification.
+  expect(await post(testSend,admin,input,idempotency()),409)
+  let current=await personByName('タグ検証B');await assign(current,[...current.tags,'experienced'])
+  const pending=expect(await post(testSend,admin,{...input,fixture:{...pubFixture,tags:[]}},idempotency()),202)
+  current=await personByName('タグ検証B');await assign(current,current.tags.filter(t=>t!=='experienced'))
+  await flush(2)
+  assert.equal((await read('SELECT status FROM test_send WHERE id=$1',[pending.id])).rows[0].status,'cancelled')
+  const t2=await freshTester(tagOther)
+  current=await personByName('タグ検証B');await assign(current,[...current.tags,'experienced'])
+  const t3=expect(await post(testSend,admin,{...input,tester:t2.id},idempotency()),202)
+  await flush(2)
+  assert.equal((await read('SELECT status FROM test_send WHERE id=$1',[t3.id])).rows[0].status,'accepted')
+  assert.equal(pushesTo(tagOther).filter(x=>x.text.includes('絞り込みの動作確認')).length,1)
+  assert.equal(pushesTo(tagUser).filter(x=>x.text.includes('絞り込みの動作確認')).length,0)
   assert.deepEqual((await read('SELECT contract_active,auto_enabled FROM store WHERE id=$1',[storeId])).rows[0],{contract_active:false,auto_enabled:false})
 })

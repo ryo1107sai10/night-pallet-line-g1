@@ -7,7 +7,7 @@ import { channel, evidence, testDeliveryConfirmed } from './line.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { INTERVIEW_LINK_MARKER } from './interview-link.js'
 import { CUSTOMER_LINK_MARKER } from './customer-link.js'
-import { allowApplicantTagGraph } from './applicant-tags.js'
+import { allowApplicantTagGraph, tagTestFacts } from './applicant-tags.js'
 
 const nodeId = z.string().regex(/^[a-zA-Z0-9_-]{1,50}$/)
 const base = { id:nodeId, name:z.string().max(100) }
@@ -185,7 +185,7 @@ export async function scenarioTestStatus({db}:Context,id:string) {
 
 export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:string,input:unknown) {
   const {db,actor,store}=ctx
-  const data=z.strictObject({revision,node:nodeId,tester:uuid,fixture}).parse(input)
+  const data=z.strictObject({revision,node:nodeId,tester:uuid,fixture,actual_tags:z.boolean().optional()}).parse(input)
   if (!cfg.external) throw new Fault(409,'HTTPS_REQUIRED','公開HTTPS環境でテスト送信してください。')
   await lockDispatch(db,actor.tenant_id)
   return once(db,cfg,actor,'scenario.test_send',key,{id,...data},async()=>{
@@ -196,7 +196,7 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
     const {rows:[flags]}=await db.query(`SELECT t.stopped OR s.stopped AS stopped FROM store s
       JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[store])
     if (c.stopped || flags.stopped) throw new Fault(409,'DELIVERY_STOPPED','配信が停止中です。')
-    const { rows:[proof] }=await db.query(`SELECT t.id,t.user_key FROM tester t
+    const { rows:[proof] }=await db.query(`SELECT t.id,t.user_key,t.verified_at FROM tester t
       WHERE t.id=$1 AND t.channel_id=$2 AND t.generation=$3 AND t.purpose=$4 AND t.verified_at IS NOT NULL AND t.expires_at>now()
       AND EXISTS(SELECT 1 FROM webhook_event e WHERE e.channel_id=t.channel_id AND e.user_key=t.user_key
         AND e.kind IN ('follow','message') AND e.generation=t.generation AND
@@ -214,7 +214,17 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
       !checks.redelivery_enabled || !checks.auto_reply_checked || (!checks.non_developer&&!verifiedTestOnly)) {
       throw new Fault(409,'TEST_NOT_READY','先に公式アカウントのLINE接続を確認してください。')
     }
-    const result=await preview(db,store,current.graph,data.fixture)
+    const selected=current.graph.nodes.find(n=>n.id===data.node)
+    let guard=null, testFixture=data.fixture
+    if(data.actual_tags){
+      if(current.graph.purpose!=='recruitment'||current.graph.trigger!=='tag_campaign'||!current.published_version||selected?.type!=='message'||!selected.tagGuard)
+        throw new Fault(422,'TAG_TEST_GRAPH_REQUIRED','公開した採用タグ絞り込みテンプレートのメッセージを選んでください。')
+      guard=selected.tagGuard
+      const facts=await tagTestFacts(db,c,proof.user_key,guard,proof.verified_at)
+      if(!facts)throw new Fault(409,'TAG_TEST_CONDITIONS','テスター本人の現在のタグ・予約・対応状態が配信条件と一致しません。')
+      testFixture={...data.fixture,tags:facts.tags,booked:facts.booked}
+    }
+    const result=await preview(db,store,current.graph,testFixture)
     const message=result.events.find(event=>event.id===data.node)?.message
     if (!message) throw new Fault(422,'MESSAGE_NOT_SCHEDULED','配信予定があるメッセージを選んでください。')
     // 面談予約URL・来店予約・設定URLはシミュレーション用のダミー値をマーカーに戻して封緘し、送信直前に受信者ごとの実URLへ差し替える。
@@ -223,13 +233,13 @@ export async function queueScenarioTest(ctx:Context,cfg:Config,id:string,key:str
     let body=message
     if (dummyInterview) body=body.split(dummyInterview).join(INTERVIEW_LINK_MARKER)
     if (dummyCustomer) body=body.split(dummyCustomer).join(CUSTOMER_LINK_MARKER)
-    const marked='【接続テスト】\n'+body
+    const marked=(guard?'【絞り込み検証】':'【接続テスト】')+'\n'+body
     if (marked.length>5000) throw new Fault(422,'MESSAGE_TOO_LONG','テストの表示を含めて5000文字以内にしてください。')
     const job=newId()
     await db.query(`INSERT INTO test_send
-      (id,tenant_id,store_id,channel_id,tester_id,actor_id,operation_key,generation,scenario_id,scenario_revision,test_body)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,[job,actor.tenant_id,store,c.id,proof.id,actor.id,
-      keyed(cfg,'scenario-test:'+id+':'+key),c.generation,id,current.revision,seal(cfg,'test-body:'+job,marked)])
+      (id,tenant_id,store_id,channel_id,tester_id,actor_id,operation_key,generation,scenario_id,scenario_revision,test_body,tag_test_guard)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[job,actor.tenant_id,store,c.id,proof.id,actor.id,
+      keyed(cfg,'scenario-test:'+id+':'+key),c.generation,id,current.revision,seal(cfg,'test-body:'+job,marked),guard===null?null:JSON.stringify(guard)])
     await audit(db,actor.tenant_id,store,actor.id,'scenario.test_queue',id,null,{job,node:data.node})
     return {id:job,status:'queued'}
   })
