@@ -272,3 +272,8 @@ dialog p{font-size:13px;margin-bottom:12px;color:#c6c7df}
 .diff-detail-box strong{display:block;font-size:11px;color:var(--muted);margin-bottom:6px}
 .diff-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6}
 @media(max-width:540px){.diff-pair{grid-template-columns:1fr}}
+@media(max-width:950px){
+  .canvas-scroll.basic-scroll{overflow:visible;overscroll-behavior:auto;scrollbar-gutter:auto}
+  .canvas-scroll.graph-scroll{overflow-x:auto;overflow-y:visible;overscroll-behavior-x:contain;overscroll-behavior-y:auto}
+  .workbar{top:env(safe-area-inset-top,0px)}
+}

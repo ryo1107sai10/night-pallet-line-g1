@@ -721,7 +721,7 @@ function flowView() {
   }else {
     bar.append(button('全分岐を開く',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,true);show()}),button('折りたたむ',()=>{for(const n of graph.nodes.filter(n=>n.type==='branch'))for(const k of ['yes','no'])branchOpen.set(n.id+':'+k,false);show()}))
   }
-  const scroll=node('div',null,'canvas-scroll')
+  const scroll=node('div',null,'canvas-scroll '+(viewMode==='graph'?'graph-scroll':'basic-scroll'))
   const board=node('div',null,'canvas '+(viewMode==='graph'?'graph-view':'basic-view'))
   if(viewMode==='graph')board.style.zoom=String(zoom)
   const help=node('p','＋で途中に挿入。カードを選んで編集、長押し・ドラッグで同じ経路内の順番を変更できます。','reorder-help')
