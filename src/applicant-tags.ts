@@ -315,7 +315,7 @@ async function campaignPlan(db:DB,cfg:Config,actor:Actor,store:string,data:z.inf
   if(!scenario)throw new Fault(409,'TAG_SCENARIO_NOT_READY','公開済みの採用「タグ絞り込み配信」シナリオを選んでください。')
   const c=await channel(db,scenario.channel_id)
   const {rows:[s]}=await db.query(`SELECT s.auto_enabled,s.contract_active,s.eligible_at,s.stopped,t.stopped AS tenant_stopped FROM store s JOIN tenant t ON t.id=s.tenant_id WHERE s.id=$1`,[store])
-  if(!cfg.external||!automationForStore(cfg,store)||!s.auto_enabled||!s.contract_active||!s.eligible_at||s.stopped||s.tenant_stopped||c.stopped||!channelReady(c))throw new Fault(409,'TAG_CAMPAIGN_NOT_READY','店舗の契約、自動配信、LINE接続を確認してください。')
+  const ready=cfg.external&&automationForStore(cfg,store)&&s.auto_enabled&&s.contract_active&&!!s.eligible_at&&!s.stopped&&!s.tenant_stopped&&!c.stopped&&channelReady(c)
   await syncSubjects(db,store)
   const {rows}=await db.query<SubjectRow>(`WITH scoped AS (${subjectSelect} WHERE s.store_id=$1 AND s.channel_id=$2) SELECT * FROM scoped
     WHERE (CASE WHEN $3='all' THEN tags @> $4::text[] ELSE tags && $4::text[] END) AND NOT (tags && $5::text[]) ORDER BY id LIMIT 501`,[store,c.id,data.criteria.match,data.criteria.include,data.criteria.exclude])
@@ -333,17 +333,18 @@ async function campaignPlan(db:DB,cfg:Config,actor:Actor,store:string,data:z.inf
       (EXISTS(SELECT 1 FROM channel_relationship r WHERE r.channel_id=w.channel_id AND r.user_key=w.user_key AND r.following) AND EXISTS(SELECT 1 FROM webhook_event e WHERE e.channel_id=w.channel_id AND e.user_key=w.user_key AND e.generation=$2 AND e.kind='message' AND e.occurred_at BETWEEN now()-interval '7 days' AND now())))`,[rows.map(r=>r.id),c.generation])
   const allowedIds=new Set(allowed.map(r=>r.id)),eligible=rows.filter(r=>allowedIds.has(r.id))
   const fingerprint=digest(JSON.stringify({scenario:scenario.id,version:scenario.published_version,generation:c.generation,tagsEpoch:tagSettings.recruitment_tags_enabled_at,scope:await deliveryScope(db,c.id),criteria:data.criteria,people:eligible.map(r=>r.id)}))
-  return {scenario,c,eligible,matched:rows.length,fingerprint}
+  return {scenario,c,eligible,matched:rows.length,fingerprint,ready}
 }
 export async function previewTagCampaign(db:DB,cfg:Config,actor:Actor,store:string,data:z.infer<typeof tagCampaignInput>){
   await lockDispatch(db,actor.tenant_id)
   const plan=await campaignPlan(db,cfg,actor,store,data)
-  return {eligible:plan.eligible.length,excluded:plan.matched-plan.eligible.length,fingerprint:plan.fingerprint,name:plan.scenario.graph.name,version:plan.scenario.published_version}
+  return {eligible:plan.eligible.length,excluded:plan.matched-plan.eligible.length,fingerprint:plan.fingerprint,name:plan.scenario.graph.name,version:plan.scenario.published_version,ready:plan.ready}
 }
 export async function queueTagCampaign(db:DB,cfg:Config,actor:Actor,store:string,key:string,data:z.infer<typeof tagCampaignConfirm>){
   return once(db,cfg,actor,'recruitment.tag_campaign.queue',key,{store,data},async()=>{
     await lockDispatch(db,actor.tenant_id)
     const plan=await campaignPlan(db,cfg,actor,store,data)
+    if(!plan.ready)throw new Fault(409,'TAG_CAMPAIGN_NOT_READY','店舗の契約、自動配信、LINE接続を確認してください。')
     if(!plan.eligible.length||plan.fingerprint!==data.fingerprint)throw new Fault(409,'TAG_CAMPAIGN_CHANGED','配信対象または公開版が変更されました。もう一度対象を確認してください。')
     const id=newId(),at=new Date()
     await db.query(`INSERT INTO applicant_tag_campaign(id,tenant_id,store_id,channel_id,scenario_id,scenario_version,title,criteria,recipients,created_by)

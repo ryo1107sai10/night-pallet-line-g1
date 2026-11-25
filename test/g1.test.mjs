@@ -1780,8 +1780,17 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   // エールは自店舗の採用流入・メニューと導入確認を操作できるが、他用途にはアクセスできない。
   const manualFeatures='/stores/'+manualStore+'/features'
   const f=expect(await scoped(alpha.tenant.id,manualFeatures),200)
-  expect(await scoped(alpha.tenant.id,manualFeatures,'PATCH',{...f,recruitment_enabled:true,recruitment_tags_enabled:true,sources_enabled:true,rich_menus_enabled:true}),200)
+  expect(await scoped(alpha.tenant.id,manualFeatures,'PATCH',{...f,recruitment_enabled:true,recruitment_tags_enabled:true,sources_enabled:false,rich_menus_enabled:false}),200)
   const recruitmentPath='/stores/'+manualStore+'/workflows/recruitment'
+  const acq=recruitmentPath+'/settings/acquisition'
+  const featureRevision=expect(await request(recruitmentPath+'/settings',{cookie:admin}),200).revision
+  const acqInput={revision:featureRevision,sources_enabled:true,rich_menus_enabled:true}
+  expect(await patch(acq,admin,{...acqInput,contract_active:true}),400)
+  expect(await patch('/stores/'+gamma.stores[0].id+'/workflows/recruitment/settings/acquisition',admin,acqInput),404)
+  expect(await patch('/stores/'+manualStore+'/workflows/customer/settings/acquisition',admin,acqInput),403)
+  const acqResult=expect(await patch(acq,admin,acqInput),200)
+  assert.equal(acqResult.sources_enabled,true);assert.equal(acqResult.rich_menus_enabled,true)
+  expect(await patch(acq,admin,acqInput),409)
   const initialChecks=expect(await request(recruitmentPath+'/checks',{cookie:admin}),200)
   assert.ok(initialChecks.some(item=>item.section==='contract'))
   assert.ok(initialChecks.some(item=>item.section==='sources'))
@@ -1821,6 +1830,7 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   expect(await post(manualPath,manager,lineInput,idempotency()),403)
   expect(await request(manualConnection+'/tests',{cookie:manager}),403)
   expect(await request(recruitmentPath+'/checks',{cookie:manager}),404)
+  expect(await patch(acq,manager,{revision:acqResult.revision,sources_enabled:false,rich_menus_enabled:false}),403)
   expect(await request(recruitmentPath+'/sources',{cookie:manager}),404)
   expect(await request(recruitmentPath+'/rich-menus',{cookie:manager}),404)
   expect(await request('/stores/'+storeId+'/workflows/recruitment/checks',{cookie:manager}),200)

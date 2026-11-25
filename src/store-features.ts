@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { audit, conflict, Fault, missing, revision, type Actor, type DB } from './core.js'
+import { audit, conflict, Fault, forbidden, missing, revision, type Actor, type DB } from './core.js'
 import { lockDispatch } from './dispatch-lock.js'
 
 export const featureInput = z.strictObject({
@@ -88,4 +88,19 @@ export async function saveStoreFeatures(db:DB,actor:Actor,store:string,input:Fea
   }
   await audit(db,actor.tenant_id,store,actor.id,'store.features',store,null,features)
   return settings
+}
+
+// The agency's current master can configure only recruitment acquisition
+// features. Contract, consent, channel readiness and dispatch flags are separate.
+export const recruitmentAcquisitionInput=z.strictObject({revision,sources_enabled:z.boolean(),rich_menus_enabled:z.boolean()})
+export async function saveRecruitmentAcquisition(db:DB,actor:Actor,store:string,input:z.infer<typeof recruitmentAcquisitionInput>){
+  if(!actor.agency||actor.role!=='admin')throw forbidden()
+  await lockDispatch(db,actor.tenant_id)
+  const result=await db.query(`UPDATE store SET sources_enabled=$2,rich_menus_enabled=$3,revision=revision+1
+    WHERE id=$1 AND revision=$4 RETURNING id`,[store,input.sources_enabled,input.rich_menus_enabled,input.revision])
+  if(!result.rowCount)throw conflict()
+  if(input.rich_menus_enabled)await db.query(`UPDATE workflow_contact w SET menu_due_at=now() FROM workflow_menu m
+    WHERE w.store_id=$1 AND w.channel_id=m.channel_id AND w.purpose=m.purpose AND w.purpose='recruitment'`,[store])
+  await audit(db,actor.tenant_id,store,actor.id,'store.recruitment_acquisition',store,null,{sources_enabled:input.sources_enabled,rich_menus_enabled:input.rich_menus_enabled})
+  return storeFeatures(db,store)
 }

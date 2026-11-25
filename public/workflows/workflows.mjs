@@ -268,7 +268,8 @@ function tagManager(root,data,store,path,refresh){
       const result=await api(path+'/campaigns/preview','POST',input)
       confirmation.append(el('p',result.name+' · 版 '+result.version+'：配信対象 '+result.eligible+'人、同意・友だち・対応状態などで除外 '+result.excluded+'人'))
       const sendKey=crypto.randomUUID()
-      if(result.eligible)confirmation.append(button(result.eligible+'人への配信を開始',async()=>{if(!confirm('表示の対象へ実際のLINEメッセージを配信します。開始しますか？'))return;const queued=await api(path+'/campaigns','POST',{...input,fingerprint:result.fingerprint},sendKey);await refresh(queued.queued+'人への配信を受け付けました。')}))
+      if(!result.ready)confirmation.append(el('p','対象の照合は完了しました。契約・自動配信・公式LINEの検収が必要なため、実際の配信は開始できません。','muted'))
+      if(result.ready&&result.eligible)confirmation.append(button(result.eligible+'人への配信を開始',async()=>{if(!confirm('表示の対象へ実際のLINEメッセージを配信します。開始しますか？'))return;const queued=await api(path+'/campaigns','POST',{...input,fingerprint:result.fingerprint},sendKey);await refresh(queued.queued+'人への配信を受け付けました。')}))
     }),confirmation)
   }
   for(const campaign of data.campaigns){const card=el('article',null,'tag-subject');card.append(el('h4',campaign.title),el('p',dateLabel(campaign.created_at,store.timezone)+' · 対象 '+campaign.recipients+'人 · 未処理 '+campaign.pending+' · 実行中 '+campaign.running+' · 終了 '+campaign.finished+' · LINE受付 '+campaign.accepted+'通'+(campaign.stopped?' · 停止済':'')))
@@ -471,6 +472,15 @@ function templateEditor(root,templates,path,refresh){
     pane.append(details(entry.label,item))
   }
   root.append(details('この店舗の定型文を管理',pane))
+}
+function acquisitionSettings(settings,path,refresh){
+  const pane=el('section',null,'record')
+  pane.append(el('h3','店舗の採用機能設定'),el('p','エールのマスターは、この店舗の流入分析とリッチメニューを切り替えられます。通常の自動配信や契約状態は変更しません。'))
+  pane.append(form([field('流入分析を有効にする','sources','checkbox',settings.sources_enabled),field('リッチメニューを有効にする','menus','checkbox',settings.rich_menus_enabled)],'機能設定を保存',async values=>{
+    await api(path+'/settings/acquisition','PATCH',{revision:settings.revision,sources_enabled:values.sources==='on',rich_menus_enabled:values.menus==='on'})
+    await refresh('店舗の採用機能設定を保存しました。')
+  }))
+  return pane
 }
 function checks(root,entries,store){
   root.append(el('h2','運用チェック'))
@@ -712,10 +722,11 @@ async function render(){
     sections.push(['forms',use==='recruitment'?'応募フォーム':'回答フォーム'],['responses','フォーム回答'])
   if(use==='recruitment'&&settings.recruitment_enabled&&['admin','manager'].includes(actor.role))sections.push(['recruitment','応募・選考'],['tags','採用タグ・配信'])
   const canManageAcquisition=!agency||use==='recruitment'&&['admin','manager'].includes(actor.role)
+  const canToggleAcquisition=agency&&use==='recruitment'&&actor.role==='admin'
   if(canManageAcquisition){
-    if(settings.sources_enabled)sections.push(['sources','流入分析'])
+    if(settings.sources_enabled||canToggleAcquisition)sections.push(['sources','流入分析'])
     if(use==='customer'&&settings.campaigns_enabled)sections.push(['campaigns','絞り込み配信'])
-    if(settings.rich_menus_enabled)sections.push(['rich-menus','リッチメニュー'])
+    if(settings.rich_menus_enabled||canToggleAcquisition)sections.push(['rich-menus','リッチメニュー'])
   }
   if(settings.inbox_enabled)sections.push(['inbox','LINE受信箱'])
   if(settings.inbox_enabled&&(agency&&['admin','manager'].includes(actor.role)||!agency&&use==='customer'))sections.push(['intake','受付保留'])
@@ -733,7 +744,11 @@ async function render(){
     if(current===key)tab.setAttribute('aria-current','page')
     tabs.append(tab)
   }
-  if(unavailableAcquisition){content.replaceChildren(el('p',(unavailableAcquisition==='sources'?'流入分析':'リッチメニュー')+'はこの店舗では無効です。北村さんの管理画面で有効にしてください。'));return}
+  if(unavailableAcquisition){
+    content.replaceChildren(el('p',(unavailableAcquisition==='sources'?'流入分析':'リッチメニュー')+'はこの店舗では無効です。'+(canToggleAcquisition?'下の設定から有効にできます。':'管理者に有効化を依頼してください。')))
+    if(canToggleAcquisition)content.append(acquisitionSettings(settings,path,async message=>{current=unavailableAcquisition;await render();notice(message)}))
+    return
+  }
   if(tagsDisabled){content.replaceChildren(el('p','この店舗の応募・選考管理が無効です。北村さんの管理画面で有効にすると採用タグを利用できます。'));return}
   if(formDisabled){content.replaceChildren(el('p','この店舗の応募フォーム機能は無効です。北村さんの管理画面で有効にすると、エールがフォームを管理できます。'));return}
   const key=current
@@ -754,7 +769,7 @@ async function render(){
   if(key==='rich-menus')richMenus(panel,data,path,refresh,use)
   if(key==='inbox'||key==='intake')inbox(panel,data,store,key==='inbox'?path+'/inbox':base+'/intake',refresh,key==='intake')
   if(key==='delivery')deliveries(panel,data,store,path,refresh)
-  if(key==='checks')checks(panel,data,store)
+  if(key==='checks'){if(canToggleAcquisition)panel.append(acquisitionSettings(settings,path,refresh));checks(panel,data,store)}
   content.replaceChildren(panel)
 }
 

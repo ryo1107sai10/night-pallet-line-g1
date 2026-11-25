@@ -30,6 +30,7 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   if(['admin','manager'].includes(actor.role)&&includesRoute('/stores/:store/recruitment',route))return
   if(req.params.purpose?.toString().toLowerCase()==='recruitment'){
     if(reads&&['settings','delivery'].some(page=>route===workflow+'/'+page))return
+    if(actor.role==='admin'&&req.method==='PATCH'&&route===workflow+'/settings/acquisition')return
     // 採用応募フォームはエールのマスターと店舗担当マネージャーが管理する。
     // workflowAccess の店舗割当と storeFeatures の有効化判定は引き続き適用する。
     if(['admin','manager'].includes(actor.role)){

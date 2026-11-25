@@ -35,7 +35,7 @@ import { changeInterviewVisibility, confirmInterview, interviewAccess, interview
   updateInterview, recruitmentSubject } from './interviews.js'
 import { addBlock, availabilityOverview, beginCalendarLink, blockInput, claimCalendarLink, finishCalendarLink,
   googleCalendarInput, googleCalendarReturn, googleFromEnvironment, removeBlock, unlinkInterviewCalendar } from './interview-availability.js'
-import { featureInput, requireFeature, saveStoreFeatures, storeFeatures } from './store-features.js'
+import { featureInput, recruitmentAcquisitionInput, requireFeature, saveRecruitmentAcquisition, saveStoreFeatures, storeFeatures } from './store-features.js'
 import { customerTagInput, listTags, saveCustomerTags, saveTagRule, tagFilter, tagRuleInput,
   listTagSegments, removeTagSegment, saveTagSegment, tagSegmentInput, tagSegmentDelete } from './customer-tags.js'
 import { caseInput, formFor, formInput, formQuery, formResponse, listForms, listRecruitment, responses, saveForm, submitForm, updateCase,
@@ -520,6 +520,10 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   const workflow='/stores/:store/workflows/:purpose'
   api.get('/dashboard',staff((db,actor)=>operationsDashboard(db,actor)))
   api.get(workflow+'/settings',workflowStaff((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
+  api.patch(workflow+'/settings/acquisition',workflowStaff((db,actor,req)=>{
+    if(workPurpose(req)!=='recruitment')throw forbidden()
+    return saveRecruitmentAcquisition(db,actor,idOf(req,'store'),recruitmentAcquisitionInput.parse(req.body))
+  }))
   api.get(workflow+'/checks',workflowStaff((db,_actor,req)=>workflowChecks(db,cfg,idOf(req,'store'),workPurpose(req),google.configured)))
   api.get(workflow+'/delivery',workflowStaff((db,_actor,req)=>
     serviceHistory(db,cfg,idOf(req,'store'),workPurpose(req),req.query.failures==='1')))
