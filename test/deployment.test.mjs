@@ -94,6 +94,20 @@ else if(args[0]==='run'&&args[1]==='services'&&args[2]==='describe'){
       {cwd:resolve('.'),env:{...env,NIGHT_FAIL_HEALTH:'true'},encoding:'utf8'})
     assert.notEqual(result.status,0)
     assert.ok(!(await readFile(join(dir,'calls'),'utf8')).includes('update-traffic'))
+    await rm(join(dir,'calls'));await rm(join(dir,'tag'))
+    const external=structuredClone(current)
+    external.spec.template.spec.containers[0].env.push({name:'DATABASE_URL',valueFrom:{secretKeyRef:{name:'night-supabase-app-url',key:'1'}}})
+    await writeFile(join(dir,'current'),JSON.stringify(external))
+    result=spawnSync('bash',['deploy/cloud-run.sh','sample-project','external-postgres','app:local'],{cwd:resolve('.'),env,encoding:'utf8'})
+    assert.equal(result.status,0,result.stderr)
+    const supabaseCalls=(await readFile(join(dir,'calls'),'utf8')).trim().split('\n').map(JSON.parse)
+    const releases=supabaseCalls.filter(c=>c.cmd==='gcloud'&&c.args[0]==='run'&&(c.args[1]==='deploy'||c.args[1]==='jobs'))
+    assert.equal(releases.length,2)
+    for(const call of releases){
+      assert.ok(call.args.includes('--clear-cloudsql-instances'))
+      assert.ok(call.args.some(arg=>arg.includes('DATABASE_URL=night-supabase-app-url:1')&&arg.includes('/secrets/supabase-ca.crt=night-supabase-ca:latest')))
+    }
+    assert.ok(!supabaseCalls.some(c=>c.cmd==='gcloud'&&c.args[0]==='sql'))
   } finally { await rm(dir,{recursive:true,force:true}) }
 })
 
