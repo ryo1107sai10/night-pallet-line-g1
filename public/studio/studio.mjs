@@ -283,7 +283,17 @@ async function refreshStore(next) {
     const row=node('div')
     const conflict=!!recovery.id&&(!saved||saved.revision!==recovery.revision)
     row.append(node('p',conflict?'サーバー上の版が変わっています。復元する場合は別の新規下書きとして開きます。':'前回の未保存編集を復元できます。'))
-    row.append(button('下書きを復元',()=>{$('#dialog').close();if(!conflict&&saved){setupFlow(saved);graph=structuredClone(recovery.graph);dirty=true;selection=graph.entry;show();scheduleSave()}else{draftScenario(recovery.graph,null,recovery.meta,!conflict&&recovery.key?recovery.key:undefined)}},'primary'),button('復元しない',()=>{clearRecovery();$('#dialog').close()}))
+    row.append(button('下書きを復元',async()=>{
+      let latest
+      if(!conflict&&saved)latest=demo?saved:await api(base()+'/'+saved.id)
+      $('#dialog').close()
+      if(latest&&latest.revision===recovery.revision){
+        setupFlow(latest);graph=structuredClone(recovery.graph);dirty=true;selection=graph.entry;show();scheduleSave()
+      }else{
+        draftScenario(recovery.graph,null,recovery.meta,!recovery.id&&!conflict&&recovery.key?recovery.key:undefined)
+        if(recovery.id)announce('サーバー版を保護するため、復元内容は別の新規下書きとして開きました。')
+      }
+    },'primary'),button('復元しない',()=>{clearRecovery();$('#dialog').close()}))
     dialog('未保存の下書きを復元',new Date(recovery.at).toLocaleString('ja-JP'),row)
   }
 }
@@ -1195,9 +1205,10 @@ function publication() {
     },scenario.stopped?'quiet':'danger'))
   }
   wrap.append(row)
-  if (scenario.versions?.length) {
+  const availableVersions=scenario.versions?.length?scenario.versions:scenario.published_version?[{version:scenario.published_version}]:[]
+  if(availableVersions.length){
     const list=node('ul',null,'log')
-    for(const version of scenario.versions) {
+    for(const version of availableVersions) {
       const item=node('li')
       item.append(button('v'+version.version+' の内容を見る',async()=>{
         const stored=version.graph?version:await api(base()+'/'+scenario.id+'/versions/'+version.version)
