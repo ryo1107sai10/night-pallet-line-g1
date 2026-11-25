@@ -21,7 +21,7 @@ import {beginModuleLink, finishModuleLink, moduleConfigured, moduleReturn, modul
 import { changeOnboarding, guideLookup, guidePath, guideSubmission, listOnboarding, markOnboardingRegistered,
   onboardingChange, onboardingDetails, readGuide, submitGuide } from './line-onboarding.js'
 import { createScenario, saveScenario, scenarioDetail, scenarioList, scenarioTesters, scenarioTestStatus, queueScenarioTest, transitionScenario, versionDetail } from './scenario.js'
-import { lockDispatch, setStop } from './jobs.js'
+import { lockDispatch, setStop, workOnce } from './jobs.js'
 import { customerFields, consentVersion, updateProfile, profileInput, authenticateCustomer,
   customerSessionCookie, setPreferences, customerById, selfPreferenceInput, emitDelivery } from './customer.js'
 import { bookingInput, changeBooking, createSlot, listBookings, listSlots, ownBookingChange, ownBookingInput,
@@ -54,6 +54,7 @@ import { completeStoreSetup, confirmStoreSetup, createRegistration, designateReg
 import { CUSTOMER_LINK_SESSION_TTL_SECONDS, redeemCustomerLink } from './customer-link.js'
 import { workflowChecks } from './workflow-checks.js'
 import { dispatchLineWork, lineDispatchFromEnvironment, lineDispatchInput, lineDispatchPath } from './line-dispatch.js'
+import { scheduledWorkFromEnvironment, scheduledWorkPath } from './scheduled-work.js'
 import { operationsDashboard } from './operations-dashboard.js'
 
 
@@ -89,7 +90,8 @@ const address = (req: Request) => req.socket.remoteAddress ?? 'unknown'
 const here = (path: string) => fileURLToPath(new URL(path,import.meta.url))
 
 export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), google = googleFromEnvironment(cfg),
-  dispatch = lineDispatchFromEnvironment(cfg)) {
+  dispatch = lineDispatchFromEnvironment(cfg),
+  scheduled = scheduledWorkFromEnvironment(cfg,async()=>{await workOnce(pool,cfg,line,google)})) {
   const app = express()
   const api = express.Router({mergeParams:true})
   const workspace = express.Router({mergeParams:true})
@@ -222,6 +224,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       throw new Fault(403,'FORBIDDEN','この操作を実行できる権限がありません。')
     }
     await dispatchLineWork(pool,cfg,line,lineDispatchInput.parse(req.body))
+    res.status(204).end()
+  })
+  app.post(scheduledWorkPath,async(req,res)=>{
+    if (!scheduled || !await scheduled.verify(req.get('Authorization') ?? '')) {
+      throw new Fault(403,'FORBIDDEN','この操作を実行できる権限がありません。')
+    }
+    const started = performance.now()
+    await scheduled.run()
+    console.info(JSON.stringify({event:'scheduled_work_completed',elapsed_ms:Math.round(performance.now()-started)}))
     res.status(204).end()
   })
   workspace.use('/api/v1',api)

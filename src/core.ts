@@ -80,7 +80,11 @@ export function poolFor(url: string | undefined) {
   if (!url) throw new Error('Database URL is required.')
   const pool = new pg.Pool({
     connectionString: url,
-    options: '-c search_path=night,pg_catalog -c timezone=UTC -c statement_timeout=8000',
+    // Session-mode proxies may not forward PostgreSQL startup options. Await
+    // initialization on every new connection before it is used by the pool.
+    onConnect: async client => {
+      await client.query("SET search_path=night,pg_catalog; SET timezone='UTC'; SET statement_timeout=8000")
+    },
     connectionTimeoutMillis: 5000,
   })
   // プールが idle クライアントのエラーを 'error' イベントとして再発火したとき、
