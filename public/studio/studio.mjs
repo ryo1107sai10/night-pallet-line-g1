@@ -781,8 +781,8 @@ function flowView() {
   title.append(badges)
   const bar=node('div',null,'toolbar')
   bar.append(button('＋ ステップ追加',()=>addStep(),'primary'),button('検索',openStepSearch),Object.assign(button(multiSelect?'選択終了':'複数選択',toggleMultiSelect),{id:'multi-select-toggle'}),button('ツール ▾',openCanvasTools),node('span',null,'spacer'))
-  const left=button(hideLibrary?'一覧を表示':'一覧を隠す',()=>{hideLibrary=!hideLibrary;savePrefs();applyPanelMode();show()});left.classList.add('desktop-panel-toggle');bar.append(left)
-  const right=button(hideInspector?'設定を表示':'設定を隠す',()=>{hideInspector=!hideInspector;savePrefs();applyPanelMode();show()});right.classList.add('desktop-panel-toggle');bar.append(right)
+  const left=button(hideLibrary?'一覧を表示':'一覧を隠す',()=>{hideLibrary=!hideLibrary;savePrefs();applyPanelMode();show()});left.classList.add('desktop-panel-toggle');left.dataset.panelToggle='library';bar.append(left)
+  const right=button(hideInspector?'設定を表示':'設定を隠す',()=>{hideInspector=!hideInspector;savePrefs();applyPanelMode();show()});right.classList.add('desktop-panel-toggle');right.dataset.panelToggle='inspector';bar.append(right)
   if(viewMode==='graph'){
     const setZoom=value=>zoomCanvas(value)
     const zoomOut=button('－',()=>setZoom(zoom-.1));zoomOut.setAttribute('aria-label','縮小')
@@ -1375,7 +1375,7 @@ function show() {
 }
 
 function applyPanelMode(){
-  const layout=$('#layout');layout.style.setProperty('--library-width',libraryWidth+'px');layout.style.setProperty('--inspector-width',inspectorWidth+'px');layout.classList.toggle('hide-library',hideLibrary);layout.classList.toggle('hide-inspector',hideInspector);layout.classList.toggle('focus-mode',focusMode)
+  const layout=$('#layout');layout.style.setProperty('--library-width',libraryWidth+'px');layout.style.setProperty('--inspector-width',inspectorWidth+'px');layout.classList.toggle('hide-library',hideLibrary);layout.classList.toggle('hide-inspector',hideInspector);layout.classList.toggle('focus-mode',focusMode);const left=$('[data-panel-toggle=library]'),right=$('[data-panel-toggle=inspector]');if(left)left.textContent=hideLibrary?'一覧を表示':'一覧を隠す';if(right)right.textContent=hideInspector?'設定を表示':'設定を隠す'
 }
 function validationIssues(){
   if(!graph)return []
