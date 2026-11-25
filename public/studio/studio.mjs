@@ -18,6 +18,7 @@ const defaults={zone:'Asia/Tokyo',cutoff:'06:00',start:'',bookingAt:'',booked:fa
   dayCount:0,weekCount:0,tags:[],bookingLinkValid:true,eligible:true,contractActive:true,budgetAvailable:true,bookingCurrent:true}
 let person={...defaults,values:{name:'水城あおい',store:'銀座店（サンプル）',staff:'橘',booking:'11月16日 23:00',
   price:'60分 8,000円（税込）',booking_url:'https://example.test/reservations/sample'}}
+let applicantCatalog={enabled:false,definitions:[]}
 let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,original='',dirty=false,tab='edit',part='workspace',simulation
 let busy=false, ready=false, preset='unbooked', localCreateKey
 const sessionDemo={
@@ -109,6 +110,15 @@ function choosePiece(value) {
     else btn.removeAttribute('aria-current')
   }
 }
+function applicantTagOptions(value){
+  const fields={'':'タグを選択'}
+  for(const t of applicantCatalog.definitions.filter(t=>t.active))fields[t.tag_key]=t.label
+  if(value&&!Object.hasOwn(fields,value))fields[value]=value+'（登録済みタグを確認）'
+  return fields
+}
+function tagField(label,value,change){
+  return graph.purpose==='recruitment'?field(label,value,change,{items:applicantTagOptions(value)}):field(label,value,change,{event:'input',attributes:{maxlength:'80'}})
+}
 function field(label,value,change,options={}) {
   const wrap=node('label',null,options.type==='checkbox'?'check':'field')
   const input=node(options.items?'select':options.type==='textarea'?'textarea':'input')
@@ -174,6 +184,7 @@ async function refreshStore(next) {
   store=next
   person={...person,zone:store.timezone,cutoff:store.cutoff,values:{...person.values,store:store.name}}
   channels=demo?channelDemo(store.id):await api('/stores/'+store.id+'/connections')
+  applicantCatalog=demo?{enabled:true,definitions:[{tag_key:'new_application',label:'新規応募',active:true},{tag_key:'interview_booked',label:'面談予約済',active:true}]}:await api('/stores/'+store.id+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]}))
   scenarioList=demo?structuredClone(demoRecords()):await api(base())
   setupFlow(scenarioList[0])
 }
@@ -501,12 +512,12 @@ function editStep() {
   }
   if (item.type==='branch') {
     wrap.append(field('分岐する条件',item.condition,set('condition'),{items:conditions}))
-    if (item.condition==='tag') wrap.append(field('タグ名',item.tag,set('tag',false),{event:'input',attributes:{maxlength:'80'}}))
+    if (item.condition==='tag') wrap.append(tagField('タグ名',item.tag,set('tag',false)))
     wrap.append(field('条件を満たす場合',item.yes,set('yes'),{items:destinations}),field('条件を満たさない場合',item.no,set('no'),{items:destinations}))
   } else if (item.type!=='end') wrap.append(field('次のステップ',item.next,set('next'),{items:destinations}))
   if (item.type==='tag') wrap.append(
     field('タグ操作',item.action??'add',set('action'),{items:{add:'付ける',remove:'外す'}}),
-    field('タグ名',item.tag,set('tag',false),{event:'input',attributes:{maxlength:'80'}}))
+    tagField('タグ名',item.tag,set('tag',false)))
   if (item.type==='task') wrap.append(field('担当者へ渡す内容',item.note,set('note',false),{type:'textarea',event:'input',attributes:{maxlength:'400'}}))
   wrap.append(button('ステップを削除',()=>{
     const ok=button('削除を確定',()=>{$('#dialog').close();removeStep(item)},'danger')
@@ -528,6 +539,7 @@ function settings() {
     field('配信先の公式アカウント',graph.channel,set('channel'),{items:opts}))
   if (Object.keys(opts).length<2) wrap.append(node('p','対象店舗に対応する公式アカウントを登録してください。','field-hint'))
   const available={...liveTriggers[graph.purpose]}
+  if(graph.purpose==='recruitment'&&!applicantCatalog.enabled){delete available.tag_added;delete available.tag_campaign}
   if(!Object.hasOwn(available,graph.trigger)){
     available[graph.trigger]=(triggers[graph.trigger]??graph.trigger)+'（下書き・テスト専用）'
     wrap.append(node('p','現在の開始イベントは実配信に対応していません。公開するには、開始イベントを対応する項目へ変更してください。','field-hint'))
@@ -535,6 +547,9 @@ function settings() {
   wrap.append(field('開始イベント',graph.trigger,set('trigger'),{items:available}),
     field('開始ステップ',graph.entry,set('entry'),
       {items:Object.fromEntries(graph.nodes.map(item=>[item.id,item.name]))}))
+  if(graph.trigger==='tag_added')wrap.append(tagField('開始条件のタグ',graph.triggerTag??'',set('triggerTag')))
+  if(graph.trigger==='tag_campaign')wrap.append(node('p','公開後、「採用タグ・絞り込み配信」で対象タグを選び、人数を確認して配信を開始します。','field-hint'))
+  if(graph.purpose==='recruitment'&&!applicantCatalog.enabled)wrap.append(node('p','採用タグを使うには店舗運用の採用タグ機能を有効にしてください。','field-hint'))
   const window=node('div',null,'row')
   window.append(field('販促を開始できる時刻',graph.windowStart,set('windowStart'),{type:'time'}),
     field('販促を終了する時刻',graph.windowEnd,set('windowEnd'),{type:'time'}))
@@ -631,7 +646,8 @@ function resultView() {
   for (const [key,label] of Object.entries(flags)) more.append(field(label,person[key],set(key),{type:'checkbox'}))
   more.append(field('予約日時',person.bookingAt,set('bookingAt'),{type:'datetime-local'}))
   for (const [key,label] of Object.entries(variables)) more.append(field(label,person.values[key],value=>{person.values[key]=value;simulation=null;clearResult()},{event:'input'}))
-  more.append(field('保有タグ（カンマ区切り）',person.tags.join(','),value=>set('tags')(value.split(',').map(item=>item.trim()).filter(Boolean))))
+  if(graph.purpose==='recruitment'){for(const t of applicantCatalog.definitions.filter(t=>t.active))more.append(field('保有タグ：'+t.label,person.tags.includes(t.tag_key),checked=>set('tags')(checked?[...new Set([...person.tags,t.tag_key])]:person.tags.filter(k=>k!==t.tag_key)),{type:'checkbox'}))}
+  else more.append(field('保有タグ（カンマ区切り）',person.tags.join(','),value=>set('tags')(value.split(',').map(item=>item.trim()).filter(Boolean))))
   const counts=node('div',null,'row')
   counts.append(field('直近1日の販促通数',person.dayCount,set('dayCount'),{type:'number',attributes:{min:'0'}}),
     field('直近7日の販促通数',person.weekCount,set('weekCount'),{type:'number',attributes:{min:'0'}}))

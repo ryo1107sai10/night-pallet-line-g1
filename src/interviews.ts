@@ -11,7 +11,8 @@ import { ensureRecruitmentCase, type WorkflowSubject } from './forms.js'
 import { refreshMenu } from './rich-menus.js'
 import { onInterviewReleased, scheduleInterviewNotices, setWaitlist } from './interview-notices.js'
 import { issueManageInterviewLink } from './interview-link.js'
-import { emitApplicantEvent } from './recruitment-automation.js'
+import { emitApplicantEvent } from './applicant-events.js'
+import { applyApplicantTagRules } from './applicant-tags.js'
 import { hostsFor, queueGoogleSync, requireHost } from './interview-hosts.js'
 import { clockLabel, fitsHours, interval } from '../public/interview/hours.mjs'
 import { localInstant } from '../public/studio/engine.mjs'
@@ -438,6 +439,7 @@ export async function confirmInterview(db:DB,cfg:Config,a:Applicant,input:z.infe
     await emitApplicantEvent(db,{tenant_id:a.tenant_id,store_id:a.store_id,channel_id:a.channel_id,
       applicant_key:a.applicant_key},'interview:'+id+':1:booked','interview_booked',new Date(),{id,revision:1})
   }
+  await applyApplicantTagRules(db,a,'interview_booked')
   await queueGoogleSync(db,a.store_id,id)
   await audit(db,a.tenant_id,a.store_id,null,'interview.confirm',id,null,{slot:input.slot})
   return visibleBooking(await ownBooking(db,a,id))
@@ -466,6 +468,7 @@ export async function updateInterview(db:DB,cfg:Config,a:Applicant,id:string,inp
       'interview:'+id+':'+nextRevision+':'+(cancelled?'cancelled':'changed'),
       cancelled?'interview_cancelled':'interview_changed',new Date(),{id,revision:nextRevision})
   }
+  await applyApplicantTagRules(db,a,input.action==='cancel'?'interview_cancelled':'interview_booked')
   await queueGoogleSync(db,a.store_id,id)
   return visibleBooking(await ownBooking(db,a,id))
 }

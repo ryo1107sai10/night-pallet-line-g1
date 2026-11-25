@@ -374,3 +374,15 @@ test('エールは担当店舗の採用応募フォームを管理できるが�
   expect(await request('/stores/'+storeId+'/line-module',{cookie:manager}),403)
   expect(await request('/platform/tours',{cookie:manager}),401)
 })
+
+test('採用タグの設定はエールの担当店舗に限定され、他法人・顧客・監督者専用機能に広がらない',async()=>{
+  await tx(owner,async db=>{await scope(db,created.tenant.id,storeId);await db.query('UPDATE store SET recruitment_enabled=true WHERE id=$1',[storeId])})
+  const base='/stores/'+storeId+'/workflows/recruitment/tags'
+  const data=expect(await request(base,{cookie:manager}),200);assert.ok(data.enabled);assert.ok(data.definitions.length>10)
+  const saved=expect(await request(base+'/definitions',{method:'PUT',cookie:manager,data:{revision:0,label:'店舗限定タグ',category:'対応',add_events:[],remove_events:[],active:true}}),200)
+  assert.ok(expect(await request(base+'/catalog',{cookie:master}),200).definitions.some(t=>t.tag_key===saved.tag_key))
+  expect(await request(base,{cookie:agencyAdmin}),404)
+  expect(await request(base.replace('/recruitment','/customer'),{cookie:manager}),403)
+  expect(await request('/stores/'+storeId+'/recruitment',{cookie:manager}),200)
+  expect(await request('/stores/'+storeId+'/line-module',{cookie:manager}),403)
+})

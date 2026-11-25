@@ -5,6 +5,7 @@ import { channel, channelCredentials, channelReady, userKey, type Channel, type 
 import type { WorkflowSubject } from './forms.js'
 import { lockDispatch } from './dispatch-lock.js'
 import { requireFeature,storeFeatures } from './store-features.js'
+import { applyApplicantTagRules } from './applicant-tags.js'
 
 const richMenuId=z.string().regex(/^richmenu-[0-9a-f]{32}$/i)
 export const menuInput=z.strictObject({channel:uuid,revision:z.int().nonnegative(),base_menu:richMenuId.nullable(),booked_menu:richMenuId.nullable()})
@@ -18,13 +19,18 @@ export function contactAddress(cfg:Config,row:{channel_id:string;purpose:string;
 export async function rememberContact(db:DB,cfg:Config,c:Channel,user:string,identity:WorkflowSubject){
   const features=await storeFeatures(db,c.store_id)
   if(!features.rich_menus_enabled&&!features.reminders_enabled&&!features.waitlist_enabled
-    &&!features.token_interviews_enabled&&!features.token_customers_enabled)return
+    &&!features.token_interviews_enabled&&!features.token_customers_enabled&&!(identity.purpose==='recruitment'&&features.recruitment_enabled&&features.recruitment_tags_enabled))return
   const contact=seal(cfg,contactContext(c.id,identity.purpose,identity.subject),user)
+  const {rows:[prior]}=await db.query(`SELECT 1 FROM workflow_contact WHERE channel_id=$1 AND purpose=$2 AND subject=$3`,[c.id,identity.purpose,identity.subject])
   await db.query(`INSERT INTO workflow_contact (tenant_id,store_id,channel_id,purpose,subject,user_key,recipient_box,last_seen_at,menu_due_at)
     VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),CASE WHEN $8 THEN now() END)
     ON CONFLICT(channel_id,purpose,subject) DO UPDATE SET last_seen_at=excluded.last_seen_at,
       recipient_box=excluded.recipient_box,menu_due_at=excluded.menu_due_at`,
   [c.tenant_id,c.store_id,c.id,identity.purpose,identity.subject,userKey(cfg,c,user),contact,features.rich_menus_enabled])
+  if(!prior&&c.purpose==='shared'&&identity.purpose==='recruitment'){
+    const follow=await db.query(`SELECT 1 FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND kind IN ('follow','refollow') LIMIT 1`,[c.id,userKey(cfg,c,user)])
+    if(follow.rowCount)await applyApplicantTagRules(db,{...identity,applicant_key:identity.subject},'follow')
+  }
 }
 
 export async function refreshMenu(db:DB,identity:WorkflowSubject){
