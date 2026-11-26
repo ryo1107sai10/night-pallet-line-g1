@@ -2,18 +2,41 @@ import type {Request,Response} from 'express'
 import {GoogleAuth} from 'google-auth-library'
 import {Readable} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
-import {resolve} from 'node:path'
+import {resolve,join} from 'node:path'
+import {fileURLToPath} from 'node:url'
+import {readFileSync,statSync} from 'node:fs'
 import {Fault,missing} from './core.js'
 import type {Topic} from './piyomaru-knowledge.js'
 
 export type Material = {
   id:string; type:'video'|'pdf'; title:string; description:string; duration?:string;
-  chapter?:number; pages?:number; topics:Topic[]; keywords:string[]; filename:string
+  chapter?:number; pages?:number; topics:Topic[]; keywords:string[]; filename:string;
+  managed?:'release'|'archive'; version?:string; updated_at?:string
 }
 // Catalog entries are reviewed training assets, not user uploads or applicant data.
 // Versioned object names let us refresh the manuals without changing public URLs.
 export const materialVersion='2026-11-26'
+export const releaseManualId='operation-manual'
+const archiveId='combined-guide-20261126'
+const subjects:Topic[]=['security','handoff','store','line','calendar','slots','draft','publish']
+const releaseDirectory=()=>process.env.PIYOMARU_RELEASE_DIRECTORY??fileURLToPath(new URL('../manual-generated/',import.meta.url))
+type ReleaseManifest={version:string;updated_at:string;pages:number;sha256:string}
+let manifestCache:{folder:string;value:ReleaseManifest}|undefined
+function releaseManifest(required=process.env.NPL_REQUIRE_RELEASE_MANUAL==='1'):ReleaseManifest|undefined{
+  const folder=releaseDirectory()
+  if(manifestCache?.folder===folder)return manifestCache.value
+  try{
+    const m=JSON.parse(readFileSync(join(folder,'manifest.json'),'utf8')) as ReleaseManifest
+    if(!/^[a-f0-9]{12}$/.test(m.version)||!/^\d{4}-\d{2}-\d{2}T/.test(m.updated_at)||!Number.isFinite(Date.parse(m.updated_at))||!Number.isInteger(m.pages)||m.pages<1||m.pages>40||!/^[a-f0-9]{64}$/.test(m.sha256))throw Error('Invalid manual manifest')
+    for(const name of ['operation-manual.pdf',...Array.from({length:m.pages},(_,i)=>'operation-manual-p'+(i+1)+'.jpg')]){const file=statSync(join(folder,name));if(!file.isFile()||file.size===0)throw Error('Incomplete manual')}
+    manifestCache={folder,value:m};return m
+  }catch{if(required)throw Error('Release manual is missing or incomplete. Rebuild the app image.');return undefined}
+}
+function generatedMaterial():Material|undefined{
+  const m=releaseManifest();return m?{id:releaseManualId,type:'pdf',title:'総合操作マニュアル（最新版・自動更新）',description:'北村さん・エール・店舗の操作手順、LINE・カレンダー・ステップ配信、健康診断、ピヨ丸、動画目次を収録。アプリの公開版に合わせて自動生成されます。',topics:subjects,keywords:['総合','マニュアル','説明書','最新版','ログイン','連携','予約','操作','ピヨ丸'],filename:'operation-manual.pdf',pages:m.pages,managed:'release',version:m.version,updated_at:m.updated_at}:undefined
+}
 const materials:readonly Material[]=[
+  {id:archiveId,type:'pdf',title:'総合操作マニュアル（2026.11.26 保存版）',description:'最初にまとめた19ページの総合PDFをそのまま保存した版です。最新の操作は自動更新版をご確認ください。',topics:[],keywords:['総合','マニュアル','説明書','保存版','旧版'],filename:archiveId+'.pdf',pages:19,managed:'archive',updated_at:'2026-11-26T00:00:00+09:00'},
   {id:'beginner-full',type:'video',title:'初心者向け 完全実践マニュアル',description:'全9章を通しで見る。公式LINE開設から応募・対面面談までを日本語音声で解説します。',duration:'28:10',topics:[],keywords:['初心者','全体','最初','全編','通し'],filename:'beginner-full.mp4'},
   {id:'chapter-01',type:'video',chapter:1,title:'準備とログイン',description:'必要なアカウント、認証、管理会社・店舗ごとの役割。',duration:'1:27',topics:['security','handoff'],keywords:['ログイン','認証','招待','権限','初回'],filename:'chapter-01.mp4'},
   {id:'chapter-02',type:'video',chapter:2,title:'公式LINEの新規開設',description:'作成フォーム、管理組織、申し込み完了まで。',duration:'2:26',topics:['line'],keywords:['line','ライン','開設','公式','新規'],filename:'chapter-02.mp4'},
@@ -29,20 +52,24 @@ const materials:readonly Material[]=[
   {id:'agency-guide',type:'pdf',pages:7,title:'エール向け 店舗運用ガイド',description:'店舗管理、LINE、Googleカレンダー、採用タグ、ステップ配信、日々の運用。',topics:['line','calendar','draft','slots','publish','handoff','store'],keywords:['エール','店舗','運用','タグ','配信','予約','カレンダー','連携'],filename:'agency-guide.pdf'},
   {id:'store-guide',type:'pdf',pages:2,title:'店舗向け LINE対応・面談運用ガイド',description:'LINEの管理権限を渡す方法、店長の手動返信、面談・引き継ぎ。',topics:['handoff'],keywords:['店舗','店長','返信','手動','引き継ぎ','面談'],filename:'store-guide.pdf'},
 ]
-export const libraryCatalog=materials.map(({filename,...m})=>({...m,url:'/platform/piyomaru/material/'+m.id}))
-export const materialFor=(id:string)=>materials.find(m=>m.id===id)
-export function suggestedMaterials(topics:Topic[]){
+const allMaterials=()=>{const current=generatedMaterial();return current?[current,...materials]:[...materials]}
+export const libraryCatalog=()=>allMaterials().map(({filename,...m})=>({...m,url:'/platform/piyomaru/material/'+m.id}))
+export const materialFor=(id:string)=>id===releaseManualId?generatedMaterial():materials.find(m=>m.id===id)
+export function suggestedMaterials(topics:Topic[],manualQuestion=false){
   const matches=materials.filter(m=>m.type==='video'&&m.topics.some(t=>topics.includes(t)))
   const first=topics[0]
-  return matches.sort((a,b)=>Number(b.topics.includes(first))-Number(a.topics.includes(first))).slice(0,3).map(m=>m.id)
+  const result=matches.sort((a,b)=>Number(b.topics.includes(first))-Number(a.topics.includes(first))).slice(0,3).map(m=>m.id)
+  if(generatedMaterial()&&(topics.length||manualQuestion))result.unshift(releaseManualId)
+  return result
 }
 export function createPiyomaruMediaSource(){
+  releaseManifest() // Production startup fails if the build did not produce every page.
   const directory=process.env.PIYOMARU_MEDIA_DIRECTORY
   const bucket=process.env.PIYOMARU_MEDIA_BUCKET
   if(bucket&&!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket))throw Error('Invalid Piyomaru media bucket.')
   const auth=bucket?new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}):undefined
   return async(req:Request,res:Response,asset?:{object_name:string|null;pages?:number|null})=>{
-    const material=materials.find(m=>m.id===req.params.material)
+    const material=materialFor(String(req.params.material))
     if(!material)throw missing()
     let filename=material.filename,type=material.type==='video'?'video/mp4':'application/pdf',objectName=asset?.object_name??null
     if(asset?.object_name&&!/^updates\/[0-9a-f-]{36}\.(mp4|pdf)$/.test(asset.object_name))throw missing()
@@ -53,11 +80,16 @@ export function createPiyomaruMediaSource(){
       filename=material.id+'-p'+page+'.jpg';type='image/jpeg'
       if(objectName)objectName=objectName.replace(/\.pdf$/,'-p'+page+'.jpg')
     }
+    if(material.managed&&objectName)throw missing()
     const range=req.get('Range')
     if(range&&!/^bytes=(?:\d+-\d*|-\d+)$/.test(range))throw new Fault(416,'MEDIA_RANGE','動画の再生位置を指定し直してください。')
     const disposition=type==='application/pdf'&&req.query.download==='1'?'attachment':'inline'
     res.set({'Cache-Control':'private, no-store','X-Robots-Tag':'noindex, nofollow','Content-Type':type,
       'Content-Disposition':disposition+'; filename="'+filename+'"','Accept-Ranges':'bytes'})
+    if(material.managed==='release'){
+      await new Promise<void>((done,reject)=>res.sendFile(filename,{root:resolve(releaseDirectory()),cacheControl:false,lastModified:false},error=>error?reject(error):done()))
+      return
+    }
     if(directory&&!bucket){
       // Only test/development fixtures supplied by the operator; filenames come from the catalog.
       await new Promise<void>((done,reject)=>res.sendFile(objectName??filename,{root:resolve(directory),cacheControl:false,lastModified:false},error=>error?reject(error):done()))

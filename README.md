@@ -215,3 +215,11 @@ Googleとの連携は既定で空き状況を参照します。オプション�
 Googleへの予定登録を使う店舗は「Googleカレンダーへの面談登録」をオンにし、Google連携をやり直して予定の編集権限を許可します。接続するGoogleアカウントには担当者の共有カレンダーを参照・編集できる権限が必要です。面談の作成・変更・取消はワーカーが処理し、Googleの件名に応募者名を含めません。書き込み停止中はGoogleに既に作成された予定が残ります。Googleアカウントを切り替える場合は旧カレンダーの予定も確認します。
 
 LINEへの実送信とメニュー切り替えは、公開HTTPS環境でLINE接続検収を終え、`AUTO_SEND_ENABLED=true` にしてから試験します。送信には店舗の適格性・契約・通数設定も必要です。LINE受付の記録と端末での到着を実機で照合します。受信箱の添付ファイル取得と画像・Flex返信は未提供です。[実機検証の手順](LIVE-INTERVIEW.md) · [LINEのユーザー別リッチメニュー](https://developers.line.biz/ja/docs/messaging-api/use-per-user-rich-menus/) · [Google Calendar Events](https://developers.google.com/workspace/calendar/api/v3/reference/events)
+
+### 総合操作マニュアルの自動更新
+
+北村さんのピヨ丸「動画・資料」の先頭に、アプリの公開版と同期する総合操作マニュアルを表示します。Docker のビルド時に `docs/manual/operation-manual.json` から日本語 PDF、全ページの画像、ソース指紋・生成日時を作成し、アプリと同じイメージでリリースします。ビルドの生成に失敗すると新しいイメージは公開できません。既存の個別教材の手動編集・履歴と、2026.11.26 の初回総合PDF保存版はそのまま保持します。生成物は非公開の認証付きルートのみで配布します。
+
+- 操作が変わる変更では、原稿の手順・ボタン名を同じコミットで更新します。`npm test` は原稿と現行 UI の参照文言を照合します。アプリの動作から勝手に手順を推測するのではなく、確認済みの原稿から毎回生成します。
+- リリース差分をレビューするときは `node scripts/check-manual-review.mjs <前のリリースのコミット>` を実行します。操作に影響しない修正は `docs/manual/review.md` に確認理由を記録します。
+- ローカル生成は Python 3 / ReportLab / Poppler / 日本語 TrueType フォントが必要です。`python3 scripts/build-operation-manual.py --font <日本語TTFのパス>`。本番のコンテナでは依存ライブラリ・フォントをビルド時にインストールします。

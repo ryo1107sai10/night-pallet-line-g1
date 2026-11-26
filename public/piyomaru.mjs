@@ -108,7 +108,7 @@ export function mountPiyomaru(page='platform'){
       const response=messages.findLast(m=>m.role==='assistant')
       const recommendations=(response?.materials??[]).map(id=>info.materials?.find(m=>m.id===id)).filter(Boolean)
       if(recommendations.length){
-        related.append(el('small','この質問に関連する動画','piyo-muted'))
+        related.append(el('small','この質問に関連する動画・資料','piyo-muted'))
         for(const m of recommendations)related.append(button((m.chapter?'第'+m.chapter+'章　':'')+m.title+(m.duration?'（'+m.duration+'）':''),()=>showLibrary(m.id),'piyo-chip'))
       }
       related.append(button('動画・資料の一覧を見る',()=>showLibrary(),'piyo-chip'))
@@ -217,19 +217,19 @@ export function mountPiyomaru(page='platform'){
       const pageNav=el('div',null,'piyo-page-nav')
       const previous=button('前のページ',()=>{libraryPage--;render()});previous.disabled=libraryPage<=1
       const next=button('次のページ',()=>{libraryPage++;render()},'piyo-primary');next.disabled=libraryPage>=chosen.pages
-      pageNav.append(previous,el('span',libraryPage+' / '+chosen.pages+' ページ','piyo-muted'),next)
+      const pagePicker=select(Array.from({length:chosen.pages},(_,i)=>[String(i+1),(i+1)+' / '+chosen.pages+' ページ']),String(libraryPage));pagePicker.setAttribute('aria-label','表示するページ');pagePicker.onchange=()=>{libraryPage=Number(pagePicker.value);render()};pageNav.append(previous,pagePicker,next)
       const pageLink=link('ページを大きく見る ↗',preview.src)
       const download=link('PDF本体をダウンロード',chosen.url+'?download=1','piyo-material-link');download.removeAttribute('target');download.download=chosen.id+'.pdf'
       const feedback=el('p',null,'piyo-muted');feedback.hidden=true
       preview.addEventListener('error',()=>{feedback.textContent='資料のページを読み込めませんでした。PDF本体をダウンロードして確認してください。';feedback.hidden=false})
-      reader.append(button('‹ 動画・資料一覧',()=>showLibrary()),el('strong',chosen.title),pageNav,link('',preview.src,'piyo-pdf-image-link'),feedback,pageLink,download)
+      reader.append(button('‹ 動画・資料一覧',()=>showLibrary()),el('strong',chosen.title),...(chosen.managed==='release'?[el('small','アプリ公開版 '+chosen.version+' ・ 自動更新','piyo-muted')]:chosen.managed==='archive'?[el('small','2026.11.26 保存版（当時の内容）','piyo-muted')]:[]),pageNav,link('',preview.src,'piyo-pdf-image-link'),feedback,pageLink,download)
       if(chosen.instructions)reader.append(el('strong','最新の操作手順'),el('p',chosen.instructions,'piyo-text-lines'))
       reader.querySelector('.piyo-pdf-image-link').append(preview);reader.querySelector('.piyo-pdf-image-link').setAttribute('aria-label','ページを大きく表示')
       content.append(reader);return
     }
     const title=el('div',null,'piyo-welcome')
-    title.append(el('span','動画・説明資料','piyo-kicker'),el('p','見たい項目を選んでね。動画の再生・PDFの閲覧ではMuseを呼び出さないよ。'),
-      button('教材を編集・更新する',()=>{managingLibrary=true;managedMaterial=materials[0]?.id??'';materialHistory=[];void loadMaterialHistory();render()}))
+    title.append(el('span','動画・説明資料','piyo-kicker'),el('p','総合操作マニュアルの最新版はアプリの更新と同時に公開されます。動画・PDFの閲覧ではMuseを呼び出さないよ。'),
+      button('教材を編集・更新する',()=>{managingLibrary=true;managedMaterial=materials.find(m=>!m.managed)?.id??'';materialHistory=[];void loadMaterialHistory();render()}))
     content.append(title)
     const usage=el('details',null,'piyo-library-guide')
     usage.append(el('summary','ピヨ丸の使い方・教材について'),el('p','まず「質問する」で知りたい手順を確認し、「診断」で店舗の状態、「導入代行」で対象店舗に合わせた面談型の提案を確認します。公式LINEの本人認証・同意は管理者が操作し、連携情報は安全な専用欄に入力します。ステップは下書きを確認してから公開できます。最新の動画や操作手順は「教材を編集・更新する」から下書きと公開を管理できます。'),
@@ -254,9 +254,9 @@ export function mountPiyomaru(page='platform'){
       if(!found.length){list.append(el('p','該当する教材がありません。別の言葉で検索してね。','piyo-muted'));return}
       for(const m of found){
         const card=el('article',null,'piyo-library-card')
-        const badge=el('span',m.type==='video'?(m.chapter?'第'+m.chapter+'章':'動画')+(m.duration?'　'+m.duration:''):'PDF資料　'+m.pages+'ページ','piyo-library-badge')
+        const badge=el('span',m.type==='video'?(m.chapter?'第'+m.chapter+'章':'動画')+(m.duration?'　'+m.duration:''):(m.managed==='release'?'最新版・自動更新　':m.managed==='archive'?'保存版　':'PDF資料　')+m.pages+'ページ','piyo-library-badge')
         card.append(badge,el('strong',m.title),el('p',m.description))
-        if(m.updated_at)card.append(el('small','更新：'+new Date(m.updated_at).toLocaleDateString('ja-JP'),'piyo-muted'))
+        if(m.updated_at)card.append(el('small','更新：'+new Date(m.updated_at).toLocaleDateString('ja-JP',{timeZone:'Asia/Tokyo'})+(m.version?' ・ 公開版 '+m.version:''),'piyo-muted'))
         if(m.type==='video')card.append(button('動画を見る',()=>showLibrary(m.id),'piyo-primary'))
         else card.append(button('資料を見る',()=>showLibrary(m.id),'piyo-primary'))
         list.append(card)
@@ -277,8 +277,8 @@ export function mountPiyomaru(page='platform'){
     const data=await r.json();if(!r.ok)throw new Error(data.message??'ファイルの保存に失敗しました。');return data
   }
   function drawMaterialManagement(){
-    const materials=info.materials??[],m=materials.find(x=>x.id===managedMaterial)
-    content.append(button('‹ 教材一覧に戻る',()=>showLibrary()),el('h3','教材の更新管理'),el('p','既存の教材を下書きとして更新し、内容を確認してから公開します。以前の版へ戻せます。','piyo-muted'))
+    const materials=(info.materials??[]).filter(x=>!x.managed),m=materials.find(x=>x.id===managedMaterial)
+    content.append(button('‹ 教材一覧に戻る',()=>showLibrary()),el('h3','教材の更新管理'),el('p','総合操作マニュアルの最新版と保存版は自動管理されます。それ以外の教材を下書きとして更新・公開し、以前の版へ戻せます。','piyo-muted'))
     if(!m)return
     const choose=select(materials.map(x=>[x.id,x.title]),m.id);choose.disabled=busy||materialHistoryLoading
     choose.onchange=()=>{managedMaterial=choose.value;pendingMaterialPublish=null;materialHistory=[];void loadMaterialHistory();render()}

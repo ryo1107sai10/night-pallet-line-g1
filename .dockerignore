@@ -8,3 +8,10 @@
 !public/**
 !db
 !db/**
+
+!Dockerfile
+!docs
+!docs/manual
+!docs/manual/operation-manual.json
+!scripts
+!scripts/build-operation-manual.py

@@ -1,6 +1,6 @@
 import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
-import { createHmac,randomBytes, randomUUID } from 'node:crypto'
+import { createHmac,createHash,randomBytes, randomUUID } from 'node:crypto'
 import { mkdir,mkdtemp, rm,writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -93,6 +93,16 @@ before(async () => {
   await writeFile(join(fixture,'chapter-03.mp4'),Buffer.from('virtual-video-data'))
   await writeFile(join(fixture,'supervisor-guide.pdf'),Buffer.from('%PDF-1.4\nvirtual-pdf'))
   await writeFile(join(fixture,'supervisor-guide-p1.jpg'),Buffer.from([0xff,0xd8,0xff,0xd9]))
+  const archive=Buffer.from('%PDF-1.4\noriginal-compiled-guide')
+  await writeFile(join(fixture,'combined-guide-20261126.pdf'),archive)
+  await writeFile(join(fixture,'combined-guide-20261126-p19.jpg'),Buffer.from([0xff,0xd8,0xff,0xd9]))
+  const release=join(dir,'release-guide');await mkdir(release)
+  const manual=Buffer.from('%PDF-1.4\nrelease-synced-manual')
+  await writeFile(join(release,'operation-manual.pdf'),manual)
+  await writeFile(join(release,'manifest.json'),JSON.stringify({version:'aabbccddeeff',updated_at:'2026-11-26T04:30:00Z',pages:2,sha256:createHash('sha256').update(manual).digest('hex')}))
+  for(const i of [1,2])await writeFile(join(release,'operation-manual-p'+i+'.jpg'),Buffer.from([0xff,0xd8,0xff,0xd9]))
+  process.env.PIYOMARU_RELEASE_DIRECTORY=release
+  process.env.NPL_REQUIRE_RELEASE_MANUAL='1'
   process.env.PIYOMARU_MEDIA_DIRECTORY=fixture
   const fetchLine = async url => {
     const address = new URL(url)
@@ -155,6 +165,8 @@ before(async () => {
 })
 
 after(async () => {
+  delete process.env.PIYOMARU_RELEASE_DIRECTORY
+  delete process.env.NPL_REQUIRE_RELEASE_MANUAL
   delete process.env.PIYOMARU_MEDIA_DIRECTORY
   if (server) await new Promise(resolve => server.close(resolve))
   await Promise.allSettled([pool?.end(), owner?.end()])
@@ -184,7 +196,7 @@ test('ピヨ丸は監督者本人専用、他法人・エールには設定・�
 
 test('動画・PDFは監督者だけ閲覧可能。シーク用の部分取得と不明な教材の拒否',async()=>{
   const info=expect(await request(piyo,{cookie:platform}),200)
-  assert.equal(info.materials.length,14)
+  assert.equal(info.materials.length,16)
   const chapter=info.materials.find(m=>m.id==='chapter-03')
   const manual=info.materials.find(m=>m.id==='supervisor-guide')
   assert.equal(chapter.type,'video');assert.equal(manual.type,'pdf')
@@ -211,6 +223,32 @@ test('動画・PDFは監督者だけ閲覧可能。シーク用の部分取得�
   assert.equal((await send(manual.url+'/page/6',{headers:{Cookie:platform}})).status,404)
   assert.equal((await send('/platform/piyomaru/material/not-listed',{headers:{Cookie:platform}})).status,404)
   assert.equal((await send(chapter.url,{headers:{Cookie:platform,Range:'bytes=0-1,3-4'}})).status,416)
+})
+
+test('公開版と同期する総合マニュアルと原本保存版は監督者のみ・手動編集で古い版にならない',async()=>{
+  const info=expect(await request(piyo,{cookie:platform}),200)
+  const latest=info.materials[0],archive=info.materials.find(m=>m.id==='combined-guide-20261126')
+  assert.equal(latest.id,'operation-manual');assert.equal(latest.managed,'release');assert.equal(latest.pages,2);assert.equal(latest.version,'aabbccddeeff')
+  assert.equal(archive.managed,'archive');assert.equal(archive.pages,19)
+  for(const cookie of [null,master,staff,plain])for(const m of [latest,archive]){
+    const headers=cookie?{Cookie:cookie}:{}
+    assert.equal((await send(m.url,{headers})).status,401)
+    assert.equal((await send(m.url+'/page/1',{headers})).status,401)
+  }
+  const headers={Cookie:platform}
+  const pdf=await send(latest.url+'?download=1',{headers});assert.equal(pdf.status,200);assert.match(pdf.headers.get('content-disposition'),/^attachment;/);assert.match(await pdf.text(),/release-synced-manual/)
+  const page=await send(latest.url+'/page/2',{headers});assert.equal(page.status,200);assert.equal(page.headers.get('content-type'),'image/jpeg')
+  assert.equal((await send(latest.url+'/page/3',{headers})).status,404)
+  const saved=await send(archive.url,{headers});assert.equal(saved.status,200);assert.match(await saved.text(),/original-compiled-guide/)
+  assert.equal((await send(archive.url+'/page/19',{headers})).status,200)
+  for(const m of [latest,archive]){
+    expect(await post(piyo+'/library/draft',platform,{material:m.id,title:'旧版への差し替え',description:'テスト',instructions:''}),409)
+    expect(await post(piyo+'/library/publish',platform,{material:m.id,revision:null,confirmed:true}),409)
+    assert.deepEqual(expect(await request(piyo+'/library/'+m.id,{cookie:platform}),200),[])
+    assert.equal((await send(m.url+'?revision='+randomUUID(),{headers})).status,404)
+  }
+  const answer=expect(await post(piyo+'/ask',platform,{question:'操作マニュアルはどこ？',mode:'guide',request:randomUUID()}),200)
+  assert.ok(answer.related_materials.includes('operation-manual'))
 })
 
 test('仮想の2店舗で代行を再開・下書きを作成・他店を拒否する',async()=>{

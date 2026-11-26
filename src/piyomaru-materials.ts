@@ -23,22 +23,25 @@ async function current(db:DB,p:Actor,material:string){return (await db.query<Rev
 async function byId(db:DB,p:Actor,id:string,lock=false){const {rows:[r]}=await db.query<Revision>('SELECT * FROM piyomaru_material_revision WHERE tenant_id=$1 AND staff_id=$2 AND id=$3'+(lock?' FOR UPDATE':''),[p.tenant_id,p.id,id]);if(!r)throw missing();return r}
 export async function materialCatalogFor(db:DB,p:Actor){
   const {rows}=await db.query<Revision>("SELECT * FROM piyomaru_material_revision WHERE tenant_id=$1 AND staff_id=$2 AND state='published' AND usable",[p.tenant_id,p.id])
-  return libraryCatalog.map(m=>{const r=rows.find(r=>r.material_id===m.id);return r?{...m,title:r.title,description:r.description,instructions:r.instructions,updated_at:r.published_at,revision:r.id,pages:r.object_name?r.pages??undefined:m.pages,duration:r.object_name?undefined:m.duration}:m})
+  return libraryCatalog().map(m=>{const r=m.managed?undefined:rows.find(r=>r.material_id===m.id);return r?{...m,title:r.title,description:r.description,instructions:r.instructions,updated_at:r.published_at,revision:r.id,pages:r.object_name?r.pages??undefined:m.pages,duration:r.object_name?undefined:m.duration}:m})
 }
 export async function materialInstructions(db:DB,p:Actor,relevant:string[]){
   const {rows}=await db.query<{instructions:string;title:string}>("SELECT instructions,title FROM piyomaru_material_revision WHERE tenant_id=$1 AND staff_id=$2 AND state='published' AND material_id=ANY($3) AND instructions<>'' ORDER BY published_at DESC LIMIT 3",[p.tenant_id,p.id,relevant])
   return rows
 }
 export async function materialAsset(db:DB,credential:string|undefined,id:string,revision?:string){
-  if(!materialFor(id))throw missing()
-  const p=await actor(db,credential),r=revision?await byId(db,p,z.uuid().parse(revision)):await current(db,p,id)
+  const m=materialFor(id);if(!m)throw missing()
+  const p=await actor(db,credential)
+  if(m.managed){if(revision)throw missing();return {object_name:null,pages:null}}
+  const r=revision?await byId(db,p,z.uuid().parse(revision)):await current(db,p,id)
   if(!r)return {object_name:null,pages:null}
   if(r.material_id!==id||!r.usable)throw missing()
   return {object_name:r.object_name,pages:r.pages}
 }
 export async function materialHistory(db:DB,credential:string|undefined,id:string){
-  if(!materialFor(id))throw missing()
+  const m=materialFor(id);if(!m)throw missing()
   const p=await actor(db,credential)
+  if(m.managed)return []
   const {rows}=await db.query<Revision>('SELECT * FROM piyomaru_material_revision WHERE tenant_id=$1 AND staff_id=$2 AND material_id=$3 ORDER BY created_at DESC LIMIT 30',[p.tenant_id,p.id,id])
   return rows.map(safeRevision)
 }
@@ -121,6 +124,7 @@ export async function renderPdf(storage:Storage,name:string){
 export async function createMaterialDraft(db:DB,cfg:Config,credential:string|undefined,input:z.infer<typeof materialDraftInput>,storage:Storage){
  const m=materialFor(input.material);if(!m)throw missing()
  const p=await actor(db,credential)
+ if(m.managed)throw new Fault(409,'MANAGED_MATERIAL','アプリ公開版と同期する教材・保存版は手動で変更できません。')
  const id=newId()
  const old=await current(db,p,m.id)
  let object=old?.object_name??null,bytes=old?.bytes??null,pages=old?.pages??null,ref:string|null=null
@@ -154,8 +158,9 @@ export async function uploadMaterialChunk(db:DB,cfg:Config,credential:string|und
  return safeRevision(updated)
 }
 export async function publishMaterial(db:DB,cfg:Config,credential:string|undefined,input:z.infer<typeof materialPublishInput>){
- if(!materialFor(input.material))throw missing()
+ const m=materialFor(input.material);if(!m)throw missing()
  const p=await actor(db,credential)
+ if(m.managed)throw new Fault(409,'MANAGED_MATERIAL','アプリ公開版と同期する教材・保存版は手動で変更できません。')
  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))',['piyo-material:'+p.id+':'+input.material])
  const target=input.revision?await byId(db,p,input.revision,true):null
  if(target&&(!target.usable||target.material_id!==input.material))throw new Fault(409,'MATERIAL_NOT_READY','ファイルの登録が完了した教材だけ公開できます。')
