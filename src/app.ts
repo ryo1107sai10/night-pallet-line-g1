@@ -1,4 +1,5 @@
 import {piyomaruInfo,configurePiyomaru,askPiyomaru,createPiyomaruJob,readPiyomaruJob,actPiyomaruJob,piyoSettingInput,piyoQuestionInput,piyoJobInput,piyoActionInput,piyoNoteInput,rememberPiyomaruNote,removePiyomaruNote} from './piyomaru.js'
+import {createPiyomaruMediaSource} from './piyomaru-library.js'
 import {intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
 import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
@@ -243,6 +244,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       res.sendFile(here('../public/'+asset))
     }else if (staticAssets.has(asset)) res.sendFile(here('../public/'+asset))
     else next()
+  })
+  const servePiyomaruMedia=createPiyomaruMediaSource()
+  app.get(['/platform/piyomaru/material/:material','/platform/piyomaru/material/:material/page/:page'],async(req,res)=>{
+    await tx(pool,db=>platformPrincipal(db,platformCredential(req)))
+    await servePiyomaruMedia(req,res)
   })
   app.get('/line-media/:file',async(req,res)=>{
     const id=z.string().regex(/^[0-9a-f-]{36}\.jpg$/i).parse(req.params.file).slice(0,-4)

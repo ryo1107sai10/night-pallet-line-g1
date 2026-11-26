@@ -26,13 +26,15 @@ export function mountPiyomaru(page='platform'){
   const panel=el('aside',null,'piyo-panel');panel.id='piyo-panel';panel.hidden=true;panel.setAttribute('aria-label','ピヨ丸 AIサポート')
   launch.setAttribute('aria-controls',panel.id)
   let info,activeJob,tab='chat',busy=false,loadError='',history=[],messages=[],sleepTimer,blinkTimer,mode='normal',jobKey,openJob
+  let libraryFilter='all',libraryQuery='',librarySelected=null,libraryPage=1
+  const videoPositions=new Map()
   const badge=el('span','準備中','piyo-badge'),face=sprite('normal')
   const heading=el('div',null,'piyo-heading');heading.append(face,el('div',null,'piyo-branding'),button('×',()=>close(),'piyo-close'))
   heading.querySelector('.piyo-branding').append(el('strong','ピヨ丸'),el('small','Night PRO LINE · 管理サポート'),badge)
   heading.querySelector('.piyo-close').setAttribute('aria-label','ピヨ丸を閉じる')
   const nav=el('nav',null,'piyo-nav'),content=el('div',null,'piyo-content'),notice=el('div',null,'piyo-notice')
   notice.setAttribute('role','status');notice.hidden=true
-  const navs=[['chat','質問する'],['jobs','導入代行'],['settings','AI・知識']]
+  const navs=[['chat','質問する'],['jobs','導入代行'],['library','動画・資料'],['settings','AI・知識']]
   const tabs=new Map(navs.map(([id,title])=>[id,button(title,()=>switchTab(id),'piyo-tab')]))
   for(const b of tabs.values())nav.append(b)
   panel.append(heading,nav,notice,content);document.body.append(launch,panel)
@@ -62,12 +64,12 @@ export function mountPiyomaru(page='platform'){
     if(!info){render();await load()}
     render();if(tab==='chat')content.querySelector('textarea')?.focus()
   }
-  function close(){panel.hidden=true;launch.setAttribute('aria-expanded','false');launch.focus();state(busy?'working':'normal')}
+  function close(){content.querySelector('video')?.pause();panel.hidden=true;launch.setAttribute('aria-expanded','false');launch.focus();state(busy?'working':'normal')}
   function toggle(){return panel.hidden?open():close()}
   function switchTab(id){tab=id;clearNotice();render()}
   function render(){
     for(const [id,b] of tabs)b.setAttribute('aria-current',id===tab?'page':'false')
-    content.replaceChildren();content.dataset.tab=tab
+    content.querySelector('video')?.pause();content.replaceChildren();content.dataset.tab=tab
     if(!info){
       content.append(el('p',loadError||'ピヨ丸の準備中…','piyo-muted'))
       if(loadError)content.append(button('読み込み直す',async()=>{await load();render()}))
@@ -75,19 +77,32 @@ export function mountPiyomaru(page='platform'){
     }
     if(tab==='chat')drawChat()
     else if(tab==='jobs')drawJobs()
+    else if(tab==='library')drawLibrary()
     else drawSettings()
+    content.scrollTop=0
   }
   function drawChat(){
     const welcome=el('div',null,'piyo-welcome');welcome.append(el('span','こんにちは！ピヨ丸だよ。','piyo-kicker'),
       el('p','LINEの連携やステップ配信で困ったことを聞いてね。必要なら導入作業も一緒に進めるよ。'),
-      button('緊急AI導入代行を始める',()=>switchTab('jobs'),'piyo-danger'))
+      button('緊急AI導入代行を始める',()=>switchTab('jobs'),'piyo-danger'),
+      button('初心者向け動画・説明資料を見る',()=>showLibrary(),'piyo-primary'))
     const log=el('div',null,'piyo-log');log.setAttribute('role','log');log.setAttribute('aria-live','polite')
     const continuation=el('div',null,'piyo-continuation')
     continuation.append(el('small','案内を読み終えたら、対象店舗を選んで準備やステップの構築を進められます。','piyo-muted'),
       button('公式LINE連携・ステップ構築を進める',()=>switchTab('jobs'),'piyo-primary'))
+    const related=el('div',null,'piyo-related')
+    continuation.append(related)
     const drawMessages=()=>{
       welcome.hidden=messages.length>0;chips.hidden=messages.length>0;log.hidden=messages.length===0
       continuation.hidden=!messages.some(m=>m.role==='assistant'&&m.source!=='ピヨ丸・確認事項')
+      related.replaceChildren()
+      const response=messages.findLast(m=>m.role==='assistant')
+      const recommendations=(response?.materials??[]).map(id=>info.materials?.find(m=>m.id===id)).filter(Boolean)
+      if(recommendations.length){
+        related.append(el('small','この質問に関連する動画','piyo-muted'))
+        for(const m of recommendations)related.append(button((m.chapter?'第'+m.chapter+'章　':'')+m.title+'（'+m.duration+'）',()=>showLibrary(m.id),'piyo-chip'))
+      }
+      related.append(button('動画・資料の一覧を見る',()=>showLibrary(),'piyo-chip'))
       log.replaceChildren(...messages.map(m=>{
         const b=el('article',null,'piyo-message '+(m.role==='user'?'is-user':'is-piyo'))
         if(m.role!=='user')b.append(el('small',m.source??'ピヨ丸'))
@@ -113,12 +128,83 @@ export function mountPiyomaru(page='platform'){
     try{
       const reply=await request('/ask','POST',{question:q,mode,history:history.slice(-6),request:crypto.randomUUID(),...(activeJob&&!activeJob.cancelled?{job:activeJob.id}:{})})
       const source=reply.kind==='muse'?(reply.model.includes('spark')?'Muse Spark':'Muse Ember'):'ピヨ丸・内蔵ガイド'
-      messages.push({role:'assistant',text:reply.answer,source})
+      messages.push({role:'assistant',text:reply.answer,source,materials:reply.related_materials??[]})
       history.push({role:'user',text:q.slice(0,1500)},{role:'assistant',text:reply.answer.slice(0,1500)});history=history.slice(-6)
       info.spent_microusd=reply.spent_microusd;if(reply.kind==='muse')info.connected=true
       updateBadge();state('happy');drawMessages()
     }catch(error){messages.push({role:'assistant',text:error.message,source:'ピヨ丸・確認事項'});drawMessages();tell(error.message,true)}
     finally{busy=false;send.disabled=false;if(tab==='chat')render()}
+  }
+  function showLibrary(id=null){
+    librarySelected=id;libraryPage=1;libraryQuery='';libraryFilter='all';switchTab('library')
+  }
+  function drawLibrary(){
+    const materials=info.materials??[]
+    const chosen=materials.find(m=>m.id===librarySelected)
+    if(chosen?.type==='video'){
+      const player=el('section',null,'piyo-media-player')
+      const video=el('video');video.controls=true;video.playsInline=true;video.preload='metadata';video.src=chosen.url;video.setAttribute('aria-label',chosen.title)
+      video.addEventListener('loadedmetadata',()=>{const position=videoPositions.get(chosen.id);if(position&&position<video.duration-2)video.currentTime=position})
+      video.addEventListener('timeupdate',()=>videoPositions.set(chosen.id,video.currentTime))
+      const feedback=el('p',null,'piyo-muted');feedback.hidden=true
+      video.addEventListener('error',()=>{feedback.textContent='再生できませんでした。ログイン状態や通信状況を確認し、再読み込みしてください。';feedback.hidden=false})
+      const next=chosen.chapter?materials.find(m=>m.chapter===chosen.chapter+1):null
+      player.append(button('‹ 動画・資料一覧',()=>showLibrary()),el('strong',(chosen.chapter?'第'+chosen.chapter+'章　':'')+chosen.title),el('small','動画 · '+chosen.duration,'piyo-muted'),video,
+        feedback,el('p',chosen.description),link('別タブで大きく見る ↗',chosen.url))
+      if(next)player.append(button('次の章：'+next.title,()=>showLibrary(next.id),'piyo-primary'))
+      content.append(player)
+      return
+    }
+    if(chosen?.type==='pdf'){
+      const reader=el('section',null,'piyo-media-player')
+      const preview=el('img');preview.className='piyo-pdf-page';preview.alt=chosen.title+' '+libraryPage+'ページ目';preview.src=chosen.url+'/page/'+libraryPage
+      const pageNav=el('div',null,'piyo-page-nav')
+      const previous=button('前のページ',()=>{libraryPage--;render()});previous.disabled=libraryPage<=1
+      const next=button('次のページ',()=>{libraryPage++;render()},'piyo-primary');next.disabled=libraryPage>=chosen.pages
+      pageNav.append(previous,el('span',libraryPage+' / '+chosen.pages+' ページ','piyo-muted'),next)
+      const pageLink=link('ページを大きく見る ↗',preview.src)
+      const download=link('PDF本体をダウンロード',chosen.url+'?download=1','piyo-material-link');download.removeAttribute('target');download.download=chosen.id+'.pdf'
+      const feedback=el('p',null,'piyo-muted');feedback.hidden=true
+      preview.addEventListener('error',()=>{feedback.textContent='資料のページを読み込めませんでした。PDF本体をダウンロードして確認してください。';feedback.hidden=false})
+      reader.append(button('‹ 動画・資料一覧',()=>showLibrary()),el('strong',chosen.title),pageNav,link('',preview.src,'piyo-pdf-image-link'),feedback,pageLink,download)
+      reader.querySelector('.piyo-pdf-image-link').append(preview);reader.querySelector('.piyo-pdf-image-link').setAttribute('aria-label','ページを大きく表示')
+      content.append(reader);return
+    }
+    const title=el('div',null,'piyo-welcome')
+    title.append(el('span','動画・説明資料','piyo-kicker'),el('p','見たい項目を選んでね。動画の再生・PDFの閲覧ではMuseを呼び出さないよ。'))
+    content.append(title)
+    const usage=el('details',null,'piyo-library-guide')
+    usage.append(el('summary','ピヨ丸の使い方・教材について'),el('p','まず「質問する」で知りたい手順を確認し、必要なら「導入代行」で対象店舗を選びます。公式LINEの本人認証・同意は管理者が操作し、連携情報は安全な専用欄に入力します。ステップは下書きを確認してから公開できます。'),
+      el('p','収録時点の画面を使った教材です。Googleカレンダー章のアプリ側の登録・重複判定は練習環境、公式LINE開設・配信・面談予約の実機録画は検証店舗の本番操作です。'))
+    content.append(usage)
+    const search=input('search',libraryQuery,100);search.placeholder='例：LINE、Googleカレンダー、ステップ';search.setAttribute('aria-label','動画・資料を検索')
+    const filters=el('div',null,'piyo-library-filters')
+    const list=el('div',null,'piyo-library-list')
+    const count=el('p',null,'piyo-muted');count.setAttribute('role','status')
+    const filterButtons=[['all','すべて'],['video','動画'],['pdf','PDF資料']].map(([value,label])=>{
+      const control=button(label,()=>{libraryFilter=value;drawList()},'piyo-chip');control.dataset.filter=value;filters.append(control);return control
+    })
+    function drawList(){
+      for(const control of filterButtons)control.setAttribute('aria-pressed',String(control.dataset.filter===libraryFilter))
+      const terms=libraryQuery.normalize('NFKC').toLocaleLowerCase('ja-JP').trim().split(/\s+/).filter(Boolean)
+      const found=materials.filter(m=>{
+        if(libraryFilter!=='all'&&m.type!==libraryFilter)return false
+        const hay=[m.title,m.description,m.chapter?'第'+m.chapter+'章':'',...(m.keywords??[])].join(' ').normalize('NFKC').toLocaleLowerCase('ja-JP')
+        return terms.every(term=>hay.includes(term))
+      })
+      count.textContent=found.length+' 件の教材';list.replaceChildren()
+      if(!found.length){list.append(el('p','該当する教材がありません。別の言葉で検索してね。','piyo-muted'));return}
+      for(const m of found){
+        const card=el('article',null,'piyo-library-card')
+        const badge=el('span',m.type==='video'?(m.chapter?'第'+m.chapter+'章　':'動画　')+m.duration:'PDF資料　'+m.pages+'ページ','piyo-library-badge')
+        card.append(badge,el('strong',m.title),el('p',m.description))
+        if(m.type==='video')card.append(button('動画を見る',()=>showLibrary(m.id),'piyo-primary'))
+        else card.append(button('資料を見る',()=>showLibrary(m.id),'piyo-primary'))
+        list.append(card)
+      }
+    }
+    search.oninput=()=>{libraryQuery=search.value;drawList()}
+    content.append(search,filters,count,list);drawList()
   }
   function drawJobs(){
     const intro=el('div',null,'piyo-welcome piyo-job-intro')
@@ -240,6 +326,8 @@ export function mountPiyomaru(page='platform'){
         if(!step.done&&job.readiness.length){for(const reason of job.readiness)card.append(el('small',reason,'piyo-muted'))}
         if(!step.done){const b=button('確認して公開する',()=>act(job,'publish',job.selected_channel,job.draft_revision),'piyo-primary');b.disabled=!job.publish_ready;row.append(b)}
       }
+      const chapter={store:'chapter-03',line:'chapter-03',calendar:'chapter-04',draft:'chapter-07',slots:'chapter-05',publish:'chapter-08'}[step.topic]
+      if(chapter&&info.materials?.some(m=>m.id===chapter))row.append(button('この手順の動画を見る',()=>showLibrary(chapter),'piyo-chip'))
       card.append(row);content.append(card)
     }
     const verify=el('div',null,'piyo-stage')

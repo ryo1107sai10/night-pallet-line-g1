@@ -1,7 +1,7 @@
 import { previousCode } from './helpers/totp.mjs'
 import assert from 'node:assert/strict'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir,mkdtemp, rm,writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -86,6 +86,12 @@ before(async () => {
   await migrate(owner, 'night_app')
   await migrate(owner, 'night_app')
   await assertAppRole(pool)
+  const fixture=join(dir,'materials')
+  await mkdir(fixture)
+  await writeFile(join(fixture,'chapter-03.mp4'),Buffer.from('virtual-video-data'))
+  await writeFile(join(fixture,'supervisor-guide.pdf'),Buffer.from('%PDF-1.4\nvirtual-pdf'))
+  await writeFile(join(fixture,'supervisor-guide-p1.jpg'),Buffer.from([0xff,0xd8,0xff,0xd9]))
+  process.env.PIYOMARU_MEDIA_DIRECTORY=fixture
   const fetchLine = async url => {
     const address = new URL(url)
     if (address.pathname === '/v2/oauth/verify') return Response.json({ client_id: messaging })
@@ -131,6 +137,7 @@ before(async () => {
 })
 
 after(async () => {
+  delete process.env.PIYOMARU_MEDIA_DIRECTORY
   if (server) await new Promise(resolve => server.close(resolve))
   await Promise.allSettled([pool?.end(), owner?.end()])
   if (pg) await pg.stop()
@@ -154,6 +161,38 @@ test('ピヨ丸は監督者本人専用、他法人・エールには設定・�
   assert.equal(pic.status,200);assert.match(pic.headers.get('content-type'),/image\/png/)
   const free=expect(await post(piyo+'/ask',platform,{question:'LINEの設定は？',request:randomUUID()}),200)
   assert.equal(free.kind,'guide');assert.equal(free.usage_microusd,0);assert.match(free.answer,/Messaging API/)
+  assert.ok(free.related_materials.includes('chapter-03'))
+})
+
+test('動画・PDFは監督者だけ閲覧可能。シーク用の部分取得と不明な教材の拒否',async()=>{
+  const info=expect(await request(piyo,{cookie:platform}),200)
+  assert.equal(info.materials.length,14)
+  const chapter=info.materials.find(m=>m.id==='chapter-03')
+  const manual=info.materials.find(m=>m.id==='supervisor-guide')
+  assert.equal(chapter.type,'video');assert.equal(manual.type,'pdf')
+  for(const cookie of [null,master,staff,plain]){
+    const headers=cookie?{Cookie:cookie}:{}
+    assert.equal((await send(chapter.url,{headers:{...headers,Range:'bytes=0-3'}})).status,401)
+    assert.equal((await send(manual.url,{headers})).status,401)
+    assert.equal((await send(manual.url+'/page/1',{headers})).status,401)
+    assert.equal((await send(chapter.url,{method:'HEAD',headers})).status,401)
+  }
+  const clip=await send(chapter.url,{headers:{Cookie:platform,Range:'bytes=0-6'}})
+  assert.equal(clip.status,206);assert.equal(clip.headers.get('content-type'),'video/mp4')
+  assert.match(clip.headers.get('content-range'),/^bytes 0-6\//)
+  assert.match(clip.headers.get('cache-control'),/no-store/)
+  assert.equal(await clip.text(),'virtual')
+  const pdf=await send(manual.url,{headers:{Cookie:platform}})
+  assert.equal(pdf.status,200);assert.equal(pdf.headers.get('content-type'),'application/pdf')
+  assert.match(await pdf.text(),/^%PDF-/)
+  const image=await send(manual.url+'/page/1',{headers:{Cookie:platform}})
+  assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/jpeg')
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()),Buffer.from([0xff,0xd8,0xff,0xd9]))
+  const download=await send(manual.url+'?download=1',{headers:{Cookie:platform}})
+  assert.match(download.headers.get('content-disposition'),/^attachment;/)
+  assert.equal((await send(manual.url+'/page/6',{headers:{Cookie:platform}})).status,404)
+  assert.equal((await send('/platform/piyomaru/material/not-listed',{headers:{Cookie:platform}})).status,404)
+  assert.equal((await send(chapter.url,{headers:{Cookie:platform,Range:'bytes=0-1,3-4'}})).status,416)
 })
 
 test('仮想の2店舗で代行を再開・下書きを作成・他店を拒否する',async()=>{
