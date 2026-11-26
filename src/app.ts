@@ -1,5 +1,7 @@
 import {piyomaruInfo,configurePiyomaru,askPiyomaru,createPiyomaruJob,readPiyomaruJob,actPiyomaruJob,piyoSettingInput,piyoQuestionInput,piyoJobInput,piyoActionInput,piyoNoteInput,rememberPiyomaruNote,removePiyomaruNote} from './piyomaru.js'
 import {createPiyomaruMediaSource} from './piyomaru-library.js'
+import {createMaterialStorage,createMaterialDraft,materialAsset,materialHistory,materialDraftInput,materialPublishInput,publishMaterial,uploadMaterialChunk} from './piyomaru-materials.js'
+import {acceptanceInput,masterHealth,platformHealth,probeStore,recordStoreAcceptance} from './store-health.js'
 import {intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
 import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
@@ -235,7 +237,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs','master-team.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs','master-team.mjs','store-health.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs','piyomaru.mjs','piyomaru.css','piyomaru-atlas.png'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -246,9 +248,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     else next()
   })
   const servePiyomaruMedia=createPiyomaruMediaSource()
+  const materialStorage=createMaterialStorage()
   app.get(['/platform/piyomaru/material/:material','/platform/piyomaru/material/:material/page/:page'],async(req,res)=>{
-    await tx(pool,db=>platformPrincipal(db,platformCredential(req)))
-    await servePiyomaruMedia(req,res)
+    const revision=req.query.revision===undefined?undefined:z.uuid().parse(req.query.revision)
+    const asset=await tx(pool,db=>materialAsset(db,platformCredential(req),String(req.params.material),revision))
+    await servePiyomaruMedia(req,res,asset)
   })
   app.get('/line-media/:file',async(req,res)=>{
     const id=z.string().regex(/^[0-9a-f-]{36}\.jpg$/i).parse(req.params.file).slice(0,-4)
@@ -287,6 +291,15 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const received = await receiveModuleWebhook(pool,cfg,Buffer.isBuffer(req.body)?req.body:Buffer.alloc(0),req.get('X-Line-Signature')??'')
     if (received) await wakeLine(received.store_id,received.id,'webhook')
     res.json({received:true})
+  })
+  api.put('/platform/piyomaru/library/upload/:revision',async(req,_res,next)=>{
+    if(req.get('Origin')!==cfg.origin)throw new Fault(403,'INVALID_ORIGIN','操作元を確認できません。')
+    if(!req.is('application/octet-stream'))throw new Fault(415,'INVALID_CONTENT_TYPE','教材ファイルを指定してください。')
+    await tx(pool,db=>platformPrincipal(db,platformCredential(req)))
+    next()
+  },express.raw({type:'application/octet-stream',limit:'4mb',inflate:false}),async(req,res)=>{
+    const offset=z.string().regex(/^\d{1,9}$/).transform(Number).parse(req.query.offset)
+    res.json(await tx(pool,db=>uploadMaterialChunk(db,cfg,platformCredential(req),idOf(req,'revision'),offset,req.body,materialStorage)))
   })
 
   api.use((req,_res,next)=>{
@@ -333,6 +346,29 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.get('/platform/piyomaru',async(req,res)=>{
     res.json(await tx(pool,db=>piyomaruInfo(db,cfg,platformCredential(req))))
+  })
+  api.get('/platform/piyomaru/library/:material',async(req,res)=>{
+    res.json(await tx(pool,db=>materialHistory(db,platformCredential(req),String(req.params.material))))
+  })
+  api.post('/platform/piyomaru/library/draft',async(req,res)=>{
+    const data=materialDraftInput.parse(req.body)
+    res.status(201).json(await tx(pool,db=>createMaterialDraft(db,cfg,platformCredential(req),data,materialStorage)))
+  })
+  api.post('/platform/piyomaru/library/publish',async(req,res)=>{
+    res.json(await tx(pool,db=>publishMaterial(db,cfg,platformCredential(req),materialPublishInput.parse(req.body))))
+  })
+  api.get('/platform/store-health',async(req,res)=>{
+    res.json(await tx(pool,db=>platformHealth(db,cfg,google,platformCredential(req))))
+  })
+  for(const action of ['probe','acceptance'] as const)api.post('/platform/store-health/:tenant/:store/'+action,async(req,res)=>{
+    const store=idOf(req,'store'),tenant=idOf(req,'tenant')
+    res.json(await tx(pool,async db=>{
+      await enterPlatformTenant(db,platformCredential(req),tenant)
+      const actor=await authenticatePlatformWorkspace(db,platformCredential(req),tenant)
+      await storeAccess(db,actor,store,true)
+      if(action==='probe'){z.strictObject({}).parse(req.body);return probeStore(db,cfg,google,line,actor,store)}
+      return recordStoreAcceptance(db,cfg,google,actor,store,acceptanceInput.parse(req.body))
+    }))
   })
   api.put('/platform/piyomaru/settings',async(req,res)=>{
     const data=piyoSettingInput.parse(req.body)
@@ -583,6 +619,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   },status)
   const workflow='/stores/:store/workflows/:purpose'
   api.get('/dashboard',staff((db,actor)=>operationsDashboard(db,actor)))
+  api.get('/store-health',staff((db,actor)=>masterHealth(db,cfg,google,actor)))
+  api.post('/stores/:store/health/probe',inStore(async(db,actor,req)=>{
+    z.strictObject({}).parse(req.body);return probeStore(db,cfg,google,line,actor,idOf(req,'store'))
+  }))
+  api.post('/stores/:store/health/acceptance',inStore((db,actor,req)=>recordStoreAcceptance(db,cfg,google,actor,idOf(req,'store'),acceptanceInput.parse(req.body))))
   api.get(workflow+'/settings',workflowStaff((db,_actor,req)=>storeFeatures(db,idOf(req,'store'))))
   api.patch(workflow+'/settings/acquisition',workflowStaff((db,actor,req)=>{
     if(workPurpose(req)!=='recruitment')throw forbidden()

@@ -6,7 +6,7 @@ import {resolve} from 'node:path'
 import {Fault,missing} from './core.js'
 import type {Topic} from './piyomaru-knowledge.js'
 
-type Material = {
+export type Material = {
   id:string; type:'video'|'pdf'; title:string; description:string; duration?:string;
   chapter?:number; pages?:number; topics:Topic[]; keywords:string[]; filename:string
 }
@@ -30,6 +30,7 @@ const materials:readonly Material[]=[
   {id:'store-guide',type:'pdf',pages:2,title:'店舗向け LINE対応・面談運用ガイド',description:'LINEの管理権限を渡す方法、店長の手動返信、面談・引き継ぎ。',topics:['handoff'],keywords:['店舗','店長','返信','手動','引き継ぎ','面談'],filename:'store-guide.pdf'},
 ]
 export const libraryCatalog=materials.map(({filename,...m})=>({...m,url:'/platform/piyomaru/material/'+m.id}))
+export const materialFor=(id:string)=>materials.find(m=>m.id===id)
 export function suggestedMaterials(topics:Topic[]){
   const matches=materials.filter(m=>m.type==='video'&&m.topics.some(t=>topics.includes(t)))
   const first=topics[0]
@@ -40,14 +41,17 @@ export function createPiyomaruMediaSource(){
   const bucket=process.env.PIYOMARU_MEDIA_BUCKET
   if(bucket&&!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket))throw Error('Invalid Piyomaru media bucket.')
   const auth=bucket?new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}):undefined
-  return async(req:Request,res:Response)=>{
+  return async(req:Request,res:Response,asset?:{object_name:string|null;pages?:number|null})=>{
     const material=materials.find(m=>m.id===req.params.material)
     if(!material)throw missing()
-    let filename=material.filename,type=material.type==='video'?'video/mp4':'application/pdf'
+    let filename=material.filename,type=material.type==='video'?'video/mp4':'application/pdf',objectName=asset?.object_name??null
+    if(asset?.object_name&&!/^updates\/[0-9a-f-]{36}\.(mp4|pdf)$/.test(asset.object_name))throw missing()
     if(req.params.page!==undefined){
       const page=Number(req.params.page)
-      if(material.type!=='pdf'||!/^\d{1,2}$/.test(String(req.params.page))||!Number.isInteger(page)||page<1||page>(material.pages??0))throw missing()
+      const pages=objectName?asset?.pages:material.pages
+      if(material.type!=='pdf'||!/^\d{1,2}$/.test(String(req.params.page))||!Number.isInteger(page)||page<1||page>(pages??0))throw missing()
       filename=material.id+'-p'+page+'.jpg';type='image/jpeg'
+      if(objectName)objectName=objectName.replace(/\.pdf$/,'-p'+page+'.jpg')
     }
     const range=req.get('Range')
     if(range&&!/^bytes=(?:\d+-\d*|-\d+)$/.test(range))throw new Fault(416,'MEDIA_RANGE','動画の再生位置を指定し直してください。')
@@ -56,7 +60,7 @@ export function createPiyomaruMediaSource(){
       'Content-Disposition':disposition+'; filename="'+filename+'"','Accept-Ranges':'bytes'})
     if(directory&&!bucket){
       // Only test/development fixtures supplied by the operator; filenames come from the catalog.
-      await new Promise<void>((done,reject)=>res.sendFile(filename,{root:resolve(directory),cacheControl:false,lastModified:false},error=>error?reject(error):done()))
+      await new Promise<void>((done,reject)=>res.sendFile(objectName??filename,{root:resolve(directory),cacheControl:false,lastModified:false},error=>error?reject(error):done()))
       return
     }
     if(!bucket||!auth)throw new Fault(503,'MEDIA_UNAVAILABLE','教材の準備中です。')
@@ -67,7 +71,7 @@ export function createPiyomaruMediaSource(){
     try{
       const accessToken=await auth.getAccessToken()
       if(!accessToken)throw Error('Missing storage access')
-      const object=encodeURIComponent(materialVersion+'/'+filename)
+      const object=encodeURIComponent(objectName??materialVersion+'/'+filename)
       const upstream=await fetch('https://storage.googleapis.com/download/storage/v1/b/'+bucket+'/o/'+object+'?alt=media',{
         headers:{Authorization:'Bearer '+accessToken,...(range?{Range:range}:{})},redirect:'error',signal:abort.signal,
       })

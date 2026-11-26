@@ -95,3 +95,25 @@ pre { padding: 12px; background: #edf1f9; white-space: pre-wrap; overflow-wrap: 
 .guide-steps li + li { margin-top: 20px; padding-top: 16px; border-top: 1px solid #d7dfec; }
 .guide-steps p { margin: 6px 0 10px; }
 .guide-steps form button { margin-top: 10px; }
+
+/* Store health: compact overview with accessible, mobile-friendly checklists. */
+.health-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0}
+.health-metric{display:grid;gap:4px;padding:12px;border:1px solid var(--border,#dce2eb);border-radius:12px;background:#f6f8fb;color:#23344b}
+.health-metric strong{font-size:24px;line-height:1.1}.health-metric span{font-size:12px}
+.health-tools{display:grid;grid-template-columns:minmax(0,1fr) minmax(140px,220px);gap:8px;margin-bottom:10px}
+.health-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px;align-items:start}
+.health-card{min-width:0;display:grid;gap:9px;background:#fff;border:1px solid #dce2eb;padding:14px;border-radius:14px}
+.health-card-head,.health-check-name{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.health-card h3{margin:0;font-size:17px;overflow-wrap:anywhere}
+.health-card progress{width:100%;height:10px;accent-color:#397e5d}
+.health-badge{white-space:nowrap;display:inline-block;border-radius:999px;padding:4px 8px;font-size:11px;font-weight:700;background:#edf1f6;color:#35415a}
+.health-badge.ready{background:#dff3e6;color:#22603a}.health-badge.action{background:#fff0d5;color:#89550c}.health-badge.warning{background:#ffe4e3;color:#9d3536}
+.health-next{font-size:13px;color:#35445a;margin:0}
+.health-actions{display:flex;flex-wrap:wrap;gap:6px}.health-actions button,.health-check-row button{font-size:12px;min-height:36px;padding:7px 10px}
+.health-primary{background:#233958!important;color:#fff!important}
+.health-checks{display:grid;gap:6px;border-top:1px solid #e2e6ec;padding-top:9px}
+.health-check-row{display:grid;gap:5px;padding:8px;background:#f7f9fc;border-radius:8px;min-width:0}
+.health-check-row p{font-size:12px;margin:0}.health-check-row button{justify-self:start}
+.health-confirm{background:#f5f8ed;padding:10px;border:1px solid #dbe6c9;border-radius:10px;display:grid;gap:7px}
+.health-confirm label{font-size:12px;display:flex;gap:7px;align-items:flex-start}.health-confirm label input{width:auto;margin:3px 0 0}
+@media(max-width:560px){.health-tools{grid-template-columns:1fr}.health-summary{gap:6px}.health-metric{padding:9px}.health-metric strong{font-size:20px}.health-card{padding:12px}}

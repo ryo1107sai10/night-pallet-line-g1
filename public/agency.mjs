@@ -1,5 +1,6 @@
 import {mountDashboard} from '/static/dashboard.mjs'
 import {masterTeam} from '/static/master-team.mjs'
+import {mountStoreHealth,healthDestination} from '/static/store-health.mjs'
 
 const $=id=>document.getElementById(id)
 const status=$('agency-status')
@@ -12,6 +13,7 @@ const recruitmentFeatureLabels={
   token_interviews_enabled:'LINEトークからの予約',interviewers_enabled:'担当者別の面談枠',google_write_enabled:'Googleカレンダーへの予定登録',
 }
 let storeSetup=null,setupRequest=0
+let healthBoard
 function renderFeatureOptions(settings){
   const box=$('agency-feature-options')
   box.replaceChildren(...Object.entries(recruitmentFeatureLabels).map(([name,label])=>{
@@ -52,7 +54,7 @@ async function saveSetup(action){
   const buttons=[...$('agency-store-setup').querySelectorAll('button')]
   buttons.forEach(button=>button.disabled=true)
   storeManagementStatus.textContent='保存中…'
-  try{await action(selection);if(selection.id===$('agency-store').value&&await loadStoreSetup(selection.id)&&selection.id===$('agency-store').value)storeManagementStatus.textContent='店舗設定を保存しました。'}
+  try{await action(selection);if(selection.id===$('agency-store').value&&await loadStoreSetup(selection.id)&&selection.id===$('agency-store').value)storeManagementStatus.textContent='店舗設定を保存しました。';healthBoard?.reload()}
   catch(error){if(selection.id===$('agency-store').value)storeManagementStatus.textContent=error.message}
   finally{buttons.forEach(button=>button.disabled=false)}
 }
@@ -80,6 +82,12 @@ try{
   $('agency-account').textContent=session.actor.email
   const canManageStores=session.actor.agency&&session.actor.role==='admin'
   $('agency-store-management').hidden=!canManageStores
+  if(canManageStores)healthBoard=mountStoreHealth($('agency-health'),{
+    load:()=>request('/store-health'),
+    probe:row=>masterCall('/stores/'+row.id+'/health/probe','POST',{}),
+    accept:(row,data)=>masterCall('/stores/'+row.id+'/health/acceptance','POST',data),
+    open:(row,destination)=>location.assign(healthDestination(row,destination,false))
+  })
   if(['admin','manager','recruiter'].includes(session.actor.role)){
     mountDashboard($('operations-dashboard'),()=>request('/dashboard'))
   }

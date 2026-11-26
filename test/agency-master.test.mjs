@@ -263,6 +263,8 @@ test('兼任マスターは2名が個別認証で全店舗を運用し、片方�
   const secondStore=expect(await post('/stores',second,storeData('二号店'),idempotency()),201).id
   assert.deepEqual(new Set(expect(await request('/session',{cookie:first}),200).stores.map(s=>s.id)),new Set([firstStore,secondStore]))
   assert.deepEqual(new Set(expect(await request('/session',{cookie:second}),200).stores.map(s=>s.id)),new Set([firstStore,secondStore]))
+  assert.deepEqual(new Set(expect(await request('/store-health',{cookie:first}),200).map(s=>s.id)),new Set([firstStore,secondStore]))
+  assert.deepEqual(new Set(expect(await request('/store-health',{cookie:second}),200).map(s=>s.id)),new Set([firstStore,secondStore]))
   expect(await request('/stores/'+firstStore+'/connections',{cookie:second}),200)
   expect(await request('/stores/'+secondStore+'/connections',{cookie:first}),200)
   const linked=expect(await post('/stores/'+secondStore+'/connections',second,{

@@ -17,6 +17,8 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   // 各APIも明示的に許可し、既存トークンの交換・配信停止・モジュール連携は委任しない。
   // authenticate() は admin の場合、現法人マスターとの一致を毎回確認する。
   if(actor.role==='admin'){
+    if(reads&&route==='/store-health')return
+    if(req.method==='POST'&&['/stores/:store/health/probe','/stores/:store/health/acceptance'].includes(route))return
     // 現代理店マスターは、自法人の店舗登録と利用適格性の確認を行える。
     // 店舗へのアクセスは各ハンドラーの storeAccess / RLS を引き続き適用する。
     if(req.method==='POST'&&route==='/stores')return

@@ -1,5 +1,6 @@
 import {mountTour} from '/static/tour.mjs'
 import {mountPiyomaru} from '/static/piyomaru.mjs'
+import {mountStoreHealth,healthDestination} from '/static/store-health.mjs'
 
 const notice = document.querySelector('#notice')
 const tenants = document.querySelector('#tenants')
@@ -161,8 +162,15 @@ try {
   if (!records.length) notice.textContent='管理を担当する会社が登録されていません。'
   else mountTour('platform',{enter:async()=>(await platformApi('/tenants/'+records[0].id+'/enter','POST')).url})
   drawTenantList(records)
+  const health=mountStoreHealth(document.getElementById('platform-health'),{
+    load:()=>platformApi('/store-health'),
+    probe:row=>platformApi('/store-health/'+row.tenant+'/'+row.id+'/probe','POST',{}),
+    accept:(row,data)=>platformApi('/store-health/'+row.tenant+'/'+row.id+'/acceptance','POST',data),
+    open:async(row,destination)=>{try{await platformApi('/tenants/'+row.tenant+'/enter','POST');location.assign('/platform/tenants/'+row.tenant+healthDestination(row,destination,true))}catch(e){report(e)}},
+    diagnose:row=>window.dispatchEvent(new CustomEvent('npl:piyomaru-diagnose',{detail:{store:row.id}}))
+  })
   window.addEventListener('npl:piyomaru-store-created',()=>{
-    Promise.all([platformApi('/tenants').then(drawTenantList),loadProgress()]).catch(report)
+    Promise.all([platformApi('/tenants').then(drawTenantList),loadProgress(),health?.reload()]).catch(report)
   })
   await loadProgress()
 } catch (error) { report(error) }

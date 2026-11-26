@@ -37,7 +37,7 @@
 
 .piyo-check{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:#4b4e54}.piyo-panel .piyo-check input{width:16px;height:16px;min-height:16px;margin:0;flex:0 0 auto}
 .piyo-continuation{display:grid;gap:6px;padding:9px;border:1px solid #ead9ac;border-radius:12px;background:#fff9e9}.piyo-continuation button{width:100%}
-.piyo-nav{grid-template-columns:repeat(4,minmax(0,1fr))}
+.piyo-nav{grid-template-columns:repeat(5,minmax(0,1fr))}
 .piyo-tab{padding:6px 3px;font-size:11px;white-space:nowrap}
 .piyo-panel button.piyo-primary{background:#253956;color:#fff;border-color:#253956}
 .piyo-related{display:grid;gap:5px;margin-top:4px}
@@ -56,6 +56,9 @@
 .piyo-page-nav{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:5px;text-align:center}
 .piyo-pdf-image-link{display:block;border:1px solid #dedbd2;border-radius:8px;overflow:hidden;background:#fff}
 .piyo-pdf-page{display:block;width:100%;height:auto;object-fit:contain}
+.piyo-text-lines{white-space:pre-wrap;overflow-wrap:anywhere}
+.piyo-panel .piyo-config input[type="file"]{font-size:11px;padding:7px;overflow:hidden}
+.piyo-panel select{max-width:100%}
 @media(max-width:380px){.piyo-tab{font-size:10px;padding-inline:1px}.piyo-library-card,.piyo-media-player{padding:9px}}
 
 /* Prevent a scrolled flex panel from collapsing the conversation track. */
