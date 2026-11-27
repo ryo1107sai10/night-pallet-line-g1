@@ -344,6 +344,7 @@ function setupFlow(data) {
 }
 
 async function refreshStore(next){
+  if(currentSession?.actor.agency)$('#settings-link').href=workspacePath('/master/?store='+encodeURIComponent(next.id))
   if(!next)throw new Error('店舗を選択してください。')
   const requested=new URLSearchParams(location.search).get('scenario'),root='/stores/'+next.id
   let newChannels,newCatalog,newList
@@ -1749,6 +1750,9 @@ async function start() {
   select.value=initialStore.id
   await refreshStore(initialStore)
   ready=true
+  if(currentSession?.actor.agency)$('#settings-link').href=workspacePath('/master/?store='+encodeURIComponent(initialStore.id))
+  const guideStart=new URLSearchParams(location.search).get('start')
+  if(['intake','wizard'].includes(guideStart)&&!$('#dialog').open){const url=new URL(location.href);url.searchParams.delete('start');history.replaceState(null,'',url);if(guideStart==='intake')await openInterviewIntake();else openPurposePicker()}
   if(!requestedScenario&&scenarioList.length&&!$('#dialog').open){choosePiece('library')}
   setInterval(pollPresence,45000);setInterval(()=>{if(!document.hidden&&!$('#dialog').open)refreshReadiness().catch(()=>{})},60000);addEventListener('focus',()=>{if(!$('#dialog').open)refreshReadiness().catch(()=>{})})
   const templateRequest=new URLSearchParams(location.search).get('tag-template')

@@ -1,3 +1,4 @@
+import {agencyJourney} from './agency-journey.js'
 import {agencyEnrollmentPath,agencyEnrollmentInput,readAgencyEnrollment} from './agency-enrollment.js'
 import {piyomaruInfo,configurePiyomaru,askPiyomaru,createPiyomaruJob,readPiyomaruJob,actPiyomaruJob,piyoSettingInput,piyoQuestionInput,piyoJobInput,piyoActionInput,piyoNoteInput,rememberPiyomaruNote,removePiyomaruNote} from './piyomaru.js'
 import {createPiyomaruMediaSource} from './piyomaru-library.js'
@@ -239,7 +240,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','agency-enrollment.mjs','dashboard.mjs','master-team.mjs','store-health.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-guide.mjs','agency-guide.css','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','agency-enrollment.mjs','dashboard.mjs','master-team.mjs','store-health.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs','piyomaru.mjs','piyomaru.css','piyomaru-atlas.png'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -1054,6 +1055,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
       auto_enabled:loc.auto_enabled,monthly_limit:loc.monthly_limit,process_enabled:automationForStore(cfg,store,actor.tenant_id),
       features:recruitmentSetupView(features)}
   }))
+  api.get(recruitmentSetup+'/journey',inStore(async(db,actor,req)=>{requireAgencyMaster(actor);return agencyJourney(db,cfg,google,actor,idOf(req,'store'))}))
   api.patch(recruitmentSetup+'/features',inStore((db,actor,req)=>{
     requireAgencyMaster(actor)
     return saveRecruitmentSetup(db,actor,idOf(req,'store'),recruitmentSetupInput.parse(req.body))

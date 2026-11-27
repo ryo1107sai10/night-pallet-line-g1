@@ -1838,6 +1838,12 @@ test('北村さんはエールだけを管理し、エールの担当者のみ�
   const agencySetup='/stores/'+agencyShop+'/recruitment/setup'
   const agencySettings=expect(await request(agencySetup,{cookie:admin}),200)
   assert.equal(agencySettings.contract_active,false);assert.equal(agencySettings.auto_enabled,false)
+  const journey=expect(await request(agencySetup+'/journey',{cookie:admin}),200)
+  assert.equal(journey.health.id,agencyShop);assert.equal(journey.connected,false)
+  assert.equal(journey.counts.drafts,0);assert.equal(journey.counts.active_tags,0)
+  assert.ok(journey.blockers.some(x=>x.code==='line'));assert.ok(journey.blockers.some(x=>x.code==='contract'))
+  expect(await request('/stores/'+gamma.stores[0].id+'/recruitment/setup/journey',{cookie:admin}),404)
+  expect(await request(agencySetup+'/journey',{cookie:other}),404)
   assert.ok(!Object.hasOwn(agencySettings.features,'visits_enabled'))
   assert.ok(!expect(await request('/session',{cookie:other}),200).stores.some(s=>s.id===agencyShop))
   expect(await request('/stores/'+gamma.stores[0].id+'/recruitment/setup',{cookie:admin}),404)

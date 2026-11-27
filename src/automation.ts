@@ -1,7 +1,7 @@
 import {resolveRichButtons} from '../public/studio/message-format.mjs'
 import type pg from 'pg'
 import { localPart, nextWindow, renderMessage, waitUntil, evaluateBranch } from '../public/studio/engine.mjs'
-import { audit, automationForStore, conflict, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
+import { audit, automationForStore, conflict, Fault, newId, scope, seal, tx, unseal, type Actor,type Config,type DB,type Route } from './core.js'
 import { automaticRelationshipReady, channel, channelCredentials, channelReady, summary, type Channel, type LineAPI } from './line.js'
 import { customerById, emitDelivery, endCustomerRuns, ensureCustomer, stopFromLine, type Customer } from './customer.js'
 import { handoffUntil } from './line-handoff.js'
@@ -94,15 +94,17 @@ export async function updateAutomation(db:DB,cfg:Config,actor:Actor,id:string,in
 }) {
   await lockDispatch(db,actor.tenant_id)
   const location=await locationOf(db,id)
-  if (input.enabled && (!automationForStore(cfg,id,actor.tenant_id) || !input.contract || !location.eligible_at)) {
-    throw conflict()
+  if(input.enabled){
+    if(!automationForStore(cfg,id,actor.tenant_id))throw new Fault(409,'AUTOMATION_SERVER_DISABLED','この店舗の配信処理がまだ許可されていません。管理窓口に確認してください。')
+    if(!input.contract)throw new Fault(409,'AUTOMATION_CONTRACT_REQUIRED','先に店舗の契約とLINE運用許可を確認してください。')
+    if(!location.eligible_at)throw new Fault(409,'AUTOMATION_ELIGIBILITY_REQUIRED','先に店舗の利用適格性を確認して保存してください。')
   }
   if (input.enabled) {
     // 採用専用OAだけの店舗でも自動配信を有効化できる（採用シナリオの実配信 026）。
     const {rows}=await db.query('SELECT id FROM channel')
     let verified=false
     for (const row of rows) if ((await summary(db,cfg,await channel(db,row.id))).status==='connected') verified=true
-    if (!verified) throw conflict()
+    if (!verified) throw new Fault(409,'AUTOMATION_LINE_NOT_READY','公式LINEの送受信テストと端末への到着確認が完了していません。公式LINEの接続画面で確認してください。')
   }
   const updated=await db.query(`UPDATE store SET auto_enabled=$2,contract_active=$3,monthly_limit=$4,
     auto_enabled_at=CASE WHEN $2 AND NOT auto_enabled THEN clock_timestamp() ELSE auto_enabled_at END,

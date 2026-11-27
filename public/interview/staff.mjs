@@ -252,5 +252,6 @@ try{
     try{await show()}catch(error){if($('#stores').value===store)notice(error.message)}
   }
   await show()
+  if(['#availability','#slot-batch','#interview-hours'].includes(location.hash))document.querySelector(location.hash)?.scrollIntoView({block:'start'})
   if(query.get('google')==='connected'&&selected.id===query.get('store'))notice('Googleカレンダーの空き状況を確認できました。')
 }catch(error){notice(error.message)}

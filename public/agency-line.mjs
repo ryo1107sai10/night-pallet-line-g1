@@ -92,15 +92,17 @@ async function renderConnection(){
     await request(prefix+'/console','PATCH',data);await loadConnections();status.textContent='確認記録を保存しました。'
   })}
   const testHeading=element('h3','3. 実機の接続テスト');testHeading.id='line-tester';detail.append(form,testHeading)
-  detail.append(element('p','発行したコードをテスト利用者本人に渡し、公式LINEへ送ってもらってください。確認済みのテスト利用者に限って1通送信できます。'))
+  detail.append(element('p','スマホの通常LINEを用意してください。テストは次の順番です。テストだけでは一般向け自動配信は始まりません。'))
+  const instructions=element('ol',undefined,'guide-checklist');for(const text of ['テストコードを発行する','本人のスマホから「接続テスト ＋ 発行コード」を1通送る','同じLINEで「動作確認」を別の1通として送る','この画面の「進捗を更新」を押す','「接続テストを1通送る」を押し、スマホへの到着を確認する','届いたら上の確認記録で「テストメッセージが端末に届いた」を選び保存する'])instructions.append(element('li',text));detail.append(instructions)
   detail.append(action('テストコードを発行',async()=>{
     const result=await request(prefix+'/tests','POST',{purpose:'recruitment'});issued={channel:current.id,...result};await loadConnections();status.textContent='テストコードを発行しました。'
   }),action('進捗を更新',async()=>{await loadConnections();status.textContent='進捗を更新しました。'}))
-  if(issued?.channel===current.id)detail.append(element('pre','公式LINEのトークに次の1行を送信：\n接続テスト '+issued.code+'\n有効期限 '+new Date(issued.expires_at).toLocaleString('ja-JP')))
+  if(issued?.channel===current.id){detail.append(element('p','1通目：次の内容をコピーして送信'));detail.append(element('pre','接続テスト '+issued.code));detail.append(action('1通目をコピー',async()=>{await navigator.clipboard.writeText('接続テスト '+issued.code);status.textContent='コピーしました。次に別のメッセージで「動作確認」と送ってください。'}),element('p','2通目：動作確認（コードを付けず別のメッセージとして送る）'),element('p','有効期限 '+new Date(issued.expires_at).toLocaleString('ja-JP'),'muted'))}
   const testers=await request(prefix+'/tests')
   if(channelId!==current.id)return
   for(const tester of testers){
     const row=element('div',undefined,'record');row.append(element('p',(tester.verified_at?'本人確認済':'本人確認待ち')+' · '+(tester.received?'受信済':'受信待ち')+' · '+(tester.send_status??'未送信')))
+    if(tester.verified_at&&!tester.received&&!tester.send_status&&Date.parse(tester.expires_at)>Date.now())row.append(element('p','あと1つ：同じスマホのLINEから「動作確認」と1通送り、進捗を更新してください。','muted'))
     if(tester.received&&!tester.send_status&&Date.parse(tester.expires_at)>Date.now())row.append(action('接続テストを1通送る',async()=>{
       await request(prefix+'/tests/'+tester.id+'/send','POST',{});await loadConnections();status.textContent='テスト送信を登録しました。スマートフォンで確認してください。'
     }))
