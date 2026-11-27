@@ -13,7 +13,7 @@ import {keyed,poolFor,scope,tx,unseal} from '../dist/core.js'
 import {bootstrap,migrate} from '../dist/setup.js'
 import {LineAPI} from '../dist/line.js'
 import {workOnce} from '../dist/jobs.js'
-import {intakeTemplate,normalizeAnswer} from '../public/studio/interview-intake-template.mjs'
+import {intakeTemplate,normalizeAnswer,unblockSettings} from '../public/studio/interview-intake-template.mjs'
 
 const origin='https://example.test',cfg={origin,master:randomBytes(32),external:true,automation:true}
 const bot='U'+'1'.repeat(32),user='U'+'2'.repeat(32),other='U'+'3'.repeat(32)
@@ -41,9 +41,9 @@ const read=(sql,args=[])=>tx(pool,async db=>{await scope(db,tenant,store);return
 const worker=()=>workOnce(pool,cfg,line)
 const sent=who=>pushes.filter(p=>p.to===who).map(p=>p.messages[0])
 const latest=who=>sent(who).at(-1)
-async function inbound(who,type,text,eventId=randomUUID()){
+async function inbound(who,type,text,eventId=randomUUID(),follow){
   await wait()
-  const raw=JSON.stringify({destination:bot,events:[{webhookEventId:eventId,type,timestamp:Date.now(),source:{type:'user',userId:who},...(text!==undefined?{message:{id:randomUUID(),type:'text',text}}:{})}]})
+  const raw=JSON.stringify({destination:bot,events:[{webhookEventId:eventId,type,timestamp:Date.now(),source:{type:'user',userId:who},...(follow?{follow}:{}),...(text!==undefined?{message:{id:randomUUID(),type:'text',text}}:{})}]})
   const response=await fetch(base+'/api/v1/webhooks/line/'+connection,{method:'POST',headers:{'Content-Type':'application/json','X-Line-Signature':createHmac('sha256',lineSecret).update(raw).digest('base64')},body:raw})
   assert.equal(response.status,200)
   await worker()
@@ -75,12 +75,19 @@ after(async()=>{if(server)await new Promise(resolve=>server.close(resolve));awai
 test('匿名テンプレートの下書き・公開、LINEで一問ずつ回答、予約と3時間前カード・OKまで',async()=>{
   const initial=expect(await call(url+'/'+connection),200)
   assert.equal(initial.revision,0);assert.equal(initial.active,false)
+  assert.deepEqual(expect(await call(url),200),[],'未保存のテンプレートは一覧に出さない')
+  expect(await call(url,{cookie:null}),401)
   const draft=expect(await call(url,{method:'PUT',data:{channel:connection,revision:0,settings:{...intakeTemplate,faqUrl:'https://example.test/faq',mapUrl:'https://example.test/map'}}}),200)
   assert.equal(draft.active,false);assert.equal(pushes.length,0)
+  const savedList=expect(await call(url),200);assert.equal(savedList.length,1);assert.equal(savedList[0].channel_id,connection);assert.equal(savedList[0].revision,draft.revision);assert.equal(savedList[0].active,false);assert.equal(savedList[0].stopped,false);assert.ok(!Object.hasOwn(savedList[0],'draft'));assert.ok(!Object.hasOwn(savedList[0],'credentials'))
+  const otherStore=expect(await call('/stores',{method:'POST',data:{name:'別のサンプル事業所',address:'東京都',business_type:'接客飲食',responsible:'担当者',timezone:'Asia/Tokyo',cutoff:'06:00'}}),201).id
+  assert.deepEqual(expect(await call('/stores/'+otherStore+'/recruitment-intake'),200),[],'同一法人の他店の下書きを表示しない')
+  assert.deepEqual(expect(await call('/stores/'+store+'/scenarios?summary=1'),200),[],'トーク型の下書きは通常シナリオと二重登録しない')
   const stale=await call(url+'/action',{method:'POST',data:{channel:connection,revision:99,action:'publish'}})
   assert.equal(stale.status,409)
   const live=expect(await call(url+'/action',{method:'POST',data:{channel:connection,revision:draft.revision,action:'publish'}}),200)
   assert.equal(live.active,true)
+  const publishedList=expect(await call(url),200);assert.equal(publishedList.length,1);assert.equal(publishedList[0].active,true);assert.equal(publishedList[0].live_revision,live.live_revision)
   const forms=expect(await call('/stores/'+store+'/workflows/recruitment/forms'),200)
   assert.equal(forms.forms.length,0,'チャット専用フォームが通常フォームに混入しない')
   await inbound(user,'follow')
@@ -142,8 +149,39 @@ test('匿名テンプレートの下書き・公開、LINEで一問ずつ回答�
   const current=expect(await call(url+'/'+connection),200)
   const stopped=expect(await call(url+'/action',{method:'POST',data:{channel:connection,revision:current.revision,action:'stop'}}),200)
   assert.equal(stopped.active,false)
+  const stoppedList=expect(await call(url),200);assert.equal(stoppedList.length,1);assert.equal(stoppedList[0].stopped,true);assert.equal(stoppedList[0].active,false)
   await inbound(other,'message','応募する')
   assert.equal(sent(other).length,afterCancel)
+})
+
+test('ブロック解除は共通の型で再開し、専用文面・OFF・明示停止・既存応募・重複再送を安全に扱う',async()=>{
+  const newUser='U'+'4'.repeat(32),customUser='U'+'5'.repeat(32),stoppedUser='U'+'6'.repeat(32),offUser='U'+'7'.repeat(32)
+  const release=(who,id=randomUUID(),flag=true)=>inbound(who,'follow',undefined,id,{isUnblocked:flag})
+  const saveAndPublish=async settings=>{const old=expect(await call(url+'/'+connection),200);const saved=expect(await call(url,{method:'PUT',data:{channel:connection,revision:old.revision,settings}}),200);return expect(await call(url+'/action',{method:'POST',data:{channel:connection,revision:saved.revision,action:'publish'}}),200)}
+  const original=expect(await call(url+'/'+connection),200).draft
+  assert.equal(unblockSettings(original).mode,'same')
+  await saveAndPublish(original)
+  await inbound(newUser,'follow');const greeting=latest(newUser).text,initial=sent(newUser).length
+  await inbound(newUser,'unfollow');assert.equal(sent(newUser).length,initial)
+  const releaseId=randomUUID();await release(newUser,releaseId);assert.equal(latest(newUser).text,greeting);assert.equal(sent(newUser).length,initial+1)
+  await release(newUser,releaseId);assert.equal(sent(newUser).length,initial+1,'同じ解除イベントで重複送信しない')
+  await inbound(newUser,'message','応募する');assert.match(latest(newUser).text,/応募に必要な情報/)
+  await inbound(newUser,'message','通知なしで応募');assert.equal(latest(newUser).text,original.name)
+  const count=(await read('SELECT count(*)::int AS n FROM workflow_response')).rows[0].n
+  await inbound(user,'unfollow');await release(user);await inbound(user,'message','応募する');await inbound(user,'message','通知なしで応募');assert.match(latest(user).text,/回答済み/);assert.equal((await read('SELECT count(*)::int AS n FROM workflow_response')).rows[0].n,count,'以前の回答を重複作成しない')
+  const customized={...original,unblock:{...unblockSettings(original),mode:'custom',greeting:'再開のご案内：{{store}}',name:'再開時のお名前を入力',station:'再開時の駅名を入力',age:'再開時の年齢を入力',thanks:'{{name}}さん、再開用の予約はこちらです。'}}
+  await saveAndPublish(customized);assert.equal(expect(await call(url),200)[0].unblock_mode,'custom')
+  await inbound(customUser,'follow');assert.equal(latest(customUser).text,greeting,'新規友だちは共通の文面のまま')
+  await inbound(customUser,'unfollow');await release(customUser,randomUUID(),false);assert.match(latest(customUser).text,/再開のご案内/,'フラグが不正確でも直前のブロック履歴で解除を識別する')
+  await inbound(customUser,'message','応募する');await inbound(customUser,'message','通知なしで応募');assert.equal(latest(customUser).text,customized.unblock.name)
+  await inbound(customUser,'message','架空応募者復帰');assert.equal(latest(customUser).text,customized.unblock.station)
+  await inbound(customUser,'message','架空駅');assert.equal(latest(customUser).text,customized.unblock.age)
+  await inbound(customUser,'message','25');assert.match(latest(customUser).text,/再開用の予約/);assert.equal((await read('SELECT count(*)::int AS n FROM workflow_response')).rows[0].n,count+1)
+  await inbound(stoppedUser,'follow');await inbound(stoppedUser,'message','全配信停止');const stoppedCount=sent(stoppedUser).length
+  await inbound(stoppedUser,'unfollow');await release(stoppedUser);assert.equal(sent(stoppedUser).length,stoppedCount,'明示的な全配信停止を解除だけで変更しない')
+  await saveAndPublish({...customized,unblock:{...customized.unblock,mode:'off'}})
+  await inbound(offUser,'follow');const offCount=sent(offUser).length;await inbound(offUser,'unfollow');await release(offUser);assert.equal(sent(offUser).length,offCount)
+  await inbound(offUser,'message','応募する');assert.match(latest(offUser).text,/応募に必要な情報/,'OFFでも本人からの応募は妨げない')
 })
 
 test('年齢は数値形式だけ検証し、回答者の氏名・最寄駅は原文のまま扱う',()=>{

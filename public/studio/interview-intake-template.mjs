@@ -9,6 +9,14 @@ export const intakeTemplate=Object.freeze({
   reminder:'予約時刻の【3時間前】になりましたのでお知らせします。\n\n予約日時：{{booking}}（対面）\n\n予約の詳細確認、日程変更、キャンセルは下のボタンから行えます。\n確認できましたらOKをお願いします！',
   faqUrl:'',mapUrl:'',reminder3h:true,
 })
+// Older drafts and published settings have no unblock override. They inherit
+// the main flow automatically, rather than becoming a second scenario.
+export function unblockSettings(settings){
+  const base=Object.fromEntries(['greeting','name','station','age','thanks'].map(key=>[key,settings[key]]))
+  const custom=settings.unblock
+  if(!custom||custom.mode!=='custom')return {...base,mode:custom?.mode==='off'?'off':'same'}
+  return {...base,...custom,mode:'custom'}
+}
 export const consentPrompt='応募に必要な情報（氏名・最寄駅・年齢）を、店舗の採用・面談調整のために管理します。\n内容をご確認の上、応募方法を選んでください。\nLINEで確定通知・リマインドを希望しない場合も応募できます。\n途中で「応募取消」と送ると中止できます。'
 export const intakeVariable=(body,values)=>body.replace(/\{\{(store|name|booking)\}\}/g,(_,key)=>values[key]??'')
 export function normalizeAnswer(stage,raw){

@@ -47,7 +47,7 @@ export function createAgencyGuide(root,{storeName,storeId,info,journey,step,onSt
     body.append(connect)
   }else if(current.number===2){
     body.append(el('p','最初は「面談までの基本の型」を選ぶだけ。用意された案内の文章をその店舗用に編集します。','guide-intro'))
-    const first=box('おすすめ：LINEトークで応募から面談まで','友だち追加 → 応募の同意 → 名前・最寄駅・年齢 → 面談予約 → 確定通知。予約リンクは自動で発行されます。');first.append(actions(link('面談までの基本の型を編集する',studio+'&start=intake',true)));body.append(first)
+    const first=box('おすすめ：LINEトークで応募から面談まで','友だち追加 → 応募の同意 → 名前・最寄駅・年齢 → 面談予約 → 確定通知。予約リンクは自動で発行されます。');first.append(actions(link('面談までの基本の型を編集する',studio+'&start=intake',true),link('ブロック解除時のステップを編集',studio+'&start=unblock')));body.append(first)
     const second=box('応募フォームから始める・自由に組む','応募フォーム送信後に予約を案内するパターンや、タグ別の配信を作りたいときはこちら。');second.append(actions(link('新規シナリオを作る',studio+'&start=wizard'),link('応募フォームを管理',workflows+'&tab=forms')));body.append(second)
     const saved=box('この店舗のステップ',`${journey.counts?.drafts??0}件作成済み ／ ${journey.counts?.published??0}件公開中。下書き保存の段階では配信されません。`);saved.append(actions(link('作成済みのステップを確認する',studio)));body.append(saved)
   }else if(current.number===3){

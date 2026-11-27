@@ -1,4 +1,4 @@
-import {intakeTemplate,consentPrompt,intakeVariable} from './interview-intake-template.mjs'
+import {intakeTemplate,consentPrompt,intakeVariable,unblockSettings} from './interview-intake-template.mjs'
 import {workspacePath,scopeWorkspaceLinks} from '/static/workspace-path.mjs'
 import {starter,recruitmentTemplates,recruitmentTemplate,kinds,conditions,triggers,liveTriggers,variables,validate,simulate,renderMessage,links,branchRules,timelineActions} from './engine.mjs'
 import {reorderGroups,reorderStep,adjacentMove} from './step-order.mjs'
@@ -25,7 +25,7 @@ const sampleValues={name:'水城あおい',store:'銀座店（サンプル）',s
   price:'60分 8,000円（税込）',booking_url:'https://example.test/reservations/sample',interview_link:'https://example.test/reserve/sample',customer_link:'https://example.test/account/sample'}
 let person={...defaults,values:{...sampleValues}}
 let applicantCatalog={enabled:false,definitions:[]}
-let scenario,graph,selection,scenarioList=[],stores=[],channels=[],store,original='',dirty=false,tab='edit',part='workspace',simulation
+let scenario,graph,selection,scenarioList=[],intakeList=[],intakeListError=false,stores=[],channels=[],store,original='',dirty=false,tab='edit',part='workspace',simulation
 let busy=false, ready=false, preset='unbooked', localCreateKey
 let readiness=null,readinessSeq=0, currentSession, viewMode='basic', zoom=1, autosave=true, saveTimer, savePromise=null, saveIssue='', historyKey='', historyTime=0
 let undoStack=[],redoStack=[],searchText='',folderFilter='',libraryKind='all',matrix=null,branchOpen=new Map(),pendingMeta={folder:'',is_template:false},recoveryAvailable=true
@@ -343,16 +343,29 @@ function setupFlow(data) {
   syncScenarioURL();show();pollPresence();refreshReadiness().catch(()=>{})
 }
 
+const intakeName='面談までの基本の型（LINEトーク型）'
+const intakeFolder='LINEトーク型'
+const demoIntakeKey='npl-studio-intake-demo-v1'
+function demoIntakes(){try{return JSON.parse(localStorage.getItem(demoIntakeKey))??{}}catch{return {}}}
+function demoIntakeRecord(storeId,channelId){return demoIntakes()[storeId]?.[channelId]??{revision:0,draft:intakeTemplate,active:false,stopped:false,live_revision:null,readiness:['公開デモでは実LINEに配信できません。']}}
+function storeDemoIntake(storeId,channelId,record){const data=demoIntakes();data[storeId]??={};data[storeId][channelId]=record;localStorage.setItem(demoIntakeKey,JSON.stringify(data))}
+function intakeSummary(channel,record){return {channel_id:channel.id,label:channel.label,basic_id:channel.basic_id??null,channel_stopped:!!channel.stopped,revision:record.revision,live_revision:record.live_revision,active:!!record.active,stopped:!!record.stopped,unblock_mode:unblockSettings(record.draft).mode}}
+function syncIntakeList(targetStore,channelId,record){
+  if(store?.id!==targetStore)return
+  const channel=channels.find(c=>c.id===channelId);if(!channel)return
+  intakeList=intakeList.filter(x=>x.channel_id!==channelId);if(record.revision>0)intakeList.push(intakeSummary(channel,record));intakeList.sort((a,b)=>a.label.localeCompare(b.label,'ja'));intakeListError=false;library();if(!graph)flowView()
+}
+async function openSavedIntake(channel=null,mode='basic'){if(!ready||!store||navigationBusy||busy)return;await openInterviewIntake(channel,mode)}
 async function refreshStore(next){
-  if(currentSession?.actor.agency)$('#settings-link').href=workspacePath('/master/?store='+encodeURIComponent(next.id))
   if(!next)throw new Error('店舗を選択してください。')
+  if(currentSession?.actor.agency)$('#settings-link').href=workspacePath('/master/?store='+encodeURIComponent(next.id))
   const requested=new URLSearchParams(location.search).get('scenario'),root='/stores/'+next.id
-  let newChannels,newCatalog,newList
-  if(demo){if(!local){try{local=JSON.parse(localStorage.getItem(draftKey))}catch{}if(!local||!Array.isArray(local.ginza)||!Array.isArray(local.yokohama))local=fixtures()}newChannels=channelDemo(next.id);newCatalog={enabled:true,definitions:Object.entries(tagStepTemplates).filter(([k])=>k!=='generic').map(([tag_key,t])=>({tag_key,label:t.label,active:true}))};newList=structuredClone(local[next.id])}
-  else [newChannels,newCatalog,newList]=await Promise.all([api(root+'/connections'),api(root+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]})),api(root+'/scenarios?summary=1')])
+  let newChannels,newCatalog,newList,newIntakes
+  if(demo){if(!local){try{local=JSON.parse(localStorage.getItem(draftKey))}catch{}if(!local||!Array.isArray(local.ginza)||!Array.isArray(local.yokohama))local=fixtures()}newChannels=channelDemo(next.id);newCatalog={enabled:true,definitions:Object.entries(tagStepTemplates).filter(([k])=>k!=='generic').map(([tag_key,t])=>({tag_key,label:t.label,active:true}))};newList=structuredClone(local[next.id]);newIntakes=newChannels.filter(c=>c.purpose==='recruitment').map(c=>intakeSummary(c,demoIntakeRecord(next.id,c.id))).filter(r=>r.revision>0)}
+  else [newChannels,newCatalog,newList,newIntakes]=await Promise.all([api(root+'/connections'),api(root+'/workflows/recruitment/tags/catalog').catch(()=>({enabled:false,definitions:[]})),api(root+'/scenarios?summary=1'),api(root+'/recruitment-intake').catch(()=>null)])
   const first=newList.find(s=>s.id===requested)??newList.find(s=>!s.is_template)??newList[0]
   const selected=first&&!demo?await api(root+'/scenarios/'+first.id):first
-  store=next;channels=newChannels;applicantCatalog=newCatalog;scenarioList=newList
+  store=next;channels=newChannels;applicantCatalog=newCatalog;scenarioList=newList;intakeList=Array.isArray(newIntakes)?newIntakes:[];intakeListError=!Array.isArray(newIntakes)
   person={...person,zone:store.timezone,cutoff:store.cutoff,timeline:[],tags:[],values:{...person.values,store:store.name}};stepClipboard=null
   setupFlow(selected)
   const candidates=recoveryCandidates().filter(r=>{const saved=selected?.id===r.id?selected:null;if(saved&&JSON.stringify(saved.graph)===JSON.stringify(r.graph)){clearRecovery(r.storageKey);return false}return true})
@@ -659,38 +672,45 @@ async function transition(action,reason) {
 
 function library() {
   const target=$('#library'),active=document.activeElement,searchFocused=target.contains(active)&&active?.type==='search',caret=searchFocused?[active.selectionStart,active.selectionEnd]:null,oldTop=target.scrollTop
-  const box=node('div',null,'panelbody')
-  const rows=node('div',null,'library-list')
+  const box=node('div',null,'panelbody'),rows=node('div',null,'library-list')
+  const items=[...intakeList.map(item=>({kind:'intake',data:item,name:intakeName,folder:intakeFolder})),...scenarioList.map(item=>({kind:'scenario',data:item,name:item.graph.name??'',folder:item.folder??''}))]
   const search=field('検索',searchText,value=>{searchText=value;filter()},{event:'input',attributes:{placeholder:'シナリオ名・フォルダ',type:'search'}})
-  const folders=[...new Set(scenarioList.map(s=>s.folder??'').filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ja'))
+  const folders=[...new Set(items.map(item=>item.folder).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ja'))
   if(folderFilter&&!folders.includes(folderFilter.slice(7))&&folderFilter!=='__none')folderFilter=''
   const picker=field('フォルダ',folderFilter,value=>{folderFilter=value;filter()},{items:{'':'すべて','__none':'未分類',...Object.fromEntries(folders.map(f=>['folder:'+f,f]))}})
   const kind=field('表示',libraryKind,value=>{libraryKind=value;filter()},{items:{all:'すべて',live:'公開中',draft:'下書き',stopped:'停止中',template:'テンプレート'}})
   function filter(){
-    const shown=scenarioList.filter(item=>{
-      const text=((item.graph.name??'')+' '+(item.folder??'')).toLocaleLowerCase()
+    const shown=items.filter(item=>{
+      const d=item.data,text=(item.name+' '+item.folder+(item.kind==='intake'?' 採用 面談予約 '+d.label+' '+(d.basic_id??'')+' ブロック解除':'')).toLocaleLowerCase()
       const folderMatch=!folderFilter||(folderFilter==='__none'?!item.folder:item.folder===folderFilter.slice(7))
-      const kindMatch=libraryKind==='all'||libraryKind==='template'&&item.is_template||libraryKind==='live'&&item.published_version&&!item.stopped||libraryKind==='draft'&&!item.published_version&&!item.is_template||libraryKind==='stopped'&&item.stopped
+      const kindMatch=libraryKind==='all'||(item.kind==='intake'?(libraryKind==='live'&&d.active&&!d.channel_stopped||libraryKind==='draft'&&!d.active&&!d.stopped||libraryKind==='stopped'&&(d.stopped||d.channel_stopped)):(libraryKind==='template'&&d.is_template||libraryKind==='live'&&d.published_version&&!d.stopped||libraryKind==='draft'&&!d.published_version&&!d.is_template||libraryKind==='stopped'&&d.stopped))
       return text.includes(searchText.toLocaleLowerCase())&&folderMatch&&kindMatch
     })
     rows.replaceChildren()
     let prior
-    for(const item of shown.sort((a,b)=>(a.folder??'').localeCompare(b.folder??'','ja'))){
-      if(prior!==(item.folder??'')){rows.append(node('h3',item.folder||'未分類','folder-heading'));prior=item.folder??''}
-      const selected=item.id===scenario?.id
-      const entry=button('',()=>openScenario(item.id),'scenario-card'+(selected?' selected':''))
-      entry.setAttribute('aria-pressed',String(selected))
-      const badges=node('div',null,'labels')
-      badges.append(pill(purposes[item.graph.purpose]),pill(item.is_template?'テンプレート':item.stopped?'停止中':item.published_version?'公開 v'+item.published_version:steps[item.state],
-        item.stopped?'warn':item.published_version?'good':''))
-      if(item.published_version&&((selected&&dirty)||item.draft_matches_published===false))badges.append(pill('未反映','warn'))
-      entry.append(node('strong',item.graph.name),badges)
-      rows.append(entry)
+    // The special, real LINE conversation editor is always a first-class item;
+    // there is no synthetic graph or duplicated scenario in the database.
+    for(const item of shown.sort((a,b)=>a.kind!==b.kind?(a.kind==='intake'?-1:1):a.folder.localeCompare(b.folder,'ja'))){
+      if(prior!==item.folder){rows.append(node('h3',item.folder||'未分類','folder-heading'));prior=item.folder}
+      const d=item.data,badges=node('div',null,'labels')
+      if(item.kind==='intake'){
+        const entry=button('',()=>openSavedIntake(d.channel_id),'scenario-card intake-library-card');entry.dataset.intakeChannel=d.channel_id
+        badges.append(pill('採用'),pill('LINEトーク型'),pill(d.channel_stopped?'LINE停止中':d.active?'公開中':d.stopped?'停止中':'下書き',d.channel_stopped||d.stopped?'warn':d.active?'good':''))
+        if(d.active&&d.revision!==d.live_revision+1)badges.append(pill('未反映','warn'))
+        badges.append(pill('解除時：'+({same:'共通',custom:'専用',off:'OFF'}[d.unblock_mode??'same'])))
+        entry.append(node('strong',item.name),node('small',d.label+(d.basic_id?' '+d.basic_id:''),'intake-library-channel'),badges,node('small','編集・公開を開く →','intake-library-open'));const wrapper=node('div',null,'intake-library-item');const unblock=button('ブロック解除時のステップを編集',()=>openSavedIntake(d.channel_id,'refollow'),'intake-library-sub');unblock.setAttribute('aria-label','ブロック解除時のステップを編集 '+d.label);wrapper.append(entry,unblock);rows.append(wrapper)
+      }else{
+        const selected=d.id===scenario?.id,entry=button('',()=>openScenario(d.id),'scenario-card'+(selected?' selected':''));entry.setAttribute('aria-pressed',String(selected))
+        badges.append(pill(purposes[d.graph.purpose]),pill(d.is_template?'テンプレート':d.stopped?'停止中':d.published_version?'公開 v'+d.published_version:steps[d.state],d.stopped?'warn':d.published_version?'good':''))
+        if(d.published_version&&((selected&&dirty)||d.draft_matches_published===false))badges.append(pill('未反映','warn'))
+        entry.append(node('strong',item.name),badges);rows.append(entry)
+      }
     }
-    if(!shown.length)rows.append(node('p','一致するシナリオがありません。','empty'))
+    if(intakeListError)rows.append(node('p','LINEトーク型の一覧を取得できませんでした。ページを再読み込みしてください。','held-note'))
+    if(!shown.length&&!intakeListError)rows.append(node('p','一致するシナリオがありません。','empty'))
   }
   filter();box.append(search,picker,kind,rows)
-  const head=panelHead('シナリオ一覧',scenarioList.length+'件');head.append(sheetClose());target.replaceChildren(head,box);target.scrollTop=oldTop;if(searchFocused){const next=target.querySelector('input[type=search]');next?.focus({preventScroll:true});if(next&&caret)next.setSelectionRange(...caret)}
+  const head=panelHead('シナリオ一覧',items.length+'件');head.append(sheetClose());target.replaceChildren(head,box);target.scrollTop=oldTop;if(searchFocused){const next=target.querySelector('input[type=search]');next?.focus({preventScroll:true});if(next&&caret)next.setSelectionRange(...caret)}
 }
 
 const selectStep=(id,{reveal=true,open=true}={})=>{
@@ -771,7 +791,7 @@ function removeStep(item) {
 
 function flowView() {
   const root=$('#workspace')
-  if(!graph){root.replaceChildren(panelHead('配信フロー'),node('p','「新規シナリオ」またはテンプレートを選択してください。','empty'));return}
+  if(!graph){root.replaceChildren(panelHead('配信フロー'),node('p',intakeList.length?'保存済みLINEトーク型を選んで、編集・公開できます。':'「新規シナリオ」またはテンプレートを選択してください。','empty'));if(intakeList.length){const body=node('div',null,'panelbody');for(const item of intakeList){const b=button('面談までの基本の型を編集する — '+item.label,()=>openSavedIntake(item.channel_id),'primary');body.append(b)}root.append(body)}return}
   const priorScroll=root.querySelector('.canvas-scroll')
   const oldTop=priorScroll?.scrollTop??0,oldLeft=priorScroll?.scrollLeft??0
   const title=node('div',null,'panelhead editor-head')
@@ -1509,52 +1529,61 @@ function openWizard(empty=false,option={}){
   }
   render()
 }
-async function openInterviewIntake(){
+async function openInterviewIntake(requestedChannel=null,initialMode='basic'){
   const available=channels.filter(c=>c.purpose==='recruitment')
   if(!available.length){dialog('面談までの基本の型','採用専用の公式LINEを接続すると、このテンプレートを利用できます。',node('p','来店と採用の兼用LINEには自動の応募質問を開始しません。'));return}
   const targetStore=store.id, path='/stores/'+targetStore+'/recruitment-intake'
-  let channel=available.find(c=>c.id===graph?.channel)?.id??available[0].id,record,pending=false,changed=false,draft,checked=false
-  const box=node('div',null,'intake-template'),notice=node('p','読み込み中…','field-hint'),editor=node('div')
+  if(requestedChannel&&!available.some(c=>c.id===requestedChannel))throw new Error('保存した公式LINEが見つかりません。店舗とLINE接続を確認してください。')
+  let channel=requestedChannel??available.find(c=>c.id===graph?.channel)?.id??intakeList[0]?.channel_id??available[0].id,record,pending=false,changed=false,draft,checked=false,savedHere=false,editorMode=initialMode==='refollow'?'refollow':'basic'
+  const box=node('div',null,'intake-template'),notice=node('p','読み込み中…','field-hint'),editor=node('div'),modeTabs=node('div',null,'intake-mode-tabs')
   const picker=field('対象の公式LINE',channel,async v=>{if(pending)return;if(changed&&!confirm('保存していない編集を破棄しますか？')){picker.querySelector('select').value=channel;return}channel=v;await load()},{items:Object.fromEntries(available.map(c=>[c.id,c.label]))})
-  box.append(node('p','友だち追加 → 応募の同意 → 名前 → 最寄駅 → 年齢 → Googleカレンダーと照合した対面面談 → 確定カード → 3時間前の確認。','intake-summary'),picker,notice,editor)
+  box.append(node('p','友だち追加 → 応募の同意 → 名前 → 最寄駅 → 年齢 → Googleカレンダーと照合した対面面談 → 確定カード → 3時間前の確認。','intake-summary'),picker,modeTabs,notice,editor)
   if($('#dialog').open)$('#dialog').close()
-  dialog('面談までの基本の型（LINEトーク型）','実店舗の参考フローを個人名・店舗名・URLを匿名化して再構成しました。店舗ごとに文面を変更できます。',box)
-  $('#dialog').classList.add('template-dialog')
+  dialog('面談までの基本の型（LINEトーク型）','新規友だち追加とブロック解除の内容を編集できます。保存・公開は共通で、応募同意や面談予約の重複を防ぎます。',box)
+  const modal=$('#dialog');modal.classList.add('template-dialog','intake-dialog')
+  const close=()=>{if(pending)return;if(changed&&!confirm('未保存の変更を破棄して閉じますか？'))return;modal.close()}
+  modal.lastElementChild.replaceWith(button('閉じる',close));const cancel=e=>{e.preventDefault();close()};modal.addEventListener('cancel',cancel);modal.addEventListener('close',()=>{modal.removeEventListener('cancel',cancel);modal.classList.remove('intake-dialog');if(store?.id===targetStore&&intakeList.length){if(savedHere||!requestedChannel){searchText='';folderFilter='';libraryKind='all';library()}choosePiece('library')}},{once:true})
   async function load(){
     editor.replaceChildren();notice.textContent='読み込み中…';pending=true
-    try{record=demo?{revision:0,draft:intakeTemplate,active:false,readiness:['公開デモでは実LINEに配信できません。']}:await api(path+'/'+channel)
-      draft=structuredClone(record.draft);changed=false;checked=false;draw()
+    try{record=demo?demoIntakeRecord(targetStore,channel):await api(path+'/'+channel)
+      draft=structuredClone(record.draft);changed=false;checked=false;syncIntakeList(targetStore,channel,record);draw()
     }finally{pending=false}
   }
   function draw(){
-    notice.textContent=record.active?'● 公開中'+(record.revision!==record.live_revision+1?' · 未公開の変更あり':''):'○ 未公開（配信していません）'
+    notice.textContent=record.active?'● 公開中'+(record.revision!==record.live_revision+1?' · 未公開の変更あり':''):record.stopped?'○ 停止中（下書き保存済み）':record.revision?'○ 未公開（下書き保存済み）':'○ 未保存（配信していません）'
     const fields=node('div',null,'intake-fields'),preview=node('section',null,'intake-preview'),actions=node('div',null,'intake-actions')
     const steps=[['greeting','1　友だち追加のご挨拶'],['name','2　名前を聞く'],['station','3　最寄駅を聞く'],['age','4　年齢を聞く（数字のみ）'],['thanks','5　回答後の予約案内'],['confirm','6　面談確定通知'],['reminder','7　3時間前のリマインド']]
     const mark=()=>{changed=true;checked=false;refresh()}
-    for(const [key,title] of steps){
-      fields.append(field(title,draft[key],v=>{draft[key]=v;mark()},{type:'textarea',event:'input',attributes:{maxlength:'850',rows:'3'}}))
+    const isReturn=editorMode==='refollow',alternate=unblockSettings(draft)
+    modeTabs.replaceChildren(...[['basic','新規友だち追加'],['refollow','ブロック解除時のステップ']].map(([mode,label])=>{const b=button(label,()=>{if(pending||mode===editorMode)return;editorMode=mode;checked=false;draw()});b.setAttribute('aria-pressed',String(mode===editorMode));return b}))
+    if(isReturn){
+      fields.append(node('h3','ブロック解除時のステップ設定'),node('p','ブロックを解除した人にも、新規追加時と同じように応募の案内を送れます。回答済みの人は予約の確認へ進み、過去の応募や予約は重複作成しません。','field-hint'))
+      fields.append(field('解除時の案内方法',alternate.mode,v=>{draft.unblock={...unblockSettings(draft),...(draft.unblock??{}),mode:v};changed=true;checked=false;draw()},{items:{same:'基本の型と同じ（おすすめ）',custom:'ブロック解除専用の文面を使う',off:'ブロック解除時は自動で送らない'}}))
+      if(alternate.mode==='custom')for(const [key,title] of steps.slice(0,5))fields.append(field(key==='greeting'?'1　ブロック解除時のご挨拶':title,alternate[key],v=>{draft.unblock[key]=v;mark()},{type:'textarea',event:'input',attributes:{maxlength:'850',rows:'3'}}))
+      else if(alternate.mode==='same')fields.append(node('p','基本の型の文面をそのまま使用します。新規友だち追加タブの変更が解除時にも反映されます。','field-hint'))
+      else fields.append(node('p','解除時の自動案内は停止します。通常の「応募する」操作からは応募できます。','field-hint'))
+      fields.append(node('p','面談確定・3時間前リマインド・会場リンクは、予約済みの人との整合性のため新規友だち追加側と共通です。','field-hint'))
+    }else{
+      for(const [key,title] of steps)fields.append(field(title,draft[key],v=>{draft[key]=v;mark()},{type:'textarea',event:'input',attributes:{maxlength:'850',rows:'3'}}))
+      fields.append(field('よくある質問のURL（任意）',draft.faqUrl,v=>{draft.faqUrl=v;mark()},{event:'input',attributes:{placeholder:'https://…',type:'url'}}),field('お店の地図URL（任意）',draft.mapUrl,v=>{draft.mapUrl=v;mark()},{event:'input',attributes:{placeholder:'https://…',type:'url'}}),field('3時間前リマインドとOK確認を使う',draft.reminder3h,v=>{draft.reminder3h=v;mark()},{type:'checkbox'}))
     }
-    fields.append(node('p','予約日時：{{booking}} ／ 店舗名：{{store}} ／ 回答した名前：{{name}}（回答後の文面だけ）を自動差し込みします。予約URLは自動発行されるため入力不要です。','field-hint'),
-      field('よくある質問のURL（任意）',draft.faqUrl,v=>{draft.faqUrl=v;mark()},{event:'input',attributes:{placeholder:'https://…',type:'url'}}),
-      field('お店の地図URL（任意）',draft.mapUrl,v=>{draft.mapUrl=v;mark()},{event:'input',attributes:{placeholder:'https://…',type:'url'}}),
-      field('3時間前リマインドとOK確認を使う',draft.reminder3h,v=>{draft.reminder3h=v;mark()},{type:'checkbox'}),
-      node('p','応募の同意確認と停止操作は共通で追加されます。通知を希望しなくても応募できます。既存の前日通知は維持します。','field-hint'))
+    fields.append(node('p','予約日時：{{booking}} ／ 店舗名：{{store}} ／ 回答した名前：{{name}}（回答後の文面だけ）。予約URLは自動発行されます。','field-hint'),node('p','応募の同意と通知希望の確認は共通です。配信停止の意思・店長対応は尊重します。','field-hint'))
     const status=node('div',null,'intake-status')
     const proof=field('プレビューで質問・予約・通知の順序を確認した',checked,v=>{checked=v;refreshButtons()},{type:'checkbox'})
     const proofCheck=proof.querySelector('input')
-    const save=button('店舗の下書きに保存',async()=>{if(pending)return;pending=true;refreshButtons();try{if(demo){record={...record,revision:1,draft:structuredClone(draft)}}else record=await api(path,'PUT',{channel,revision:record.revision,settings:draft});changed=false;checked=false;draw();announce('下書きを保存しました。まだ配信は行っていません。')}finally{pending=false;refreshButtons()}},'primary')
-    const publish=button(record.active?'変更を公開する':'この型を公開する',async()=>{if(pending||changed||!checked||!record.revision)return;if(!confirm('選択した公式LINEで、新しい応募者向けのトークを開始します。公開してよろしいですか？'))return;pending=true;refreshButtons();try{record=await api(path+'/action','POST',{channel,revision:record.revision,action:'publish'});changed=false;checked=false;draw();announce('面談の基本の型を公開しました。')}finally{pending=false;refreshButtons()}},'primary')
-    const stop=button('この型の自動案内を停止',async()=>{if(pending||!record.active)return;if(!confirm('この店舗のLINEトーク型だけを停止します。確定済みの予約は残ります。よろしいですか？'))return;pending=true;refreshButtons();try{record=await api(path+'/action','POST',{channel,revision:record.revision,action:'stop'});draft=structuredClone(record.draft);changed=false;checked=false;draw();announce('面談の基本の型を停止しました。')}finally{pending=false;refreshButtons()}})
-    const reset=button('標準文面に戻す',()=>{if(confirm('編集欄を標準の文面に戻します。保存するまで変更は反映されません。')){draft=structuredClone(intakeTemplate);changed=true;checked=false;draw()}})
+    const save=button('店舗の下書きに保存',async()=>{if(pending)return;pending=true;refreshButtons();try{if(demo){record={...record,revision:record.revision+1,draft:structuredClone(draft)};storeDemoIntake(targetStore,channel,record)}else record=await api(path,'PUT',{channel,revision:record.revision,settings:draft});changed=false;checked=false;savedHere=true;syncIntakeList(targetStore,channel,record);draw();announce('シナリオ一覧に下書きを保存しました。公開するまで新しい内容は配信されません。')}finally{pending=false;refreshButtons()}},'primary')
+    const publish=button(record.active?'変更を公開する':'この型を公開する',async()=>{if(pending||changed||!checked||!record.revision)return;if(!confirm('選択した公式LINEで、新しい応募者向けのトークを開始します。公開してよろしいですか？'))return;pending=true;refreshButtons();try{record=await api(path+'/action','POST',{channel,revision:record.revision,action:'publish'});changed=false;checked=false;savedHere=true;syncIntakeList(targetStore,channel,record);draw();announce('面談の基本の型を公開しました。')}finally{pending=false;refreshButtons()}},'primary')
+    const stop=button('この型の自動案内を停止',async()=>{if(pending||!record.active)return;if(!confirm('この店舗のLINEトーク型だけを停止します。確定済みの予約は残ります。よろしいですか？'))return;pending=true;refreshButtons();try{record=await api(path+'/action','POST',{channel,revision:record.revision,action:'stop'});draft=structuredClone(record.draft);changed=false;checked=false;savedHere=true;syncIntakeList(targetStore,channel,record);draw();announce('面談の基本の型を停止しました。')}finally{pending=false;refreshButtons()}})
+    const reset=button('標準文面に戻す',()=>{if(confirm('編集欄を標準の文面に戻します。保存するまで変更は反映されません。')){if(editorMode==='refollow'){draft.unblock={...unblockSettings(draft),mode:'same'}}else{const keep=draft.unblock;draft=structuredClone(intakeTemplate);if(keep)draft.unblock=keep}changed=true;checked=false;draw()}})
     actions.append(reset,save,publish);if(record.active)actions.append(stop)
     function refreshButtons(){save.disabled=pending||!changed&&!!record.revision;publish.disabled=demo||pending||changed||!checked||!record.revision||!!record.readiness.length;stop.disabled=pending||!record.active;picker.querySelector('select').disabled=pending}
     function refresh(){
       const example={name:'応募者サンプル',store:'店舗（サンプル）',booking:'11月30日 19:00'}
-      preview.replaceChildren(node('h3','LINEの流れ（架空のプレビュー）'))
+      preview.replaceChildren(node('h3',(isReturn?'ブロック解除時':'LINE')+'の流れ（架空のプレビュー）'));const messages=isReturn?unblockSettings(draft):draft;if(isReturn&&messages.mode==='off'){preview.append(node('p','ブロック解除時は自動案内を送信しません。','field-hint'));proofCheck.checked=checked;refreshButtons();return}
       const bubble=(title,text,mine=false)=>{const c=node('div',null,'intake-bubble'+(mine?' mine':''));c.append(node('small',title),node('p',text));preview.append(c)}
-      bubble('店舗',intakeVariable(draft.greeting,example));bubble('応募者','応募する',true);bubble('店舗',consentPrompt);bubble('応募者','通知ありで応募',true)
-      for(const [key,value] of [['name','応募者サンプル'],['station','サンプル駅'],['age','25']]){bubble('店舗',draft[key]);bubble('応募者',value,true)}
-      bubble('店舗',intakeVariable(draft.thanks,example)+'\n［この店舗専用の予約URL］')
+      bubble('店舗',intakeVariable(messages.greeting,example));bubble('応募者','応募する',true);bubble('店舗',consentPrompt);bubble('応募者','通知ありで応募',true)
+      for(const [key,value] of [['name','応募者サンプル'],['station','サンプル駅'],['age','25']]){bubble('店舗',messages[key]);bubble('応募者',value,true)}
+      bubble('店舗',intakeVariable(messages.thanks,example)+'\n［この店舗専用の予約URL］')
       bubble('予約確定',intakeVariable(draft.confirm,example)+'\n［予約の変更・キャンセル］'+(draft.faqUrl?'\n［よくある質問］':'')+(draft.mapUrl?'\n［お店の地図］':''))
       if(draft.reminder3h){bubble('3時間前',intakeVariable(draft.reminder,example)+'\n［OK］');bubble('応募者','OK',true)}
       proofCheck.checked=checked;refreshButtons()
@@ -1719,7 +1748,8 @@ async function start() {
     if(navigationBusy||!await finishBeforeLeave())return
     openTagTemplates()
   }
-  $('#interview-intake').onclick=async()=>{if(!ready||!store||navigationBusy||!await finishBeforeLeave())return;try{await openInterviewIntake()}catch(error){announce(error.message,true)}}
+  $('#interview-intake').onclick=async()=>{try{await openSavedIntake()}catch(error){announce(error.message,true)}}
+  $('#interview-unblock')?.addEventListener('click',()=>openSavedIntake(null,'refollow').catch(error=>announce(error.message,true)))
   $('#new').onclick=async()=>{
     if (!ready || !store) return
     if(navigationBusy||!await finishBeforeLeave())return
@@ -1743,7 +1773,7 @@ async function start() {
   if (!stores.length) throw new Error('店舗を登録してからシナリオを作成してください。')
   select.onchange=async()=>{
     const next=stores.find(location=>location.id===select.value)
-    try{const ok=await navigateSafely(async()=>{searchText='';folderFilter='';libraryKind='all';await refreshStore(next);choosePiece('workspace');announce('')});if(!ok)select.value=store.id}catch(error){select.value=store.id;announce(error.message,true)}
+    try{const ok=await navigateSafely(async()=>{searchText='';folderFilter='';libraryKind='all';await refreshStore(next);choosePiece(!graph&&intakeList.length?'library':'workspace');announce('')});if(!ok)select.value=store.id}catch(error){select.value=store.id;announce(error.message,true)}
   }
   const requestedStore=new URLSearchParams(location.search).get('store'),requestedScenario=new URLSearchParams(location.search).get('scenario')
   const initialStore=stores.find(item=>item.id===requestedStore) ?? stores[0]
@@ -1752,8 +1782,9 @@ async function start() {
   ready=true
   if(currentSession?.actor.agency)$('#settings-link').href=workspacePath('/master/?store='+encodeURIComponent(initialStore.id))
   const guideStart=new URLSearchParams(location.search).get('start')
-  if(['intake','wizard'].includes(guideStart)&&!$('#dialog').open){const url=new URL(location.href);url.searchParams.delete('start');history.replaceState(null,'',url);if(guideStart==='intake')await openInterviewIntake();else openPurposePicker()}
-  if(!requestedScenario&&scenarioList.length&&!$('#dialog').open){choosePiece('library')}
+  if(['intake','unblock','wizard'].includes(guideStart)&&!$('#dialog').open){const url=new URL(location.href);url.searchParams.delete('start');history.replaceState(null,'',url);if(guideStart==='intake'||guideStart==='unblock')await openInterviewIntake(null,guideStart==='unblock'?'refollow':'basic');else openPurposePicker()}
+  if(intakeList.length&&!mobileUI()){hideLibrary=false;applyPanelMode()}
+  if(!requestedScenario&&(scenarioList.length||intakeList.length)&&!$('#dialog').open){choosePiece('library')}
   setInterval(pollPresence,45000);setInterval(()=>{if(!document.hidden&&!$('#dialog').open)refreshReadiness().catch(()=>{})},60000);addEventListener('focus',()=>{if(!$('#dialog').open)refreshReadiness().catch(()=>{})})
   const templateRequest=new URLSearchParams(location.search).get('tag-template')
   if(templateRequest!==null&&initialStore.id===requestedStore&&!$('#dialog').open){const url=new URL(location.href);url.searchParams.delete('tag-template');history.replaceState(null,'',url);openTagTemplates(templateRequest)}

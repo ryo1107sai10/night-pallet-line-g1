@@ -403,7 +403,14 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     const source=event.source?.type==='user' ? event.source.userId : undefined
     const user=source && (c.module_channel_id || userId.safeParse(source).success) ? source : undefined
     const key=user ? userKey(cfg,c,user) : null
-    const kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
+    let kind=event.type==='follow'&&event.follow?.isUnblocked?'refollow':event.type
+    // LINE's isUnblocked flag is not guaranteed to be exact. For the intake
+    // feature we can also recognize a preceding recorded block.
+    if(kind==='follow'&&intake&&key){
+      const {rows:[prior]}=await db.query<{kind:string}>(`SELECT kind FROM webhook_event WHERE channel_id=$1 AND user_key=$2 AND generation=$3
+        AND kind IN ('follow','refollow','unfollow') AND occurred_at<$4 ORDER BY occurred_at DESC,(kind='unfollow') DESC LIMIT 1`,[c.id,key,c.generation,new Date(event.timestamp)])
+      if(prior?.kind==='unfollow')kind='refollow'
+    }
     const phrase=event.message?.type==='text'?event.message.text?.trim():null
     const stopSignal=phrase==='全配信停止'?'all':phrase==='販促停止'?'marketing':null
     // postback は認識した action と、実在する流入元IDだけを保存する（生データは保存しない）。
@@ -438,7 +445,7 @@ async function recordWebhookEvents(db:DB,cfg:Config,c:Channel,events:z.infer<typ
     // workflow_contact を登録し、応募者を特定するために必要（従来は postback 時のみ封緘していた）。
     const captured=intake&&key&&kind==='message'&&!stopSignal&&!action&&!phrase?.startsWith('接続テスト ')
       ? await intakePhrase(db,cfg,c,event.webhookEventId,key,phrase??null,event.timestamp):null
-    const intakeFollow=!!intake&&kind==='follow'
+    const intakeFollow=!!intake&&['follow','refollow'].includes(kind)
     const recipient=key&&user&&(captured||(['customer','recruitment'].includes(c.purpose)&&['follow','refollow'].includes(kind))||
       (c.purpose==='recruitment'&&action==='interview_link')||
       (c.purpose==='customer'&&action==='customer_link')||

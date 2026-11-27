@@ -1,5 +1,5 @@
 import {z} from 'zod'
-import {intakeTemplate,consentPrompt,intakeVariable,normalizeAnswer,type IntakeSettings} from '../public/studio/interview-intake-template.mjs'
+import {intakeTemplate,consentPrompt,intakeVariable,normalizeAnswer,unblockSettings,type IntakeSettings} from '../public/studio/interview-intake-template.mjs'
 import {publicHttps} from '../public/studio/message-format.mjs'
 import {audit,automationForStore,conflict,Fault,forbidden,keyed,missing,newId,seal,unseal,uuid,type Actor,type Config,type DB} from './core.js'
 import {channel,channelReady,type Channel} from './line.js'
@@ -21,6 +21,7 @@ const settings=z.strictObject({
   greeting:content(['store']),name:content([]),station:content([]),age:content([]),
   thanks:content(['store','name']),confirm:content(['store','booking']).refine(s=>s.includes('{{booking}}'),'予約日時を入れてください。'),reminder:content(['store','booking']).refine(s=>s.includes('{{booking}}'),'予約日時を入れてください。'),
   faqUrl:url,mapUrl:url,reminder3h:z.boolean(),
+  unblock:z.strictObject({mode:z.enum(['same','custom','off']),greeting:content(['store']),name:content([]),station:content([]),age:content([]),thanks:content(['store','name'])}).optional(),
 })
 export const intakeSaveInput=z.strictObject({channel:uuid,revision:z.int().min(0),settings})
 export const intakeActionInput=z.strictObject({channel:uuid,revision:z.int().min(1),action:z.enum(['publish','stop'])})
@@ -42,7 +43,20 @@ async function forStore(db:DB,store:string,id:string){
 export async function intakeView(db:DB,actor:Actor,store:string,id:string){
   actorCheck(actor);const c=await forStore(db,store,id),row=await record(db,c)
   return {revision:row?.revision??0,draft:row?.draft??intakeTemplate,live_revision:row?.live_revision??null,
-    active:!!row?.live, readiness:await intakeReadiness(db,c)}
+    active:!!row?.live,stopped:!!row?.form_id&&!row?.live,readiness:await intakeReadiness(db,c)}
+}
+// The studio library uses the same intake record rather than creating a second
+// executable scenario. Only saved records for the authorized store are listed.
+export async function intakeList(db:DB,actor:Actor,store:string){
+  actorCheck(actor)
+  const {rows}=await db.query(`SELECT i.channel_id,c.label,c.basic_id,c.stopped AS channel_stopped,
+    i.revision,i.live_revision,i.live IS NOT NULL AS active,
+    i.form_id IS NOT NULL AND i.live IS NULL AS stopped,
+    coalesce(i.draft->'unblock'->>'mode','same') AS unblock_mode,
+    CASE WHEN i.live IS NULL THEN NULL ELSE coalesce(i.live->'unblock'->>'mode','same') END AS live_unblock_mode
+    FROM recruitment_intake i JOIN channel c ON (c.tenant_id,c.store_id,c.id)=(i.tenant_id,i.store_id,i.channel_id)
+    WHERE i.store_id=$1 AND c.purpose='recruitment' ORDER BY c.label,c.id`,[store])
+  return rows
 }
 async function intakeReadiness(db:DB,c:Channel){
   const f=await storeFeatures(db,c.store_id),loc=await locationOf(db,c.store_id),problems:string[]=[]
@@ -114,6 +128,16 @@ export async function intakeDispatchReady(db:DB,c:Channel,cfg:Config,userKey:str
   const {rowCount}=await db.query("SELECT 1 FROM inbox_thread i JOIN store s ON s.id=i.store_id WHERE i.channel_id=$1 AND i.user_key=$2 AND i.purpose='recruitment' AND i.state='handling' AND s.inbox_enabled",[c.id,userKey])
   return !rowCount
 }
+// Keep the entry source with temporary, encrypted run progress. Legacy run
+// boxes contained only answers, so continue reading that shape as well.
+type RunProgress={entry:'basic'|'refollow';answers:Record<string,string>}
+function runProgress(cfg:Config,run:Run|undefined):RunProgress{
+  if(!run?.answers_box)return {entry:'basic',answers:{}}
+  const value=JSON.parse(unseal(cfg,'intake-run:'+run.id,run.answers_box))
+  if((value.entry==='basic'||value.entry==='refollow')&&value.answers&&typeof value.answers==='object')return {entry:value.entry,answers:value.answers}
+  return {entry:'basic',answers:value}
+}
+const sealProgress=(cfg:Config,id:string,progress:RunProgress)=>seal(cfg,'intake-run:'+id,JSON.stringify(progress.entry==='basic'?progress.answers:progress))
 export async function processIntake(db:DB,cfg:Config,c:Channel,event:Event){
   if(c.purpose!=='recruitment'||!event.user_key||c.generation!==event.generation)return
   // Stop/delete pending answers regardless of whether the template is still active.
@@ -124,7 +148,7 @@ export async function processIntake(db:DB,cfg:Config,c:Channel,event:Event){
   }
   const row=await activeIntake(db,c)
   if(!row||+row.live_at>+event.occurred_at||Date.now()-+event.occurred_at>10*60000||
-    !event.recipient_box||event.action||!['follow','message'].includes(event.kind))return
+    !event.recipient_box||event.action||!['follow','refollow','message'].includes(event.kind))return
   const phrase=event.kind==='message'&&event.intake_phrase_box?unseal(cfg,'intake-event:'+c.id+':'+event.event_id,event.intake_phrase_box):null
   if(event.kind==='message'&&!phrase)return
   const user=unseal(cfg,'webhook:'+c.id+':'+event.event_id,event.recipient_box)
@@ -147,24 +171,36 @@ export async function processIntake(db:DB,cfg:Config,c:Channel,event:Event){
     if(run)await db.query("UPDATE recruitment_intake_run SET stage='cancelled',answers_box=NULL,last_at=$2 WHERE id=$1",[run.id,event.occurred_at])
     return
   }
-  if(event.kind==='follow'||phrase===intakeStart){
+  const newEntry=event.kind==='follow'||event.kind==='refollow'
+  if(newEntry||phrase===intakeStart){
     if(event.kind==='follow'&&run)return // one greeting, no re-entry on redelivery
+    const unblock=unblockSettings(row.live)
+    if(event.kind==='refollow'){
+      if(unblock.mode==='off')return
+      // Unblocking is not consent to restart an explicitly stopped service.
+      const {rows:[guard]}=await db.query<{following:boolean;stopped:boolean}>(`SELECT
+        coalesce((SELECT following FROM channel_relationship WHERE channel_id=$1 AND user_key=$2),false) AS following,
+        EXISTS(SELECT 1 FROM webhook_event e WHERE e.channel_id=$1 AND e.user_key=$2 AND e.stop_signal='all'
+          AND e.occurred_at>=coalesce((SELECT notices_changed_at FROM workflow_contact WHERE channel_id=$1 AND purpose='recruitment' AND subject=$3),'-infinity')) AS stopped`,[c.id,event.user_key,subject])
+      if(!guard.following||guard.stopped)return
+    }
+    const entry:RunProgress['entry']=event.kind==='refollow'?'refollow':!newEntry&&run&&run.stage==='invited'&&run.config_revision===row.live_revision&&+run.expires_at>Date.now()?runProgress(cfg,run).entry:'basic'
     await rememberContact(db,cfg,c,user,identity)
-    const id=newId(),stage=event.kind==='follow'?'invited':'consent'
-    const {rows:[fresh]}=await db.query<Run>(`INSERT INTO recruitment_intake_run (id,tenant_id,store_id,channel_id,applicant_key,generation,config_revision,stage,last_at,expires_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+interval '24 hours')
+    const id=newId(),stage=newEntry?'invited':'consent'
+    const {rows:[fresh]}=await db.query<Run>(`INSERT INTO recruitment_intake_run (id,tenant_id,store_id,channel_id,applicant_key,generation,config_revision,stage,last_at,expires_at,answers_box)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+interval '24 hours',$10)
       ON CONFLICT(channel_id,applicant_key) DO UPDATE SET id=excluded.id,generation=excluded.generation,config_revision=excluded.config_revision,
-      stage=excluded.stage,last_at=excluded.last_at,expires_at=excluded.expires_at,step=1,answers_box=NULL RETURNING *`,
-    [id,c.tenant_id,c.store_id,c.id,subject,c.generation,row.live_revision,stage,event.occurred_at])
+      stage=excluded.stage,last_at=excluded.last_at,expires_at=excluded.expires_at,step=1,answers_box=excluded.answers_box RETURNING *`,
+    [id,c.tenant_id,c.store_id,c.id,subject,c.generation,row.live_revision,stage,event.occurred_at,entry==='refollow'?sealProgress(cfg,id,{entry,answers:{}}):null])
     run=fresh
-    await prompt(db,cfg,identity,run,stage==='invited'?intakeVariable(row.live.greeting,{store:(await locationOf(db,c.store_id)).name}):consentPrompt)
+    await prompt(db,cfg,identity,run,stage==='invited'?intakeVariable(entry==='refollow'?unblock.greeting:row.live.greeting,{store:(await locationOf(db,c.store_id)).name}):consentPrompt)
     return
   }
   if(!run||run.generation!==c.generation||run.config_revision!==row.live_revision||+run.expires_at<=Date.now()||['complete','cancelled','invited'].includes(run.stage))return
   const {rowCount}=await db.query(`SELECT 1 FROM service_delivery WHERE channel_id=$1 AND subject=$2 AND kind='intake_prompt'
     AND object_id=$3 AND object_revision=$4 AND status='accepted' AND first_attempt_at<=$5`,[c.id,subject,run.id,run.step,event.occurred_at])
   if(!rowCount)return
-  const answers=run.answers_box?JSON.parse(unseal(cfg,'intake-run:'+run.id,run.answers_box)) as Record<string,string>:{}
+  const progress=runProgress(cfg,run),answers=progress.answers,messages=progress.entry==='refollow'?unblockSettings(row.live):row.live
   let stage=run.stage,body:string
   if(stage==='consent'){
     if(!['通知ありで応募','通知なしで応募'].includes(phrase!))return
@@ -174,27 +210,27 @@ export async function processIntake(db:DB,cfg:Config,c:Channel,event:Event){
     if(submitted){
       const link=await issueInterviewLinkToken(db,cfg,c,user)
       stage='complete';body='応募情報は回答済みです。面談のご確認はこちらからお願いします。\n'+link.url
-    }else{stage='name';body=row.live.name}
+    }else{stage='name';body=messages.name}
   }else{
     if(phrase&&keywords.includes(phrase))return
     const answer=normalizeAnswer(stage,phrase)
     if(!answer){body=stage==='age'?'年齢は数字のみで入力してください。例：25':'80文字以内で回答してください。'}
     else{
       answers[stage]=answer
-      if(stage==='name'){stage='station';body=row.live.station}
-      else if(stage==='station'){stage='age';body=row.live.age}
+      if(stage==='name'){stage='station';body=messages.station}
+      else if(stage==='station'){stage='age';body=messages.age}
       else{
         const {rows:[form]}=await db.query<{revision:number}>('SELECT revision FROM workflow_form WHERE id=$1 AND chat_only AND published',[row.form_id])
         if(!form)return
         await submitForm(db,cfg,identity,{form:row.form_id,revision:form.revision,answers},true)
         const link=await issueInterviewLinkToken(db,cfg,c,user)
-        body=intakeVariable(row.live.thanks,{name:answers.name,store:(await locationOf(db,c.store_id)).name})+'\n'+link.url
+        body=intakeVariable(messages.thanks,{name:answers.name,store:(await locationOf(db,c.store_id)).name})+'\n'+link.url
         stage='complete'
       }
     }
   }
   const {rows:[updated]}=await db.query<Run>(`UPDATE recruitment_intake_run SET stage=$2,step=step+1,answers_box=$3,last_at=$4
-    WHERE id=$1 RETURNING *`,[run.id,stage,stage==='complete'?null:seal(cfg,'intake-run:'+run.id,JSON.stringify(answers)),event.occurred_at])
+    WHERE id=$1 RETURNING *`,[run.id,stage,stage==='complete'?null:sealProgress(cfg,run.id,progress),event.occurred_at])
   await prompt(db,cfg,identity,updated,body)
 }
 async function prompt(db:DB,cfg:Config,identity:WorkflowSubject,run:Run,body:string){

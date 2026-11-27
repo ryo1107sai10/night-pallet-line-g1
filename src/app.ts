@@ -4,7 +4,7 @@ import {piyomaruInfo,configurePiyomaru,askPiyomaru,createPiyomaruJob,readPiyomar
 import {createPiyomaruMediaSource} from './piyomaru-library.js'
 import {createMaterialStorage,createMaterialDraft,materialAsset,materialHistory,materialDraftInput,materialPublishInput,publishMaterial,uploadMaterialChunk} from './piyomaru-materials.js'
 import {acceptanceInput,masterHealth,platformHealth,probeStore,recordStoreAcceptance} from './store-health.js'
-import {intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
+import {intakeList,intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
 import { agencyMasterDetails, inviteAgencyPair, confirmAgencyPair, cancelAgencyPair, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
@@ -692,6 +692,11 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     if(queued)await wakeLine(store,channel,'applicant')
     res.json({handoff_until})
   })
+  api.get('/stores/:store/recruitment-intake',staff(async(db,actor,req)=>{
+    const store=idOf(req,'store')
+    await interviewAccess(db,actor,store)
+    return intakeList(db,actor,store)
+  }))
   api.get('/stores/:store/recruitment-intake/:channel',staff(async(db,actor,req)=>{
     const store=idOf(req,'store')
     await interviewAccess(db,actor,store)
