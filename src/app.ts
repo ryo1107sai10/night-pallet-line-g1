@@ -8,7 +8,7 @@ import {intakeList,intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActi
 import { agencyMasterDetails, inviteAgencyPair, extendAgencyPair, approveAgencyPairCandidate, confirmAgencyPair, cancelAgencyPair, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
-import {completeMasterPasswordReset,masterPasswordResetPath,resetCompletion} from './master-password-reset.js'
+import {completeMasterPasswordReset,masterPasswordResetPath,readMasterPasswordResetPolicy,resetPolicyInput,resetCompletion} from './master-password-reset.js'
 import { checkAgencyAccess } from './agency-access.js'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { fileURLToPath } from 'node:url'
@@ -442,6 +442,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   })
   api.post('/auth/master/enrollment',async(req,res)=>{const {invite}=agencyEnrollmentInput.parse(req.body);res.set('Cache-Control','no-store').json(await readAgencyEnrollment(pool,cfg,invite,address(req)))})
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
+  api.post('/auth/master/recovery/policy',async(req,res)=>{const {recovery}=resetPolicyInput.parse(req.body);res.set('Cache-Control','no-store').json(await readMasterPasswordResetPolicy(pool,cfg,recovery,address(req)))})
   api.post('/auth/master/recovery',async(req,res)=>{
     const result=await completeMasterPasswordReset(pool,cfg,resetCompletion.parse(req.body),address(req))
     res.set('Set-Cookie',sessionCookie(cfg)).json(result)

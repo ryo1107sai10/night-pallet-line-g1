@@ -7,6 +7,7 @@ export function masterTeam(info, actions) {
   const limit=info.master_limit??3
   root.append(el('p',`登録済みマスター ${masters.length}/${limit}名。全員が自社の全契約店舗を同じ権限で管理できます。ログイン情報は個人別です。`),
     el('p','「追加」は現在のマスターを残します。「交代」は選択した前任者だけのログインを終了します。','muted'))
+  if(info.password_only)root.append(el('p','マスター全員の認証方式：メール・パスワードのみ（6桁コード不要）','muted'))
   const status=el('p');status.setAttribute('role','status')
   async function run(control,fn){
     control.disabled=true;status.textContent=''
@@ -37,7 +38,10 @@ export function masterTeam(info, actions) {
     promote.disabled=!info.pending_active
     pending.append(promote)
     const issued=actions.inviteResult
-    if(issued?.id===info.pending_id&&!info.pending_active&&issued.invite_code&&issued.setup_key){
+    if(issued?.id===info.pending_id&&!info.pending_active&&issued.url){
+      const value=el('input');value.readOnly=true;value.value=issued.url;value.setAttribute('aria-label','新しいマスターの専用招待リンク');pending.append(el('p','以下の専用リンクを本人にのみ渡してください。パスワードを設定すると登録が完了します（6桁コード不要）。'),value,
+        button('専用招待リンクをコピー',event=>run(event.currentTarget,async()=>{await navigator.clipboard.writeText(issued.url);status.textContent='本人専用の招待リンクをコピーしました。'}),'secondary'))
+    }else if(issued?.id===info.pending_id&&!info.pending_active&&issued.invite_code&&issued.setup_key){
       const value=[`招待コード　${issued.invite_code}`,`認証アプリ設定キー　${issued.setup_key}`,`期限　${new Date(issued.expires_at).toLocaleString('ja-JP')}`].join('\n')
       pending.append(el('p','以下の招待情報を本人にのみ渡してください。本人がログイン画面の「招待を受け取った方」からパスワード・認証アプリを設定します。'),el('pre',value),
         button('招待情報をコピー',event=>run(event.currentTarget,async()=>{await navigator.clipboard.writeText(value);status.textContent='本人へ渡す招待情報をコピーしました。'}),'secondary'))

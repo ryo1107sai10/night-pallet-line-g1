@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres'
 import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, poolFor } from '../dist/core.js'
-import { bootstrap, inviteSupervisor, migrate, renameAgencyLoginId } from '../dist/setup.js'
+import { bootstrap, inviteSupervisor, migrate, renameAgencyLoginId, enableAgencyMasterPasswordLogin } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 import {prepareMasterPasswordReset} from '../dist/master-password-reset.js'
 import {verifyPassword} from '../dist/auth.js'
@@ -470,4 +470,49 @@ test('登録済みの担当者だけ先に承認し、前任・未登録リン�
   expect(await request('/session',{cookie:oldCookie}),401)
   expect(await request('/session',{cookie:third.cookie}),200)
   assert.deepEqual(expect(await request('/agency-master',{cookie:third.cookie}),200).masters.map(m=>m.email),addresses)
+})
+
+
+test('指定した管理会社の既存・将来のマスターだけパスワード認証に統一する',async()=>{
+  await owner.query('DELETE FROM night.auth_rate')
+  const tenant='password-only-policy',address='policy-master@example.test',next='policy-new@example.test',member='ordinary@example.test'
+  const original=await bootstrap(owner,cfg,{slug:tenant,name:'認証方式検証',email:address})
+  const oldCookie=await activate(original,address,tenant,'/auth/master/login')
+  const prior=expect(await request('/session',{cookie:oldCookie}),200)
+  const store=expect(await post('/stores',oldCookie,{name:'維持する店舗',address:'東京都',business_type:'検証',responsible:'担当',timezone:'Asia/Tokyo',cutoff:'06:00'},idempotency()),201)
+  const staffInvite=expect(await post('/staff/invites',oldCookie,{email:member,role:'manager',stores:[store.id]},idempotency()),201)
+  await activate(staffInvite,member,tenant)
+  await tx(owner,async db=>{await scope(db,prior.tenant.id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[prior.tenant.id])})
+  expect(await post('/auth/master/login',null,{tenant,email:address,password:pass}),400)
+  const previous=await prepareMasterPasswordReset(owner,cfg,{tenant,address}),previousToken=new URL(previous.url).hash.slice(1)
+  assert.equal(expect(await post('/auth/master/recovery/policy',null,{recovery:previousToken}),200).mfa_required,true)
+  await assert.rejects(enableAgencyMasterPasswordLogin(owner,'lilu'))
+  await assert.rejects(enableAgencyMasterPasswordLogin(owner,'beta'))
+  assert.equal((await enableAgencyMasterPasswordLogin(owner,tenant.toUpperCase())).changed,true)
+  assert.equal((await enableAgencyMasterPasswordLogin(owner,tenant)).changed,false)
+  expect(await request('/session',{cookie:oldCookie}),200)
+  const current=await post('/auth/master/login',null,{tenant,email:address,password:pass});expect(current,200)
+  assert.equal(expect(await request('/agency-master',{cookie:current.cookie}),200).password_only,true)
+  expect(await post('/auth/master/login',null,{tenant,email:address,password:'wrong'}),401)
+  expect(await post('/auth/login',null,{tenant,email:member,password:pass}),400)
+  expect(await post('/auth/platform/login',null,{tenant:'lilu',email:'kitamura@example.test',password:pass}),400)
+  expect(await post('/auth/master/login',null,{tenant:'beta',email:'chief@example.test',password:pass}),400)
+  expect(await post('/auth/master/recovery/policy',null,{recovery:previousToken}),400)
+  const reset=await prepareMasterPasswordReset(owner,cfg,{tenant,address}),token=new URL(reset.url).hash.slice(1)
+  assert.equal(expect(await post('/auth/master/recovery/policy',null,{recovery:token}),200).mfa_required,false)
+  const added=expect(await post('/agency-master/invite',current.cookie,{address:next,mode:'add'},idempotency()),201)
+  assert.ok(added.url);assert.equal(added.setup_key,undefined)
+  const invite=new URL(added.url).hash.slice(1)
+  assert.equal(expect(await post('/auth/master/enrollment',null,{invite}),200).mfa_required,false)
+  expect(await post('/auth/activate',null,{invite,password:pass}),200)
+  expect(await post('/auth/master/login',null,{tenant,email:next,password:pass}),401)
+  expect(await post('/agency-master/promote',current.cookie,{pending:added.id,mode:'add'}),200)
+  const nextLogin=await post('/auth/master/login',null,{tenant,email:next,password:pass});expect(nextLogin,200)
+  expect(await post('/auth/platform/login',null,{tenant,email:next,password:pass}),401)
+  const pair=expect(await post('/agency-master/pair/invite',current.cookie,{addresses:['policy-one@example.test','policy-two@example.test'],mfa_required:true},idempotency()),201)
+  assert.equal(pair.mfa_required,false)
+  for(const c of pair.candidates){const invite=new URL(c.url).hash.slice(1);assert.equal(expect(await post('/auth/master/enrollment',null,{invite}),200).mfa_required,false)}
+  expect(await post('/auth/master/recovery',null,{recovery:token,password:'New-Demo-Password-123456'}),200)
+  expect(await request('/session',{cookie:oldCookie}),401)
+  expect(await post('/auth/master/login',null,{tenant,email:address,password:'New-Demo-Password-123456'}),200)
 })

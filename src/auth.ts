@@ -83,18 +83,18 @@ export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: stri
   const result = await tx(pool, async db => {
     const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)', [data.tenant])
     if (directory) await scope(db, directory.tenant_id)
-    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean; supervisor_only:boolean}>(`SELECT f.*,
+    const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean; supervisor_only:boolean; agency_master_password_only:boolean}>(`SELECT f.*,
       EXISTS(SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.third_staff_id)) AS designated_master,
       EXISTS(SELECT 1 FROM platform_master m WHERE (m.tenant_id,m.staff_id)=(f.tenant_id,f.id)
         AND m.agency_id IS NOT NULL) AS designated_platform,
-      t.supervisor_only
+      t.supervisor_only,t.agency_master_password_only
       FROM staff f JOIN tenant t ON t.id=f.tenant_id WHERE f.email=$1 AND NOT f.platform_actor FOR UPDATE OF f`, [data.email])
     const passOk = await verifyPassword(data.password, staff?.password_hash)
     if (!staff || staff.disabled_at || !passOk) return null
     const authorized = mode==='platform' ? staff.designated_platform :
       !staff.supervisor_only && (staff.role==='admin' ? staff.designated_master : mode==='staff' && staff.agency_staff)
     if(!authorized)return null
-    const passwordOnly=staff.mfa_required===false&&kind==='staff'&&staff.role==='admin'&&staff.agency_staff&&staff.designated_master&&!staff.supervisor_only
+    const passwordOnly=kind==='staff'&&staff.role==='admin'&&staff.designated_master&&!staff.supervisor_only&&(staff.agency_master_password_only||(staff.agency_staff&&staff.mfa_required===false))
     if(!passwordOnly&&!data.code)throw new Fault(400,'MFA_REQUIRED','認証アプリの現在の6桁コードを入力してください。')
     const step=passwordOnly?null:consumeFactor(cfg,staff,data.code!)
     if(!passwordOnly&&step===null)return null
@@ -215,8 +215,9 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
           ELSE f.agency_staff END
       FOR UPDATE OF f`, [hash])
     if (!staff) throw invalid()
-    const passwordOnly=staff.mfa_required===false&&staff.role==='admin'&&staff.agency_staff&&
-      !!(await db.query('SELECT 1 FROM agency_master_pair WHERE tenant_id=$1 AND $2 IN (first_staff_id,second_staff_id,third_staff_id) AND NOT mfa_required',[tenant,staff.id])).rowCount
+    const passwordOnly=staff.role==='admin'&&!!(await db.query(`SELECT 1 FROM tenant t WHERE t.id=$1 AND NOT t.supervisor_only AND (
+      t.agency_master_password_only OR ($3=false AND $4=true AND EXISTS(SELECT 1 FROM agency_master_pair p WHERE p.tenant_id=t.id AND $2 IN (p.first_staff_id,p.second_staff_id,p.third_staff_id) AND NOT p.mfa_required)))`,
+      [tenant,staff.id,staff.mfa_required,staff.agency_staff])).rowCount
     const step=passwordOnly?null:(data.code?consumeFactor(cfg,staff,data.code):null)
     if(!passwordOnly&&step===null)throw invalid()
     await db.query('UPDATE staff SET password_hash=$2,last_totp_step=COALESCE($3::bigint,last_totp_step) WHERE id=$1',

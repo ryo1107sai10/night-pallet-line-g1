@@ -12,7 +12,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
     '020_tour_revisions','021_supervisor_handoff','022_interview_link_tokens','023_liff_free_links',
     '024_registration_flow','025_remove_liff','026_recruitment_delivery','027_agency_master_self_service',
-    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake','042_piyomaru','043_health_materials','044_case_insensitive_login_id','045_agency_master_pair_handoff','046_agency_pair_password_login','047_agency_third_master']
+    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake','042_piyomaru','043_health_materials','044_case_insensitive_login_id','045_agency_master_pair_handoff','046_agency_pair_password_login','047_agency_third_master','048_agency_master_login_policy']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -173,6 +173,26 @@ export async function designateMaster(pool:pg.Pool,tenantSlug:string,address:str
   })
 }
 
+// Explicit infrastructure-owner configuration for one agency. Never affects a supervisor or other tenant.
+export async function enableAgencyMasterPasswordLogin(pool:pg.Pool,tenantSlug:string){
+  return tx(pool,async db=>{
+    const {rows:[directory]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[tenantSlug])
+    if(!directory)throw new Error('該当する法人が見つかりません。')
+    await scope(db,directory.tenant_id,undefined,true)
+    const {rows:[tenant]}=await db.query<{id:string;slug:string;agency_master_password_only:boolean}>(`SELECT id,slug,agency_master_password_only FROM tenant WHERE id=$1 AND agency_operations_only AND NOT supervisor_only FOR UPDATE`,[directory.tenant_id])
+    if(!tenant)throw new Error('エールのような管理会社専用の法人を指定してください。')
+    if(!(await db.query('SELECT 1 FROM tenant_master WHERE tenant_id=$1 FOR UPDATE',[tenant.id])).rowCount)throw new Error('マスターが登録されていません。')
+    if(!tenant.agency_master_password_only){
+      await db.query('UPDATE tenant SET agency_master_password_only=true WHERE id=$1',[tenant.id])
+      // Existing passwords, TOTP registrations, sessions and invitations are preserved.
+      // A previously issued password-reset link must not silently become less restrictive.
+      await db.query(`DELETE FROM master_password_reset r USING staff f WHERE r.tenant_id=$1 AND (r.tenant_id,r.staff_id)=(f.tenant_id,f.id) AND f.mfa_required`,[tenant.id])
+      await audit(db,tenant.id,null,null,'agency.master_password_only_enabled',tenant.id,null,{login_id:tenant.slug})
+    }
+    return {login_id:tenant.slug,password_only:true,changed:!tenant.agency_master_password_only}
+  })
+}
+
 export async function limitAgencyOperations(pool:pg.Pool,tenantSlug:string) {
   return tx(pool,async db=>{
     const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[tenantSlug])
@@ -209,6 +229,8 @@ if (import.meta.main) {
       console.log(JSON.stringify(result,null,2))
     } else if (tenant==='--rename-agency') {
       console.log(JSON.stringify(await renameAgencyLoginId(migrationPool,slug.parse(name),slug.parse(address))))
+    } else if (tenant==='--master-password-only') {
+      console.log(JSON.stringify(await enableAgencyMasterPasswordLogin(migrationPool,slug.parse(name))))
     } else if (tenant==='--master') {
       await designateMaster(migrationPool,slug.parse(name),email.parse(address))
       console.log('マスターアカウントを指定しました。')

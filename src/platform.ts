@@ -98,6 +98,11 @@ async function requireAgencyMasterAccess(db:DB,actor:Actor) {
   await db.query("SELECT set_config('night.agency_master',$1,true)",[actor.id])
 }
 
+async function agencyPasswordOnly(db:DB,tenant:string){
+  const {rows:[policy]}=await db.query<{agency_master_password_only:boolean}>('SELECT agency_master_password_only FROM tenant WHERE id=$1',[tenant])
+  return policy?.agency_master_password_only===true
+}
+
 async function readAgencyMaster(db:DB,actor:Actor) {
   await scope(db,actor.tenant_id,undefined,true)
   const {rows:[state]}=await db.query(`SELECT current.id AS current_id,current.email AS current_email,
@@ -115,7 +120,8 @@ async function readAgencyMaster(db:DB,actor:Actor) {
       AND target.tenant_id=m.tenant_id AND target.id=coalesce(m.pending_replace_id,m.staff_id)
     WHERE m.tenant_id=$1`,[actor.tenant_id])
   if(!state)throw missing()
-  return {...state,pair:await readPair(db,actor),master_limit:3,masters:[{id:state.current_id,email:state.current_email,active:state.current_active},
+  const passwordOnly=await agencyPasswordOnly(db,actor.tenant_id),pair=await readPair(db,actor)
+  return {...state,password_only:passwordOnly,pair:pair?{...pair,mfa_required:passwordOnly?false:pair.mfa_required}:null,master_limit:3,masters:[{id:state.current_id,email:state.current_email,active:state.current_active},
     ...(state.co_id?[{id:state.co_id,email:state.co_email,active:state.co_active}]:[]),
     ...(state.third_id?[{id:state.third_id,email:state.third_email,active:state.third_active}]:[])]}
 }
@@ -155,15 +161,17 @@ export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:st
     if(existing&&masterIds(state).includes(existing.id))throw new Fault(409,'MASTER_EXISTS','このアカウントは既にマスターです。')
     // An existing activated agency staff member keeps their own password/MFA. They
     // become a master only after the explicit final approval, then log in again.
+    const passwordOnly=await agencyPasswordOnly(db,actor.tenant_id)
     const invite=existing?.password_hash&&!existing.disabled_at&&!existing.platform_actor&&existing.agency_staff&&existing.role!=='admin'
       ? {id:existing.id,existing_active:true as const}
-      : await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[]},actor.id)
+      : await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[],mfaRequired:!passwordOnly},actor.id)
     // A null replace target is reserved for the legacy single-master workflow.
     // New explicit invitations carry the exact seat to be replaced.
     const changed=await db.query('UPDATE tenant_master SET pending_staff_id=$2,pending_mode=$3,pending_replace_id=$4 WHERE tenant_id=$1',
       [actor.tenant_id,invite.id,change.mode,change.replace_id??null])
     if(!changed.rowCount)throw forbidden()
     await audit(db,actor.tenant_id,null,actor.id,'agency.master_invite',invite.id,null,{mode:change.mode,replaces:replaceId})
+    if(passwordOnly&&'invite_code' in invite)return {id:invite.id,expires_at:invite.expires_at,url:cfg.origin+'/master/enrollment/#'+invite.invite_code}
     return invite
   })
 }
@@ -243,6 +251,7 @@ export async function inviteAgencyPair(db:DB,cfg:Config,actor:Actor,addresses:st
     await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor)
     if(state.pending_staff_id)throw new Fault(409,'MASTER_SINGLE_PENDING','1名分の引き継ぎが進行中です。先にその手続きを完了してください。')
     const pending=await readPair(db,actor)
+    if(await agencyPasswordOnly(db,actor.tenant_id))mfaRequired=pending?.mfa_required??false
     if(pending&&(pending.mfa_required!==mfaRequired||pending.candidates.length!==addresses.length||!pending.candidates.every((c,i)=>c?.email===addresses[i])||!pairBindingMatches(state,pending)))throw pairConflict()
     const parts=[]
     for(let i=0;i<addresses.length;i++){
@@ -257,7 +266,7 @@ export async function inviteAgencyPair(db:DB,cfg:Config,actor:Actor,addresses:st
     if(!pending)await db.query(`INSERT INTO agency_master_pair(tenant_id,id,former_primary,former_secondary,former_tertiary,first_staff_id,second_staff_id,third_staff_id,mfa_required)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[actor.tenant_id,id,state.staff_id,state.co_staff_id,state.third_staff_id,parts[0].id,parts[1].id,parts[2]?.id??null,mfaRequired])
     await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_invite',id,null,{candidate_ids:parts.map(p=>p.id)})
-    return {id,mfa_required:mfaRequired,candidates:parts}
+    return {id,mfa_required:await agencyPasswordOnly(db,actor.tenant_id)?false:mfaRequired,candidates:parts}
   })
 }
 // Extend a pending two-person handoff without rotating either existing invitation.
@@ -273,7 +282,7 @@ export async function extendAgencyPair(db:DB,cfg:Config,actor:Actor,id:string,ad
     const invite=await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[],mfaRequired:pair.mfa_required},actor.id)
     await db.query('UPDATE agency_master_pair SET third_staff_id=$3 WHERE tenant_id=$1 AND id=$2',[actor.tenant_id,id,invite.id])
     await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_extend',id,null,{candidate_id:invite.id})
-    return {id,mfa_required:pair.mfa_required,candidates:[{id:invite.id,email:address,active:false,expires_at:invite.expires_at,url:cfg.origin+'/master/enrollment/#'+invite.invite_code}]}
+    return {id,mfa_required:await agencyPasswordOnly(db,actor.tenant_id)?false:pair.mfa_required,candidates:[{id:invite.id,email:address,active:false,expires_at:invite.expires_at,url:cfg.origin+'/master/enrollment/#'+invite.invite_code}]}
   })
 }
 // Individually grant a registered handover candidate a vacant master seat. This

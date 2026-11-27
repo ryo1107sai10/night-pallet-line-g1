@@ -9,6 +9,7 @@ const recoveryCredential=z.string().refine(value=>{
   const [tenant,raw,extra]=value.split('.')
   return extra===undefined&&uuid.safeParse(tenant).success&&opaque.safeParse(raw).success
 })
+export const resetPolicyInput=z.strictObject({recovery:recoveryCredential})
 export const resetCompletion=z.strictObject({recovery:recoveryCredential,password,code:z.string().regex(/^\d{6}$/).optional()})
 const invalid=()=>new Fault(400,'RECOVERY_UNAVAILABLE','再設定リンクまたは最新の認証コードを確認してください。リンクの期限・試行回数を超えた場合は再発行が必要です。')
 
@@ -35,13 +36,31 @@ export async function prepareMasterPasswordReset(pool:pg.Pool,cfg:Config,input:z
   })
 }
 
+// Resolve the factor requirement from a valid, unconsumed reset link, without revealing account data.
+export async function readMasterPasswordResetPolicy(pool:pg.Pool,cfg:Config,recovery:string,ip:string){
+  await gate(pool,cfg,'master-recovery-policy-ip:'+ip,25)
+  await gate(pool,cfg,'master-recovery-policy-token:'+recovery,10)
+  const [tenant,raw]=recovery.split('.')
+  return tx(pool,async db=>{
+    await scope(db,tenant,undefined,true)
+    const {rows:[row]}=await db.query<{mfa_required:boolean}>(`SELECT (f.mfa_required AND NOT t.agency_master_password_only) AS mfa_required
+      FROM master_password_reset r JOIN tenant_master m ON m.tenant_id=r.tenant_id AND r.staff_id IN (m.staff_id,m.co_staff_id,m.third_staff_id)
+      JOIN staff f ON (f.tenant_id,f.id)=(r.tenant_id,r.staff_id) JOIN tenant t ON t.id=r.tenant_id
+      WHERE r.tenant_id=$1 AND r.token_hash=$2 AND r.expires_at>clock_timestamp() AND r.attempts<6
+        AND f.role='admin' AND NOT f.platform_actor AND NOT t.supervisor_only AND f.password_hash IS NOT NULL
+        AND f.disabled_at IS NULL AND (t.agency_operations_only OR EXISTS(SELECT 1 FROM platform_master p WHERE p.agency_id=t.id))`,[tenant,digest(raw)])
+    if(!row)throw invalid()
+    return row
+  })
+}
+
 export async function completeMasterPasswordReset(pool:pg.Pool,cfg:Config,data:z.infer<typeof resetCompletion>,ip:string){
   await gate(pool,cfg,'master-recovery-ip:'+ip,20)
   await gate(pool,cfg,'master-recovery-token:'+data.recovery,6)
   const [tenant,raw]=data.recovery.split('.'),hash=digest(raw)
   const result=await tx(pool,async db=>{
     await scope(db,tenant,undefined,true)
-    const {rows:[staff]}=await db.query<{id:string;totp_secret:string;last_totp_step:string;password_hash:string;mfa_required:boolean}>(`SELECT f.id,f.totp_secret,f.last_totp_step,f.password_hash,f.mfa_required
+    const {rows:[staff]}=await db.query<{id:string;totp_secret:string;last_totp_step:string;password_hash:string;mfa_required:boolean}>(`SELECT f.id,f.totp_secret,f.last_totp_step,f.password_hash,(f.mfa_required AND NOT t.agency_master_password_only) AS mfa_required
       FROM master_password_reset r JOIN tenant_master m ON m.tenant_id=r.tenant_id AND r.staff_id IN (m.staff_id,m.co_staff_id,m.third_staff_id)
       JOIN staff f ON (f.tenant_id,f.id)=(r.tenant_id,r.staff_id) JOIN tenant t ON t.id=r.tenant_id
       WHERE r.tenant_id=$1 AND r.token_hash=$2 AND r.expires_at>clock_timestamp() AND r.attempts<6

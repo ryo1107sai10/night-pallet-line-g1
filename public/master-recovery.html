@@ -14,10 +14,10 @@
       <h1>管理会社マスターのパスワード再設定</h1>
       <p id="recovery-notice" role="status" aria-live="polite"></p>
       <form id="recovery-form" hidden>
-        <p>登録メールに届いた本人専用リンクからパスワードを再設定します。認証アプリを利用するアカウントのみ、現在の6桁コードも必要です。</p>
+        <p>登録メールに届いた本人専用リンクからパスワードを再設定します。アカウントの認証方式によっては、認証アプリの現在の6桁コードも必要です。</p>
         <label>新しいパスワード（12文字以上）<input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
         <label>新しいパスワード（確認）<input name="confirmation" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></label>
-        <label>認証アプリの6桁コード（設定済みの方のみ）<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label>
+        <label id="recovery-factor" hidden>認証アプリの6桁コード<input name="code" disabled inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label>
         <p class="muted">再設定完了後、旧パスワードと以前のログインは無効になります。</p>
         <button type="submit">パスワードを再設定</button>
       </form>

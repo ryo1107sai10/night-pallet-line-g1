@@ -13,11 +13,12 @@ export async function readAgencyEnrollment(pool:pg.Pool,cfg:Config,raw:string,ip
     const hash=digest(raw),{rows:[directory]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM invite_route WHERE token_hash=$1',[hash])
     if(!directory)throw invalid()
     await scope(db,directory.tenant_id)
-    const {rows:[staff]}=await db.query<{id:string;email:string;totp_secret:string;slug:string;expires_at:Date;mfa_required:boolean}>(`SELECT f.id,f.email,f.totp_secret,t.slug,i.expires_at,f.mfa_required FROM invite i
+    const {rows:[staff]}=await db.query<{id:string;email:string;totp_secret:string;slug:string;expires_at:Date;mfa_required:boolean}>(`SELECT f.id,f.email,f.totp_secret,t.slug,i.expires_at,(f.mfa_required AND NOT t.agency_master_password_only) AS mfa_required FROM invite i
       JOIN staff f ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id) JOIN tenant t ON t.id=f.tenant_id
-      JOIN agency_master_pair p ON p.tenant_id=f.tenant_id AND f.id IN (p.first_staff_id,p.second_staff_id,p.third_staff_id)
+      LEFT JOIN agency_master_pair p ON p.tenant_id=f.tenant_id AND f.id IN (p.first_staff_id,p.second_staff_id,p.third_staff_id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND f.password_hash IS NULL AND f.disabled_at IS NULL
-      AND f.mfa_required=p.mfa_required AND f.role='admin' AND f.agency_staff AND NOT f.platform_actor AND NOT t.supervisor_only`,[hash])
+      AND f.role='admin' AND NOT f.platform_actor AND NOT t.supervisor_only
+      AND ((p.id IS NOT NULL AND f.agency_staff AND f.mfa_required=p.mfa_required) OR (t.agency_master_password_only AND EXISTS(SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.third_staff_id,m.pending_staff_id))))`,[hash])
     if(!staff)throw invalid()
     if(!staff.mfa_required)return {login_id:staff.slug,email:staff.email,expires_at:staff.expires_at,mfa_required:false}
     const setup=unseal(cfg,'totp:'+staff.id,staff.totp_secret)
