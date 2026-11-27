@@ -66,17 +66,24 @@ export function masterTeam(info, actions) {
   }
   const pairPanel=el('section',null,'record stack')
   if(actions.pairInvite){
-    pairPanel.append(el('h3',info.pair?.candidates.length===3?'3名へ個別招待リンクを発行':'2名へ個別招待リンクを発行'),el('p','新しい担当者へそれぞれ専用リンクを渡します。全員が本人登録した後に、前任者の権限を終了して交代します。','muted'))
+    pairPanel.append(el('h3',info.pair?.candidates.length===3?'3名へ個別招待リンクを発行':'2名へ個別招待リンクを発行'),el('p','新しい担当者へそれぞれ専用リンクを渡します。登録済みの担当者は空き枠があれば個別に有効化できます。全員が本人登録した後に、前任者の権限を終了して交代します。','muted'))
     if(info.pair){
       pairPanel.append(el('p',info.pair.mfa_required?'認証方式：パスワードと6桁コード':'認証方式：メール・パスワードのみ（6桁コード不要）','muted'))
       for(const [i,candidate] of info.pair.candidates.entries()){
-        const row=el('div',null,'record stack');row.append(el('strong',`担当者 ${i+1} · ${candidate.email}`),el('p',candidate.active?'本人の登録完了':candidate.expires_at?'招待期限：'+new Date(candidate.expires_at).toLocaleString('ja-JP'):'本人の登録待ち','muted'))
+        const row=el('div',null,'record stack');row.append(el('strong',`担当者 ${i+1} · ${candidate.email}`),el('p',candidate.approved?'有効・ログイン可能':candidate.active?'本人の登録完了・管理者の有効化待ち':candidate.expires_at?'招待期限：'+new Date(candidate.expires_at).toLocaleString('ja-JP'):'本人の登録待ち','muted'))
         const issued=actions.pairResult?.id===info.pair.id&&actions.pairResult.candidates.find(c=>c.id===candidate.id)
         if(issued?.url&&!candidate.active){const value=el('input');value.readOnly=true;value.value=issued.url;value.setAttribute('aria-label',`担当者 ${i+1} の専用招待リンク`);row.append(value,button('この担当者の専用リンクをコピー',event=>run(event.currentTarget,async()=>{await navigator.clipboard.writeText(issued.url);status.textContent='本人専用の招待リンクをコピーしました。'}),'secondary'))}
+        if(candidate.active&&!candidate.approved&&actions.pairApproveCandidate){
+          const activate=button('この担当者だけ先に有効化',event=>{
+            if(!confirm(`${candidate.email} を今すぐエールの全店舗管理マスターに追加します。前任者と残りの招待は維持します。進めますか？`))return
+            run(event.currentTarget,()=>actions.pairApproveCandidate({id:info.pair.id,target:candidate.id}))
+          },'primary');activate.disabled=masters.length>=limit;row.append(activate)
+          if(activate.disabled)row.append(el('p','現在は空き枠がありません。全員登録後、引き継ぎを確定してください。','muted'))
+        }
         pairPanel.append(row)
       }
       if(info.pair.candidates.length===2&&actions.pairExtend){
-        const extension=el('form',null,'stack'),email=document.createElement('input');email.type='email';email.required=true;email.autocomplete='off';email.placeholder='本人のメールアドレス';const label=el('label','3人目のメールアドレス','field');label.append(email);const issue=el('button','3人目の専用リンクを発行','primary');issue.type='submit';extension.append(label,el('p','既存2名の招待リンクと登録状態は変わりません。3名全員の登録後に引き継ぎを確定できます。','muted'),issue);extension.onsubmit=event=>{event.preventDefault();run(issue,()=>actions.pairExtend({id:info.pair.id,address:email.value.trim()}))};pairPanel.append(extension)
+        const extension=el('form',null,'stack'),email=document.createElement('input');email.type='email';email.required=true;email.autocomplete='off';email.placeholder='本人のメールアドレス';const label=el('label','3人目のメールアドレス','field');label.append(email);const issue=el('button','3人目の専用リンクを発行','primary');issue.type='submit';extension.append(label,el('p','既存2名の招待リンクと登録状態は変わりません。登録済みの担当者は先に有効化でき、全員登録後に引き継ぎを確定できます。','muted'),issue);extension.onsubmit=event=>{event.preventDefault();run(issue,()=>actions.pairExtend({id:info.pair.id,address:email.value.trim()}))};pairPanel.append(extension)
       }
       const n=info.pair.candidates.length
       const renew=button('未登録者の招待リンクを再発行',event=>{if(!confirm('未登録者の以前の招待リンクを無効化し、新しいリンクを発行します。進めますか？'))return;run(event.currentTarget,()=>actions.pairInvite({addresses:info.pair.candidates.map(c=>c.email),mfa_required:info.pair.mfa_required}))},'secondary');renew.disabled=info.pair.candidates.every(c=>c.active)

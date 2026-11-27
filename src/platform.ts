@@ -83,7 +83,7 @@ export function requireSupervisor(actor:Actor) {
   if(!actor.platform)throw forbidden()
 }
 
-// Both designated masters have the same operational and membership management rights.
+// All designated masters have the same operational and membership management rights.
 // The supervisor may administer only a supervised tenant via its scoped workspace.
 async function requireAgencyMasterAccess(db:DB,actor:Actor) {
   if(actor.platform)return
@@ -224,9 +224,16 @@ async function readPair(db:DB,actor:Actor){
   const {rows:[pair]}=await db.query<PairState>('SELECT id,former_primary,former_secondary,former_tertiary,first_staff_id,second_staff_id,third_staff_id,mfa_required FROM agency_master_pair WHERE tenant_id=$1',[actor.tenant_id])
   if(!pair)return null
   const candidates=[pair.first_staff_id,pair.second_staff_id,...(pair.third_staff_id?[pair.third_staff_id]:[])]
-  const {rows}=await db.query<{id:string;email:string;active:boolean;expires_at:Date|null}>(`SELECT f.id,f.email,f.password_hash IS NOT NULL AND f.disabled_at IS NULL AS active,i.expires_at
+  const {rows}=await db.query<{id:string;email:string;active:boolean;approved:boolean;expires_at:Date|null}>(`SELECT f.id,f.email,f.password_hash IS NOT NULL AND f.disabled_at IS NULL AS active,
+      EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.third_staff_id)) AS approved,i.expires_at
     FROM staff f LEFT JOIN invite i ON (f.tenant_id,f.id)=(i.tenant_id,i.staff_id) WHERE f.tenant_id=$1 AND f.id=ANY($2::uuid[])`,[actor.tenant_id,candidates])
   return {id:pair.id,mfa_required:pair.mfa_required,candidates:candidates.map(id=>rows.find(r=>r.id===id)!),former:[pair.former_primary,...(pair.former_secondary?[pair.former_secondary]:[]),...(pair.former_tertiary?[pair.former_tertiary]:[])]}
+}
+// A staged handover may retain the former masters and add already-approved candidates.
+// Reject changes to any unrelated seat and preserve all other invitations.
+function pairBindingMatches(state:MasterBinding,pair:NonNullable<Awaited<ReturnType<typeof readPair>>>){
+  const current=masterIds(state)
+  return pair.former.every(id=>current.includes(id))&&current.every(id=>pair.former.includes(id)||pair.candidates.some(c=>c.id===id&&c.active&&c.approved))
 }
 const pairExpired=()=>new Fault(409,'MASTER_PAIR_NOT_READY','全員が本人による登録を終えてから引き継ぎを確定してください。')
 export async function inviteAgencyPair(db:DB,cfg:Config,actor:Actor,addresses:string[],key:string,mfaRequired=true){
@@ -236,7 +243,7 @@ export async function inviteAgencyPair(db:DB,cfg:Config,actor:Actor,addresses:st
     await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor)
     if(state.pending_staff_id)throw new Fault(409,'MASTER_SINGLE_PENDING','1名分の引き継ぎが進行中です。先にその手続きを完了してください。')
     const pending=await readPair(db,actor)
-    if(pending&&(pending.mfa_required!==mfaRequired||pending.candidates.length!==addresses.length||!pending.candidates.every((c,i)=>c?.email===addresses[i])||pending.former.join()!==masterIds(state).join()))throw pairConflict()
+    if(pending&&(pending.mfa_required!==mfaRequired||pending.candidates.length!==addresses.length||!pending.candidates.every((c,i)=>c?.email===addresses[i])||!pairBindingMatches(state,pending)))throw pairConflict()
     const parts=[]
     for(let i=0;i<addresses.length;i++){
       const address=addresses[i],current=pending?.candidates[i]
@@ -258,7 +265,7 @@ export async function extendAgencyPair(db:DB,cfg:Config,actor:Actor,id:string,ad
   await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
   return once(db,cfg,actor,'agency.master_pair_extend',key,{id,address},async()=>{
     await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor),pair=await readPair(db,actor)
-    if(!pair||pair.id!==id||state.pending_staff_id||pair.former.join()!==masterIds(state).join())throw conflict()
+    if(!pair||pair.id!==id||state.pending_staff_id||!pairBindingMatches(state,pair))throw conflict()
     if(pair.candidates.length>=3)throw fullMasters()
     if(pair.candidates.some(c=>c.email===address))throw new Fault(409,'MASTER_EXISTS','このメールアドレスは招待済みです。')
     const {rows:[existing]}=await db.query<{id:string}>('SELECT id FROM staff WHERE tenant_id=$1 AND email=$2',[actor.tenant_id,address])
@@ -269,16 +276,34 @@ export async function extendAgencyPair(db:DB,cfg:Config,actor:Actor,id:string,ad
     return {id,mfa_required:pair.mfa_required,candidates:[{id:invite.id,email:address,active:false,expires_at:invite.expires_at,url:cfg.origin+'/master/enrollment/#'+invite.invite_code}]}
   })
 }
+// Individually grant a registered handover candidate a vacant master seat. This
+// is an explicit, audited permission change, not automatic enrollment access.
+export async function approveAgencyPairCandidate(db:DB,actor:Actor,id:string,target:string){
+  await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
+  await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor),pair=await readPair(db,actor)
+  if(!pair||pair.id!==id||state.pending_staff_id||!pairBindingMatches(state,pair))throw conflict()
+  if(!pair.candidates.some(c=>c.id===target))throw missing()
+  const {rows:[candidate]}=await db.query(`SELECT id FROM staff WHERE tenant_id=$1 AND id=$2 AND role='admin' AND agency_staff AND NOT platform_actor
+    AND password_hash IS NOT NULL AND disabled_at IS NULL AND mfa_required=$3 FOR UPDATE`,[actor.tenant_id,target,pair.mfa_required])
+  if(!candidate)throw new Fault(409,'MASTER_NOT_ACTIVE','本人のパスワード登録が完了してから有効化してください。')
+  const ids=masterIds(state)
+  if(ids.includes(target))return readAgencyMaster(db,actor)
+  if(ids.length>=3)throw new Fault(409,'MASTER_LIMIT','空き枠がありません。全員の登録後に引き継ぎを確定してください。')
+  const next=[...ids,target]
+  if(!(await db.query('UPDATE tenant_master SET staff_id=$2,co_staff_id=$3,third_staff_id=$4 WHERE tenant_id=$1',[actor.tenant_id,next[0],next[1]??null,next[2]??null])).rowCount)throw forbidden()
+  await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_candidate_approve',target,null,{handoff_id:id})
+  return readAgencyMaster(db,actor)
+}
 export async function confirmAgencyPair(db:DB,actor:Actor,id:string){
   await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
   await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor),pair=await readPair(db,actor)
-  if(!pair||pair.id!==id||state.pending_staff_id||pair.former.join()!==masterIds(state).join())throw conflict()
+  if(!pair||pair.id!==id||state.pending_staff_id||!pairBindingMatches(state,pair))throw conflict()
   const ids=pair.candidates.map(c=>c.id)
   const {rows}=await db.query(`SELECT id FROM staff WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND role='admin' AND agency_staff AND NOT platform_actor
     AND password_hash IS NOT NULL AND disabled_at IS NULL AND mfa_required=$3 FOR UPDATE`,[actor.tenant_id,ids,pair.mfa_required])
   if(rows.length!==ids.length)throw pairExpired()
   if(!(await db.query('UPDATE tenant_master SET staff_id=$2,co_staff_id=$3,third_staff_id=$4 WHERE tenant_id=$1',[actor.tenant_id,ids[0],ids[1],ids[2]??null])).rowCount)throw forbidden()
-  await db.query(`DELETE FROM staff_session WHERE tenant_id=$1 AND staff_id=ANY($2::uuid[]) AND session_kind='staff'`,[actor.tenant_id,[...pair.former,...ids]])
+  await db.query(`DELETE FROM staff_session WHERE tenant_id=$1 AND staff_id=ANY($2::uuid[]) AND session_kind='staff'`,[actor.tenant_id,pair.former])
   await db.query('DELETE FROM master_password_reset WHERE tenant_id=$1 AND staff_id=ANY($2::uuid[])',[actor.tenant_id,pair.former])
   await db.query('DELETE FROM agency_master_pair WHERE tenant_id=$1 AND id=$2',[actor.tenant_id,id])
   await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_confirm',id,null,{candidate_ids:ids,previous_staff_ids:pair.former})
@@ -288,8 +313,8 @@ export async function cancelAgencyPair(db:DB,actor:Actor,id:string){
   await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
   await lockDispatch(db,actor.tenant_id);await lockedMasterBinding(db,actor);const pair=await readPair(db,actor)
   if(!pair||pair.id!==id)throw conflict()
-  // Activated candidates have no master authority. A cancellation preserves their
-  // identity for a possible future handoff instead of sharing or resetting credentials.
+  // Cancellation only revokes unused invitations. Individually approved masters
+  // retain their seats and sessions; registered but unapproved candidates stay unauthorized.
   await db.query('DELETE FROM invite WHERE tenant_id=$1 AND staff_id=ANY($2::uuid[])',[actor.tenant_id,pair.candidates.map(c=>c.id)])
   await db.query('DELETE FROM agency_master_pair WHERE tenant_id=$1 AND id=$2',[actor.tenant_id,id])
   await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_cancel',id)

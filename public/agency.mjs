@@ -220,6 +220,7 @@ function renderMaster(){
     inviteResult:lastMasterInvite,refresh:loadMaster,pairResult:lastPairInvite,
     pairInvite:async data=>{lastPairInvite=await masterCall('/agency-master/pair/invite','POST',data);await loadMaster();masterStatus.textContent='専用リンクをそれぞれ本人だけに渡してください。'},
     pairExtend:async data=>{const result=await masterCall('/agency-master/pair/extend','POST',data);lastPairInvite={...result,candidates:[...(lastPairInvite?.id===result.id?lastPairInvite.candidates:[]),...result.candidates]};await loadMaster();masterStatus.textContent='3人目の専用リンクを本人だけに渡してください。'},
+    pairApproveCandidate:async data=>{await masterCall('/agency-master/pair/approve-candidate','POST',data);await loadMaster();masterStatus.textContent='担当者を有効化しました。現在のパスワードでログインできます。'},
     pairConfirm:async id=>{await masterCall('/agency-master/pair/confirm','POST',{id});lastPairInvite=null;location.reload()},
     pairCancel:async id=>{await masterCall('/agency-master/pair/cancel','POST',{id});lastPairInvite=null;await loadMaster();masterStatus.textContent='2名の招待を取り消しました。'},
     invite:async data=>{

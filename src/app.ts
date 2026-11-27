@@ -5,7 +5,7 @@ import {createPiyomaruMediaSource} from './piyomaru-library.js'
 import {createMaterialStorage,createMaterialDraft,materialAsset,materialHistory,materialDraftInput,materialPublishInput,publishMaterial,uploadMaterialChunk} from './piyomaru-materials.js'
 import {acceptanceInput,masterHealth,platformHealth,probeStore,recordStoreAcceptance} from './store-health.js'
 import {intakeList,intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
-import { agencyMasterDetails, inviteAgencyPair, extendAgencyPair, confirmAgencyPair, cancelAgencyPair, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
+import { agencyMasterDetails, inviteAgencyPair, extendAgencyPair, approveAgencyPairCandidate, confirmAgencyPair, cancelAgencyPair, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
 import {completeMasterPasswordReset,masterPasswordResetPath,resetCompletion} from './master-password-reset.js'
@@ -894,6 +894,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   api.get('/agency-master',staff((db,actor)=>agencyMasterDetails(db,actor)))
   api.post('/agency-master/pair/invite',staff((db,actor,req)=>{const {addresses,mfa_required}=z.strictObject({addresses:z.array(email).min(2).max(3),mfa_required:z.boolean().default(true)}).parse(req.body);return inviteAgencyPair(db,cfg,actor,addresses,keyOf(req),mfa_required)},201))
   api.post('/agency-master/pair/extend',staff((db,actor,req)=>{const {id,address}=z.strictObject({id:uuid,address:email}).parse(req.body);return extendAgencyPair(db,cfg,actor,id,address,keyOf(req))},201))
+  api.post('/agency-master/pair/approve-candidate',staff((db,actor,req)=>{const {id,target}=z.strictObject({id:uuid,target:uuid}).parse(req.body);return approveAgencyPairCandidate(db,actor,id,target)}))
   api.post('/agency-master/pair/confirm',staff((db,actor,req)=>confirmAgencyPair(db,actor,z.strictObject({id:uuid}).parse(req.body).id)))
   api.post('/agency-master/pair/cancel',staff((db,actor,req)=>cancelAgencyPair(db,actor,z.strictObject({id:uuid}).parse(req.body).id)))
   api.post('/agency-master/invite',staff((db,actor,req)=>{
