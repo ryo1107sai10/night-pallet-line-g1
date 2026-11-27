@@ -15,7 +15,7 @@ export async function readAgencyEnrollment(pool:pg.Pool,cfg:Config,raw:string,ip
     await scope(db,directory.tenant_id)
     const {rows:[staff]}=await db.query<{id:string;email:string;totp_secret:string;slug:string;expires_at:Date;mfa_required:boolean}>(`SELECT f.id,f.email,f.totp_secret,t.slug,i.expires_at,f.mfa_required FROM invite i
       JOIN staff f ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id) JOIN tenant t ON t.id=f.tenant_id
-      JOIN agency_master_pair p ON p.tenant_id=f.tenant_id AND f.id IN (p.first_staff_id,p.second_staff_id)
+      JOIN agency_master_pair p ON p.tenant_id=f.tenant_id AND f.id IN (p.first_staff_id,p.second_staff_id,p.third_staff_id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND f.password_hash IS NULL AND f.disabled_at IS NULL
       AND f.mfa_required=p.mfa_required AND f.role='admin' AND f.agency_staff AND NOT f.platform_actor AND NOT t.supervisor_only`,[hash])
     if(!staff)throw invalid()

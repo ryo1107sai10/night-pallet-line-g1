@@ -89,7 +89,7 @@ async function requireAgencyMasterAccess(db:DB,actor:Actor) {
   if(actor.platform)return
   if(!actor.agency)throw forbidden()
   const {rows:[binding]}=await db.query(`SELECT 1 FROM tenant_master m
-    JOIN staff f ON m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id)
+    JOIN staff f ON m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.third_staff_id)
     WHERE m.tenant_id=$1 AND f.id=$2
       AND f.role='admin' AND NOT f.platform_actor AND f.disabled_at IS NULL`,
     [actor.tenant_id,actor.id])
@@ -102,19 +102,22 @@ async function readAgencyMaster(db:DB,actor:Actor) {
   await scope(db,actor.tenant_id,undefined,true)
   const {rows:[state]}=await db.query(`SELECT current.id AS current_id,current.email AS current_email,
     current.password_hash IS NOT NULL AND current.disabled_at IS NULL AS current_active,
-    co.id AS co_id,co.email AS co_email,co.password_hash IS NOT NULL AND co.disabled_at IS NULL AS co_active,next.id AS pending_id,
+    co.id AS co_id,co.email AS co_email,co.password_hash IS NOT NULL AND co.disabled_at IS NULL AS co_active,
+    third.id AS third_id,third.email AS third_email,third.password_hash IS NOT NULL AND third.disabled_at IS NULL AS third_active,next.id AS pending_id,
     next.email AS pending_email,next.password_hash IS NOT NULL AS pending_active,i.expires_at,
     m.pending_mode,target.id AS pending_replace_id,target.email AS pending_replace_email
     FROM tenant_master m JOIN staff current ON (m.tenant_id,m.staff_id)=(current.tenant_id,current.id)
     LEFT JOIN staff co ON (m.tenant_id,m.co_staff_id)=(co.tenant_id,co.id)
+    LEFT JOIN staff third ON (m.tenant_id,m.third_staff_id)=(third.tenant_id,third.id)
     LEFT JOIN staff next ON (m.tenant_id,m.pending_staff_id)=(next.tenant_id,next.id) AND next.disabled_at IS NULL
     LEFT JOIN invite i ON (i.tenant_id,i.staff_id)=(next.tenant_id,next.id)
     LEFT JOIN staff target ON m.pending_staff_id IS NOT NULL AND m.pending_mode='replace'
       AND target.tenant_id=m.tenant_id AND target.id=coalesce(m.pending_replace_id,m.staff_id)
     WHERE m.tenant_id=$1`,[actor.tenant_id])
   if(!state)throw missing()
-  return {...state,pair:await readPair(db,actor),master_limit:2,masters:[{id:state.current_id,email:state.current_email,active:state.current_active},
-    ...(state.co_id?[{id:state.co_id,email:state.co_email,active:state.co_active}]:[])]}
+  return {...state,pair:await readPair(db,actor),master_limit:3,masters:[{id:state.current_id,email:state.current_email,active:state.current_active},
+    ...(state.co_id?[{id:state.co_id,email:state.co_email,active:state.co_active}]:[]),
+    ...(state.third_id?[{id:state.third_id,email:state.third_email,active:state.third_active}]:[])]}
 }
 
 export async function agencyMasterDetails(db:DB,actor:Actor) {
@@ -123,18 +126,19 @@ export async function agencyMasterDetails(db:DB,actor:Actor) {
 }
 
 type MasterChange = {mode:'add'|'replace';replace_id?:string}
-type MasterBinding = {staff_id:string;co_staff_id:string|null;pending_staff_id:string|null;
+type MasterBinding = {staff_id:string;co_staff_id:string|null;third_staff_id:string|null;pending_staff_id:string|null;
   pending_mode:'add'|'replace';pending_replace_id:string|null}
+const masterIds=(state:MasterBinding)=>[state.staff_id,state.co_staff_id,state.third_staff_id].filter((id):id is string=>id!==null)
 async function lockedMasterBinding(db:DB,actor:Actor) {
-  const {rows:[state]}=await db.query<MasterBinding>(`SELECT staff_id,co_staff_id,pending_staff_id,pending_mode,pending_replace_id
+  const {rows:[state]}=await db.query<MasterBinding>(`SELECT staff_id,co_staff_id,third_staff_id,pending_staff_id,pending_mode,pending_replace_id
     FROM tenant_master WHERE tenant_id=$1 FOR UPDATE`,[actor.tenant_id])
   if(!state)throw missing()
-  if(!actor.platform&&![state.staff_id,state.co_staff_id].includes(actor.id))throw forbidden()
+  if(!actor.platform&&!masterIds(state).includes(actor.id))throw forbidden()
   return state
 }
-const pairConflict=()=>new Fault(409,'MASTER_PAIR_PENDING','2名への引き継ぎ招待が進行中です。先に完了または取り消してください。')
+const pairConflict=()=>new Fault(409,'MASTER_PAIR_PENDING','複数名への引き継ぎ招待が進行中です。先に完了または取り消してください。')
 async function noPair(db:DB,actor:Actor){if((await db.query('SELECT 1 FROM agency_master_pair WHERE tenant_id=$1',[actor.tenant_id])).rowCount)throw pairConflict()}
-const fullMasters=()=>new Fault(409,'MASTER_LIMIT','マスターは2名までです。交代するマスターを選ぶか、兼任を解除してください。')
+const fullMasters=()=>new Fault(409,'MASTER_LIMIT','マスターは3名までです。交代するマスターを選ぶか、兼任を解除してください。')
 
 export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:string,key:string,change:MasterChange={mode:'replace'}) {
   await requireAgencyMasterAccess(db,actor)
@@ -143,12 +147,12 @@ export async function inviteAgencyMaster(db:DB,cfg:Config,actor:Actor,address:st
     await lockDispatch(db,actor.tenant_id)
     const state=await lockedMasterBinding(db,actor)
     await noPair(db,actor)
-    if(change.mode==='add'&&state.co_staff_id)throw fullMasters()
+    if(change.mode==='add'&&state.third_staff_id)throw fullMasters()
     const replaceId=change.mode==='replace'?(change.replace_id??state.staff_id):null
-    if(change.mode==='add'&&change.replace_id||replaceId&&![state.staff_id,state.co_staff_id].includes(replaceId))throw conflict()
+    if(change.mode==='add'&&change.replace_id||replaceId&&!masterIds(state).includes(replaceId))throw conflict()
     const {rows:[existing]}=await db.query<{id:string;password_hash:string|null;disabled_at:Date|null;platform_actor:boolean;agency_staff:boolean;role:string}>(
       `SELECT id,password_hash,disabled_at,platform_actor,agency_staff,role FROM staff WHERE tenant_id=$1 AND email=$2 FOR UPDATE`,[actor.tenant_id,address])
-    if(existing&&[state.staff_id,state.co_staff_id].includes(existing.id))throw new Fault(409,'MASTER_EXISTS','このアカウントは既にマスターです。')
+    if(existing&&masterIds(state).includes(existing.id))throw new Fault(409,'MASTER_EXISTS','このアカウントは既にマスターです。')
     // An existing activated agency staff member keeps their own password/MFA. They
     // become a master only after the explicit final approval, then log in again.
     const invite=existing?.password_hash&&!existing.disabled_at&&!existing.platform_actor&&existing.agency_staff&&existing.role!=='admin'
@@ -178,15 +182,14 @@ export async function promoteAgencyMaster(db:DB,actor:Actor,pending:string,expec
   if(expected){
     if(expected.mode!==state.pending_mode||(expected.replace_id??null)!==replaces)throw conflict()
   }else if(state.pending_mode!=='replace'||state.pending_replace_id!==null)throw conflict()
-  if(state.pending_mode==='add'&&state.co_staff_id)throw fullMasters()
+  if(state.pending_mode==='add'&&state.third_staff_id)throw fullMasters()
   const {rows:[candidate]}=await db.query<{role:string}>(`SELECT role FROM staff WHERE id=$1 AND tenant_id=$2
     AND (role='admin' OR agency_staff) AND NOT platform_actor AND password_hash IS NOT NULL AND disabled_at IS NULL FOR UPDATE`,[pending,actor.tenant_id])
   if(!candidate)throw new Fault(409,'MASTER_NOT_ACTIVE','新しいマスター本人が招待を有効化してから確定してください。')
-  if(replaces&&![state.staff_id,state.co_staff_id].includes(replaces))throw conflict()
-  const primary=replaces===state.staff_id?pending:state.staff_id
-  const secondary=state.pending_mode==='add'||replaces===state.co_staff_id?pending:state.co_staff_id
-  const changed=await db.query(`UPDATE tenant_master SET staff_id=$2,co_staff_id=$3,
-    pending_staff_id=NULL,pending_mode='replace',pending_replace_id=NULL WHERE tenant_id=$1`,[actor.tenant_id,primary,secondary])
+  if(replaces&&!masterIds(state).includes(replaces))throw conflict()
+  const ids=state.pending_mode==='add'?[...masterIds(state),pending]:masterIds(state).map(id=>id===replaces?pending:id)
+  const changed=await db.query(`UPDATE tenant_master SET staff_id=$2,co_staff_id=$3,third_staff_id=$4,
+    pending_staff_id=NULL,pending_mode='replace',pending_replace_id=NULL WHERE tenant_id=$1`,[actor.tenant_id,ids[0],ids[1]??null,ids[2]??null])
   if(!changed.rowCount)throw forbidden()
   if(candidate.role!=='admin')await db.query("UPDATE staff SET role='admin' WHERE id=$1 AND tenant_id=$2",[pending,actor.tenant_id])
   // Re-authenticate the new master with their own MFA, revoke only the replaced
@@ -203,61 +206,78 @@ export async function removeAgencyMaster(db:DB,actor:Actor,target:string) {
   await lockDispatch(db,actor.tenant_id)
   const state=await lockedMasterBinding(db,actor)
   await noPair(db,actor)
-  if(![state.staff_id,state.co_staff_id].includes(target))throw missing()
+  if(!masterIds(state).includes(target))throw missing()
   if(!state.co_staff_id)throw new Fault(409,'MASTER_REQUIRED','最後のマスターは解除できません。先に後任を追加してください。')
-  const remaining=target===state.staff_id?state.co_staff_id:state.staff_id
-  const changed=await db.query(`UPDATE tenant_master SET staff_id=$2,co_staff_id=NULL,pending_staff_id=NULL,
-    pending_mode='replace',pending_replace_id=NULL WHERE tenant_id=$1`,[actor.tenant_id,remaining])
+  const remaining=masterIds(state).filter(id=>id!==target)
+  const changed=await db.query(`UPDATE tenant_master SET staff_id=$2,co_staff_id=$3,third_staff_id=$4,pending_staff_id=NULL,
+    pending_mode='replace',pending_replace_id=NULL WHERE tenant_id=$1`,[actor.tenant_id,remaining[0],remaining[1]??null,remaining[2]??null])
   if(!changed.rowCount)throw forbidden()
   await db.query("DELETE FROM staff_session WHERE staff_id=$1 AND tenant_id=$2 AND session_kind='staff'",[target,actor.tenant_id])
   await db.query('DELETE FROM master_password_reset WHERE staff_id=$1 AND tenant_id=$2',[target,actor.tenant_id])
-  await audit(db,actor.tenant_id,null,actor.id,'agency.master_remove',target,null,{remaining_staff_id:remaining})
+  await audit(db,actor.tenant_id,null,actor.id,'agency.master_remove',target,null,{remaining_staff_id:remaining[0]})
   return readAgencyMaster(db,actor)
 }
 
 
-type PairState={id:string;mfa_required:boolean;former_primary:string;former_secondary:string|null;first_staff_id:string;second_staff_id:string}
+type PairState={id:string;mfa_required:boolean;former_primary:string;former_secondary:string|null;former_tertiary:string|null;first_staff_id:string;second_staff_id:string;third_staff_id:string|null}
 async function readPair(db:DB,actor:Actor){
-  const {rows:[pair]}=await db.query<PairState>('SELECT id,former_primary,former_secondary,first_staff_id,second_staff_id,mfa_required FROM agency_master_pair WHERE tenant_id=$1',[actor.tenant_id])
+  const {rows:[pair]}=await db.query<PairState>('SELECT id,former_primary,former_secondary,former_tertiary,first_staff_id,second_staff_id,third_staff_id,mfa_required FROM agency_master_pair WHERE tenant_id=$1',[actor.tenant_id])
   if(!pair)return null
+  const candidates=[pair.first_staff_id,pair.second_staff_id,...(pair.third_staff_id?[pair.third_staff_id]:[])]
   const {rows}=await db.query<{id:string;email:string;active:boolean;expires_at:Date|null}>(`SELECT f.id,f.email,f.password_hash IS NOT NULL AND f.disabled_at IS NULL AS active,i.expires_at
-    FROM staff f LEFT JOIN invite i ON (f.tenant_id,f.id)=(i.tenant_id,i.staff_id) WHERE f.tenant_id=$1 AND f.id=ANY($2::uuid[])`,[actor.tenant_id,[pair.first_staff_id,pair.second_staff_id]])
-  return {id:pair.id,mfa_required:pair.mfa_required,candidates:[pair.first_staff_id,pair.second_staff_id].map(id=>rows.find(r=>r.id===id)!),former:[pair.former_primary,...(pair.former_secondary?[pair.former_secondary]:[])]}
+    FROM staff f LEFT JOIN invite i ON (f.tenant_id,f.id)=(i.tenant_id,i.staff_id) WHERE f.tenant_id=$1 AND f.id=ANY($2::uuid[])`,[actor.tenant_id,candidates])
+  return {id:pair.id,mfa_required:pair.mfa_required,candidates:candidates.map(id=>rows.find(r=>r.id===id)!),former:[pair.former_primary,...(pair.former_secondary?[pair.former_secondary]:[]),...(pair.former_tertiary?[pair.former_tertiary]:[])]}
 }
-const pairExpired=()=>new Fault(409,'MASTER_PAIR_NOT_READY','2名とも本人による登録を終えてから引き継ぎを確定してください。')
+const pairExpired=()=>new Fault(409,'MASTER_PAIR_NOT_READY','全員が本人による登録を終えてから引き継ぎを確定してください。')
 export async function inviteAgencyPair(db:DB,cfg:Config,actor:Actor,addresses:string[],key:string,mfaRequired=true){
   await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
-  if(addresses.length!==2||addresses[0]===addresses[1])throw new Fault(400,'MASTER_PAIR_EMAIL','2名それぞれ異なるメールアドレスを入力してください。')
+  if(addresses.length<2||addresses.length>3||new Set(addresses).size!==addresses.length)throw new Fault(400,'MASTER_PAIR_EMAIL','担当者それぞれ異なるメールアドレスを入力してください。')
   return once(db,cfg,actor,'agency.master_pair_invite',key,{addresses,mfa_required:mfaRequired},async()=>{
     await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor)
     if(state.pending_staff_id)throw new Fault(409,'MASTER_SINGLE_PENDING','1名分の引き継ぎが進行中です。先にその手続きを完了してください。')
     const pending=await readPair(db,actor)
-    if(pending&&(pending.mfa_required!==mfaRequired||!pending.candidates.every((c,i)=>c?.email===addresses[i])||pending.former[0]!==state.staff_id||(pending.former[1]??null)!==state.co_staff_id))throw pairConflict()
+    if(pending&&(pending.mfa_required!==mfaRequired||pending.candidates.length!==addresses.length||!pending.candidates.every((c,i)=>c?.email===addresses[i])||pending.former.join()!==masterIds(state).join()))throw pairConflict()
     const parts=[]
-    for(let i=0;i<2;i++){
+    for(let i=0;i<addresses.length;i++){
       const address=addresses[i],current=pending?.candidates[i]
       if(current?.active){parts.push({id:current.id,email:address,active:true});continue}
       const {rows:[existing]}=await db.query<{id:string;role:string;agency_staff:boolean;platform_actor:boolean;disabled_at:Date|null;password_hash:string|null;mfa_required:boolean}>('SELECT id,role,agency_staff,platform_actor,disabled_at,password_hash,mfa_required FROM staff WHERE tenant_id=$1 AND email=$2 FOR UPDATE',[actor.tenant_id,address])
-      if(existing?.password_hash&&!existing.disabled_at&&!existing.platform_actor&&existing.agency_staff&&existing.role==='admin'&&existing.mfa_required===mfaRequired&&![state.staff_id,state.co_staff_id].includes(existing.id)){parts.push({id:existing.id,email:address,active:true});continue}
+      if(existing?.password_hash&&!existing.disabled_at&&!existing.platform_actor&&existing.agency_staff&&existing.role==='admin'&&existing.mfa_required===mfaRequired&&!masterIds(state).includes(existing.id)){parts.push({id:existing.id,email:address,active:true});continue}
       const invite=await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[],mfaRequired},actor.id)
       parts.push({id:invite.id,email:address,active:false,expires_at:invite.expires_at,url:cfg.origin+'/master/enrollment/#'+invite.invite_code})
     }
     const id=pending?.id??newId()
-    if(!pending)await db.query(`INSERT INTO agency_master_pair(tenant_id,id,former_primary,former_secondary,first_staff_id,second_staff_id,mfa_required)
-      VALUES($1,$2,$3,$4,$5,$6,$7)`,[actor.tenant_id,id,state.staff_id,state.co_staff_id,parts[0].id,parts[1].id,mfaRequired])
+    if(!pending)await db.query(`INSERT INTO agency_master_pair(tenant_id,id,former_primary,former_secondary,former_tertiary,first_staff_id,second_staff_id,third_staff_id,mfa_required)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[actor.tenant_id,id,state.staff_id,state.co_staff_id,state.third_staff_id,parts[0].id,parts[1].id,parts[2]?.id??null,mfaRequired])
     await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_invite',id,null,{candidate_ids:parts.map(p=>p.id)})
     return {id,mfa_required:mfaRequired,candidates:parts}
+  })
+}
+// Extend a pending two-person handoff without rotating either existing invitation.
+export async function extendAgencyPair(db:DB,cfg:Config,actor:Actor,id:string,address:string,key:string){
+  await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
+  return once(db,cfg,actor,'agency.master_pair_extend',key,{id,address},async()=>{
+    await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor),pair=await readPair(db,actor)
+    if(!pair||pair.id!==id||state.pending_staff_id||pair.former.join()!==masterIds(state).join())throw conflict()
+    if(pair.candidates.length>=3)throw fullMasters()
+    if(pair.candidates.some(c=>c.email===address))throw new Fault(409,'MASTER_EXISTS','このメールアドレスは招待済みです。')
+    const {rows:[existing]}=await db.query<{id:string}>('SELECT id FROM staff WHERE tenant_id=$1 AND email=$2',[actor.tenant_id,address])
+    if(existing&&masterIds(state).includes(existing.id))throw new Fault(409,'MASTER_EXISTS','このアカウントは既にマスターです。')
+    const invite=await createInvite(db,cfg,actor.tenant_id,{email:address,role:'admin',stores:[],mfaRequired:pair.mfa_required},actor.id)
+    await db.query('UPDATE agency_master_pair SET third_staff_id=$3 WHERE tenant_id=$1 AND id=$2',[actor.tenant_id,id,invite.id])
+    await audit(db,actor.tenant_id,null,actor.id,'agency.master_pair_extend',id,null,{candidate_id:invite.id})
+    return {id,mfa_required:pair.mfa_required,candidates:[{id:invite.id,email:address,active:false,expires_at:invite.expires_at,url:cfg.origin+'/master/enrollment/#'+invite.invite_code}]}
   })
 }
 export async function confirmAgencyPair(db:DB,actor:Actor,id:string){
   await requireAgencyMasterAccess(db,actor);await scope(db,actor.tenant_id,undefined,true)
   await lockDispatch(db,actor.tenant_id);const state=await lockedMasterBinding(db,actor),pair=await readPair(db,actor)
-  if(!pair||pair.id!==id||state.pending_staff_id||pair.former[0]!==state.staff_id||(pair.former[1]??null)!==state.co_staff_id)throw conflict()
+  if(!pair||pair.id!==id||state.pending_staff_id||pair.former.join()!==masterIds(state).join())throw conflict()
   const ids=pair.candidates.map(c=>c.id)
   const {rows}=await db.query(`SELECT id FROM staff WHERE tenant_id=$1 AND id=ANY($2::uuid[]) AND role='admin' AND agency_staff AND NOT platform_actor
     AND password_hash IS NOT NULL AND disabled_at IS NULL AND mfa_required=$3 FOR UPDATE`,[actor.tenant_id,ids,pair.mfa_required])
-  if(rows.length!==2)throw pairExpired()
-  if(!(await db.query('UPDATE tenant_master SET staff_id=$2,co_staff_id=$3 WHERE tenant_id=$1',[actor.tenant_id,...ids])).rowCount)throw forbidden()
+  if(rows.length!==ids.length)throw pairExpired()
+  if(!(await db.query('UPDATE tenant_master SET staff_id=$2,co_staff_id=$3,third_staff_id=$4 WHERE tenant_id=$1',[actor.tenant_id,ids[0],ids[1],ids[2]??null])).rowCount)throw forbidden()
   await db.query(`DELETE FROM staff_session WHERE tenant_id=$1 AND staff_id=ANY($2::uuid[]) AND session_kind='staff'`,[actor.tenant_id,[...pair.former,...ids]])
   await db.query('DELETE FROM master_password_reset WHERE tenant_id=$1 AND staff_id=ANY($2::uuid[])',[actor.tenant_id,pair.former])
   await db.query('DELETE FROM agency_master_pair WHERE tenant_id=$1 AND id=$2',[actor.tenant_id,id])

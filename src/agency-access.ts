@@ -30,7 +30,7 @@ export function checkAgencyAccess(actor:Actor,req:Request) {
   }
   // マスター交代の3ルートは到達だけ許可する。実施権限（監督者か自法人の現マスターか）は
   // platform.ts の requireAgencyMasterAccess が判定し、マスターでない代理店スタッフは403になる。
-  if(route==='/agency-master'||route==='/agency-master/invite'||route==='/agency-master/promote'||route==='/agency-master/remove'||['/agency-master/pair/invite','/agency-master/pair/confirm','/agency-master/pair/cancel'].includes(route))return
+  if(route==='/agency-master'||route==='/agency-master/invite'||route==='/agency-master/promote'||route==='/agency-master/remove'||['/agency-master/pair/invite','/agency-master/pair/extend','/agency-master/pair/confirm','/agency-master/pair/cancel'].includes(route))return
   if(includesRoute(interviews,route)||includesRoute(scenarios,route))return
   if(includesRoute('/stores/:store/intake',route)&&['admin','manager'].includes(actor.role))return
   if(['admin','manager'].includes(actor.role)&&includesRoute('/stores/:store/recruitment',route))return

@@ -4,8 +4,8 @@ export function masterTeam(info, actions) {
   const button=(label,fn,cls)=>{const b=el('button',label,cls);b.type='button';b.onclick=fn;return b}
   const root=el('div',null,'stack')
   const masters=info.masters??[{id:info.current_id,email:info.current_email}]
-  const limit=info.master_limit??2
-  root.append(el('p',`登録済みマスター ${masters.length}/${limit}名。2名とも自社の全契約店舗を同じ権限で管理できます。ログインと認証アプリは個人別です。`),
+  const limit=info.master_limit??3
+  root.append(el('p',`登録済みマスター ${masters.length}/${limit}名。全員が自社の全契約店舗を同じ権限で管理できます。ログイン情報は個人別です。`),
     el('p','「追加」は現在のマスターを残します。「交代」は選択した前任者だけのログインを終了します。','muted'))
   const status=el('p');status.setAttribute('role','status')
   async function run(control,fn){
@@ -29,7 +29,7 @@ export function masterTeam(info, actions) {
       el('p',adding?'現在のマスターは引き続き利用できます。':`交代対象：${info.pending_replace_email??info.current_email}`),
       el('p',info.pending_active?'本人による有効化が完了':info.expires_at?'招待の有効期限 '+new Date(info.expires_at).toLocaleString('ja-JP'):'本人の有効化待ち','muted'))
     const promote=button(adding?'兼任マスターに追加する':'選択したマスターを交代する',event=>{
-      const explanation=adding?`${info.pending_email} を2人目のマスターに追加します。既存マスターは残ります。`:
+      const explanation=adding?`${info.pending_email} を兼任マスターに追加します。既存マスターは残ります。`:
         `${info.pending_replace_email??info.current_email} の権限とログインを終了し、${info.pending_email} に引き継ぎます。他のマスターは変更しません。`
       if(!window.confirm(explanation+' 確定しますか？'))return
       run(event.currentTarget,()=>actions.approve(info.pending_id,adding?null:info.pending_replace_id??info.current_id))
@@ -66,7 +66,7 @@ export function masterTeam(info, actions) {
   }
   const pairPanel=el('section',null,'record stack')
   if(actions.pairInvite){
-    pairPanel.append(el('h3','2名へ個別招待リンクを発行'),el('p','新しい2名へそれぞれ専用リンクを渡します。両名が本人登録した後に、前任者の権限を終了して交代します。','muted'))
+    pairPanel.append(el('h3',info.pair?.candidates.length===3?'3名へ個別招待リンクを発行':'2名へ個別招待リンクを発行'),el('p','新しい担当者へそれぞれ専用リンクを渡します。全員が本人登録した後に、前任者の権限を終了して交代します。','muted'))
     if(info.pair){
       pairPanel.append(el('p',info.pair.mfa_required?'認証方式：パスワードと6桁コード':'認証方式：メール・パスワードのみ（6桁コード不要）','muted'))
       for(const [i,candidate] of info.pair.candidates.entries()){
@@ -75,9 +75,13 @@ export function masterTeam(info, actions) {
         if(issued?.url&&!candidate.active){const value=el('input');value.readOnly=true;value.value=issued.url;value.setAttribute('aria-label',`担当者 ${i+1} の専用招待リンク`);row.append(value,button('この担当者の専用リンクをコピー',event=>run(event.currentTarget,async()=>{await navigator.clipboard.writeText(issued.url);status.textContent='本人専用の招待リンクをコピーしました。'}),'secondary'))}
         pairPanel.append(row)
       }
+      if(info.pair.candidates.length===2&&actions.pairExtend){
+        const extension=el('form',null,'stack'),email=document.createElement('input');email.type='email';email.required=true;email.autocomplete='off';email.placeholder='本人のメールアドレス';const label=el('label','3人目のメールアドレス','field');label.append(email);const issue=el('button','3人目の専用リンクを発行','primary');issue.type='submit';extension.append(label,el('p','既存2名の招待リンクと登録状態は変わりません。3名全員の登録後に引き継ぎを確定できます。','muted'),issue);extension.onsubmit=event=>{event.preventDefault();run(issue,()=>actions.pairExtend({id:info.pair.id,address:email.value.trim()}))};pairPanel.append(extension)
+      }
+      const n=info.pair.candidates.length
       const renew=button('未登録者の招待リンクを再発行',event=>{if(!confirm('未登録者の以前の招待リンクを無効化し、新しいリンクを発行します。進めますか？'))return;run(event.currentTarget,()=>actions.pairInvite({addresses:info.pair.candidates.map(c=>c.email),mfa_required:info.pair.mfa_required}))},'secondary');renew.disabled=info.pair.candidates.every(c=>c.active)
-      const approve=button('2名への引き継ぎを確定する',event=>{if(!confirm('両名の本人登録を確認しましたか？ 前任のマスターの権限とログインが終了します。確定しますか？'))return;run(event.currentTarget,()=>actions.pairConfirm(info.pair.id))},'primary');approve.disabled=!info.pair.candidates.every(c=>c.active)
-      pairPanel.append(renew,approve,button('2名の招待を取り消す',event=>{if(confirm('2名の未使用の招待リンクを無効化します。現在のマスターは変更しません。取り消しますか？'))run(event.currentTarget,()=>actions.pairCancel(info.pair.id))},'secondary'))
+      const approve=button(n===3?'3名への引き継ぎを確定する':'2名への引き継ぎを確定する',event=>{if(!confirm('全員の本人登録を確認しましたか？ 前任のマスターの権限とログインが終了します。確定しますか？'))return;run(event.currentTarget,()=>actions.pairConfirm(info.pair.id))},'primary');approve.disabled=!info.pair.candidates.every(c=>c.active)
+      pairPanel.append(renew,approve,button(`${n}名の招待を取り消す`,event=>{if(confirm('未使用の招待リンクを無効化します。現在のマスターは変更しません。取り消しますか？'))run(event.currentTarget,()=>actions.pairCancel(info.pair.id))},'secondary'))
       form.hidden=true
     }else{
       const f=el('form',null,'stack'),addresses=[1,2].map(i=>{const l=el('label',`担当者${i}のメールアドレス`),input=document.createElement('input');input.type='email';input.required=true;input.autocomplete='off';l.append(input);f.append(l);return input})

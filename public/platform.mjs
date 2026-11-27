@@ -95,6 +95,7 @@ async function loadProgress() {
     if (entry.master) head.append(element('span',
       'マスター '+entry.master.email+' · '+(entry.master.activated?'有効化済':'招待中'),'muted'))
     if(entry.master?.co_email)head.append(element('span','兼任マスター '+entry.master.co_email+' · 有効化済','muted'))
+    if(entry.master?.third_email)head.append(element('span','兼任マスター '+entry.master.third_email+' · 有効化済','muted'))
     row.append(head)
     for (const store of entry.stores) {
       const line = element('div',null,'onboarding-store')

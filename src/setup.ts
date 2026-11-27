@@ -12,7 +12,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
     '020_tour_revisions','021_supervisor_handoff','022_interview_link_tokens','023_liff_free_links',
     '024_registration_flow','025_remove_liff','026_recruitment_delivery','027_agency_master_self_service',
-    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake','042_piyomaru','043_health_materials','044_case_insensitive_login_id','045_agency_master_pair_handoff','046_agency_pair_password_login']
+    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake','042_piyomaru','043_health_materials','044_case_insensitive_login_id','045_agency_master_pair_handoff','046_agency_pair_password_login','047_agency_third_master']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -28,7 +28,7 @@ export async function migrate(pool: pg.Pool, role: string) {
       night.webhook_event,night.store_grant,night.channel,night.store TO ${role}`)
     await db.query(`GRANT SELECT ON night.tenant_route,night.tenant_master,night.platform_master TO ${role}`)
     await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.agency_master_pair TO ${role}`)
-    await db.query(`GRANT UPDATE (staff_id,co_staff_id,pending_staff_id,pending_mode,pending_replace_id) ON night.tenant_master TO ${role}`)
+    await db.query(`GRANT UPDATE (staff_id,co_staff_id,third_staff_id,pending_staff_id,pending_mode,pending_replace_id) ON night.tenant_master TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.tour_revision TO ${role}`)
     await db.query(`GRANT SELECT,DELETE ON night.supervisor_handoff TO ${role}`)
     await db.query(`GRANT SELECT,DELETE,UPDATE (attempts) ON night.master_password_reset TO ${role}`)
@@ -162,12 +162,12 @@ export async function designateMaster(pool:pg.Pool,tenantSlug:string,address:str
     const result=await db.query(`INSERT INTO tenant_master(tenant_id,staff_id) VALUES($1,$2)
       ON CONFLICT (tenant_id) DO UPDATE SET staff_id=excluded.staff_id,pending_staff_id=NULL,
         pending_mode='replace',pending_replace_id=NULL
-      WHERE tenant_master.staff_id<>excluded.staff_id AND tenant_master.co_staff_id IS DISTINCT FROM excluded.staff_id
+      WHERE tenant_master.staff_id<>excluded.staff_id AND tenant_master.co_staff_id IS DISTINCT FROM excluded.staff_id AND tenant_master.third_staff_id IS DISTINCT FROM excluded.staff_id
       RETURNING staff_id`,[tenant.tenant_id,staff.id])
     if (result.rowCount) {
       await db.query(`DELETE FROM staff_session s USING staff f WHERE s.staff_id=f.id
         AND s.tenant_id=$1 AND f.tenant_id=s.tenant_id AND f.role='admin'
-        AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id))`,[tenant.tenant_id])
+        AND NOT EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.third_staff_id))`,[tenant.tenant_id])
       await audit(db,tenant.tenant_id,null,null,'master.designated',staff.id)
     }
   })

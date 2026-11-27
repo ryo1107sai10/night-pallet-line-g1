@@ -243,7 +243,7 @@ test('兼任マスターは2名が個別認証で全店舗を運用し、片方�
   const firstStore=expect(await post('/stores',first,storeData('一号店'),idempotency()),201).id
   const original=expect(await request('/agency-master',{cookie:first}),200)
   assert.deepEqual(original.masters.map(m=>m.email),[firstEmail])
-  assert.equal(original.master_limit,2)
+  assert.equal(original.master_limit,3)
   const pending=expect(await post('/agency-master/invite',first,{address:secondEmail,mode:'add'},idempotency()),201)
   assert.equal(expect(await request('/agency-master',{cookie:first}),200).pending_mode,'add')
   expect(await post('/agency-master/promote',first,{pending:pending.id}),409)
@@ -275,7 +275,8 @@ test('兼任マスターは2名が個別認証で全店舗を運用し、片方�
   assert.equal(expect(await request('/stores/'+secondStore+'/connections',{cookie:first}),200)[0].id,linked.id)
   expect(await request('/stores/'+firstStore+'/connections',{cookie:plain}),404)
   expect(await request('/platform/session',{cookie:second}),401)
-  expect(await post('/agency-master/invite',second,{address:'third@example.test',mode:'add'},idempotency()),409)
+  const third=expect(await post('/agency-master/invite',second,{address:'third@example.test',mode:'add'},idempotency()),201)
+  assert.equal(expect(await request('/agency-master',{cookie:second}),200).pending_id,third.id)
   expect(await post('/agency-master/invite',second,{address:firstEmail,mode:'replace',replace_id:pending.id},idempotency()),409)
   // Both members can recover their own password, not other tenants' credentials.
   assert.equal((await prepareMasterPasswordReset(owner,cfg,{tenant,address:secondEmail})).email,secondEmail)
@@ -407,4 +408,33 @@ test('エールの新2名だけはパスワード認証で登録でき、北村�
   const password2='New-Demo-Password-123456';expect(await post('/auth/master/recovery',null,{recovery,password:password2}),200)
   expect(await post('/auth/master/login',null,{tenant,email:first,password:pass}),401)
   expect(await post('/auth/master/login',null,{tenant,email:first,password:password2}),200)
+})
+
+
+test('進行中の2名招待を3名へ拡張しても元のリンクは有効、3名の登録後のみ権限付与',async()=>{
+  // Isolate this local test's login-rate bucket from earlier independent test tenants.
+  await owner.query('DELETE FROM night.auth_rate')
+  const tenant='three-agency',email='old-three@example.test',addresses=['one-three@example.test','two-three@example.test','three-three@example.test']
+  const original=await bootstrap(owner,cfg,{slug:tenant,name:'3人引継ぎ検証',email})
+  const oldCookie=await activate(original,email,tenant,'/auth/master/login')
+  const prior=expect(await request('/session',{cookie:oldCookie}),200)
+  await tx(owner,async db=>{await scope(db,prior.tenant.id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[prior.tenant.id])})
+  const pair=expect(await post('/agency-master/pair/invite',oldCookie,{addresses:addresses.slice(0,2),mfa_required:false},idempotency()),201)
+  const extend=address=>post('/agency-master/pair/extend',oldCookie,{id:pair.id,address},idempotency())
+  expect(await extend(addresses[0]),409)
+  const third=expect(await extend(addresses[2]),201)
+  expect(await extend('fourth-three@example.test'),409)
+  const all=[...pair.candidates,...third.candidates]
+  assert.equal(expect(await request('/agency-master',{cookie:oldCookie}),200).pair.candidates.length,3)
+  for(const c of all){const token=new URL(c.url).hash.slice(1);const info=expect(await post('/auth/master/enrollment',null,{invite:token}),200);assert.equal(info.email,c.email);assert.equal(info.mfa_required,false);expect(await post('/auth/activate',null,{invite:token,password:pass}),200);expect(await post('/auth/master/login',null,{tenant,email:c.email,password:pass}),401);if(c!==all[2])expect(await post('/agency-master/pair/confirm',oldCookie,{id:pair.id}),409)}
+  expect(await post('/agency-master/pair/confirm',oldCookie,{id:pair.id}),200)
+  expect(await request('/session',{cookie:oldCookie}),401)
+  const cookies=[]
+  for(const address of addresses){const auth=await post('/auth/master/login',null,{tenant,email:address,password:pass});expect(auth,200);cookies.push(auth.cookie);assert.deepEqual(expect(await request('/agency-master',{cookie:auth.cookie}),200).masters.map(m=>m.email),addresses);expect(await post('/auth/platform/login',null,{tenant,email:address,password:pass}),401)}
+  expect(await post('/agency-master/invite',cookies[2],{address:'fourth-three@example.test',mode:'add'},idempotency()),409)
+  await prepareMasterPasswordReset(owner,cfg,{tenant,address:addresses[2]})
+  expect(await post('/agency-master/remove',cookies[2],{target:all[0].id}),200)
+  expect(await request('/session',{cookie:cookies[0]}),401)
+  expect(await request('/session',{cookie:cookies[1]}),200)
+  assert.equal(expect(await request('/agency-master',{cookie:cookies[2]}),200).masters.length,2)
 })

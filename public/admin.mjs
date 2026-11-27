@@ -517,8 +517,9 @@ let recentMasterInvite,recentPairInvite
 function masterPanel(info) {
   const team=panel('エールのマスター管理・引き継ぎ',masterTeam(info,{
     inviteResult:recentMasterInvite,refresh:()=>refresh(),pairResult:recentPairInvite,
-    pairInvite:async data=>{recentPairInvite=await api('/agency-master/pair/invite','POST',data,true);await refresh();feedback('2名の専用リンクを本人だけに渡してください。')},
-    pairConfirm:async id=>{recentPairInvite=null;await change('/agency-master/pair/confirm','POST',{id},'2名への引き継ぎが完了しました。')},
+    pairInvite:async data=>{recentPairInvite=await api('/agency-master/pair/invite','POST',data,true);await refresh();feedback('専用リンクをそれぞれ本人だけに渡してください。')},
+    pairExtend:async data=>{const result=await api('/agency-master/pair/extend','POST',data,true);recentPairInvite={...result,candidates:[...(recentPairInvite?.id===result.id?recentPairInvite.candidates:[]),...result.candidates]};await refresh();feedback('3人目の専用リンクを本人だけに渡してください。')},
+    pairConfirm:async id=>{recentPairInvite=null;await change('/agency-master/pair/confirm','POST',{id},'引き継ぎが完了しました。')},
     pairCancel:async id=>{recentPairInvite=null;await change('/agency-master/pair/cancel','POST',{id},'2名の招待を取り消しました。')},
     invite:async data=>{
       recentMasterInvite=await api('/agency-master/invite','POST',data,true)
