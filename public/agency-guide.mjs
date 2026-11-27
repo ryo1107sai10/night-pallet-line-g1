@@ -24,7 +24,7 @@ const actions=(...items)=>{const div=el('div',null,'guide-actions');div.append(.
 const badge=(text,ok)=>el('span',text,'guide-badge'+(ok?' ready':''))
 const checklist=items=>{const list=el('ul',null,'guide-checklist');for(const [ok,description] of items){const li=el('li');li.dataset.ready=String(!!ok);li.append(el('strong',ok?'✓':'○'),el('span',description));list.append(li)}return list}
 const field=(label,name,typ='text',value='')=>{const l=el('label',label),i=document.createElement('input');i.name=name;i.type=typ;if(typ==='checkbox'){i.checked=!!value;l.prepend(i)}else{i.value=value;i.required=true;i.maxLength=200;l.append(i)}return {label:l,input:i}}
-const lineFlags=[['token_verified','アクセストークンの確認'],['webhook_verified','LINE側のWebhook（受信の接続）'],['tester_verified','テスト利用者の本人確認'],['receive_verified','普通のメッセージを受信'],['send_accepted','接続テストを1通送信'],['delivery_confirmed','スマホへの到着を確認'],['non_developer','一般のLINE利用者で実機確認']]
+const lineFlags=[['token_verified','アクセストークンの確認'],['webhook_verified','LINE側のWebhook（受信の接続）'],['ownership_verified','公式LINEの管理権限'],['provider_verified','プロバイダーの一致'],['redelivery_enabled','Webhookの再送設定'],['auto_reply_checked','LINE側の自動応答を確認'],['tester_verified','テスト利用者の本人確認'],['receive_verified','普通のメッセージを受信'],['send_accepted','接続テストを1通送信'],['delivery_confirmed','スマホへの到着を確認'],['non_developer','一般のLINE利用者で実機確認']]
 export function createAgencyGuide(root,{storeName,storeId,info,journey,step,onStep,onAction,onRefresh,onDetail,message,error}){
   const state=guideStages(info,journey),recommended=nextGuideStep(info,journey),current=state.find(s=>s.number===step)??state[recommended-1],done=state.filter(s=>s.ready).length
   const q='?store='+encodeURIComponent(storeId),lineUrl='/agency-line/'+q,studio='/studio/'+q,calendar='/interview/staff.html'+q,workflows='/workflows/'+q+'&use=recruitment'
@@ -43,7 +43,7 @@ export function createAgencyGuide(root,{storeName,storeId,info,journey,step,onSt
     if(flags.length){const apply=btn('採用の基本機能を有効にする',e=>run(e.currentTarget,'features'),true);features.append(apply)}body.append(features)
     const connect=box('公式LINEの接続・テスト',journey.connected?'接続の確認が完了しました。':'LINEの管理画面にある情報を登録して、スマホで送受信を確認します。')
     const c=journey.channels?.find(x=>!x.stopped&&x.status!=='connected')??journey.channels?.find(x=>!x.stopped)
-    if(c){connect.append(el('p',c.label+(c.basic_id?'（'+c.basic_id+'）':'')),checklist(lineFlags.map(([k,label])=>[!!c.checks?.[k],label])));const missing=lineFlags.find(([k])=>!c.checks?.[k]);if(missing)connect.append(el('p','次に行うこと：'+missing[1],'guide-muted'));connect.append(actions(link('LINE接続・動作確認を開く',lineUrl+(c?'&line_channel='+encodeURIComponent(c.id):'')+(c.checks?.token_verified&&c.checks?.webhook_verified?'#line-tester':'#line-connections'),true)))}else connect.append(actions(link('公式LINEを登録する',lineUrl,true)))
+    if(c){connect.append(el('p',c.label+(c.basic_id?'（'+c.basic_id+'）':'')),checklist(lineFlags.map(([k,label])=>[!!c.checks?.[k],label])));const missing=lineFlags.find(([k])=>!c.checks?.[k]);if(missing)connect.append(el('p','次に行うこと：'+missing[1],'guide-muted'));connect.append(actions(link('LINE接続・動作確認を開く',lineUrl+(c?'&line_channel='+encodeURIComponent(c.id):'')+(lineFlags.slice(0,6).every(([key])=>c.checks?.[key])?'#line-tester':c.checks?.token_verified&&c.checks?.webhook_verified?'#line-console-checks':'#line-connections'),true)))}else connect.append(actions(link('公式LINEを登録する',lineUrl,true)))
     body.append(connect)
   }else if(current.number===2){
     body.append(el('p','最初は「面談までの基本の型」を選ぶだけ。用意された案内の文章をその店舗用に編集します。','guide-intro'))

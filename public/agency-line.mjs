@@ -28,7 +28,7 @@ async function request(path,method='GET',data){
 function base(){return '/stores/'+encodeURIComponent(store.value)+'/connections'}
 function setBusy(value){
   busy=value;store.disabled=value;registration.querySelector('button').disabled=value
-  for(const button of detail.querySelectorAll('button'))button.disabled=value
+  for(const button of detail.querySelectorAll('button'))button.disabled=value||button.dataset.waiting==='true'
   const selector=selection.querySelector('select');if(selector)selector.disabled=value
 }
 async function perform(run){
@@ -80,7 +80,7 @@ async function renderConnection(){
     records.append(row)
   }
   detail.append(records)
-  const form=element('form');form.append(element('h3','公式LINEの設定確認記録'))
+  const form=element('form');form.id='line-console-checks';form.append(element('h3','公式LINEの設定確認記録'),element('p','まず上から4項目を確認してチェックし、確認者・根拠を入力して保存してください。下の2項目（実機・到着確認）はテスト後に保存します。','muted'))
   for(const [name,title] of Object.entries(manualFlags)){
     const label=element('label'), field=element('input');field.type='checkbox';field.name=name;field.checked=checks[name]===true
     label.append(field,document.createTextNode(' '+title));form.append(label)
@@ -93,10 +93,10 @@ async function renderConnection(){
   })}
   const testHeading=element('h3','3. 実機の接続テスト');testHeading.id='line-tester';detail.append(form,testHeading)
   detail.append(element('p','スマホの通常LINEを用意してください。テストは次の順番です。テストだけでは一般向け自動配信は始まりません。'))
-  const instructions=element('ol',undefined,'guide-checklist');for(const text of ['テストコードを発行する','本人のスマホから「接続テスト ＋ 発行コード」を1通送る','同じLINEで「動作確認」を別の1通として送る','この画面の「進捗を更新」を押す','「接続テストを1通送る」を押し、スマホへの到着を確認する','届いたら上の確認記録で「テストメッセージが端末に届いた」を選び保存する'])instructions.append(element('li',text));detail.append(instructions)
-  detail.append(action('テストコードを発行',async()=>{
+  const instructions=element('ol',undefined,'guide-checklist');for(const text of ['上の設定確認記録の最初の4項目を保存する','テストコードを発行する','本人のスマホから「接続テスト ＋ 発行コード」を1通送る','同じLINEで「動作確認」を別の1通として送る','この画面の「進捗を更新」を押す','「接続テストを1通送る」を押し、スマホへの到着を確認する','届いたら上の確認記録で「テストメッセージが端末に届いた」を選び保存する'])instructions.append(element('li',text));detail.append(instructions)
+  const issue=action('テストコードを発行',async()=>{
     const result=await request(prefix+'/tests','POST',{purpose:'recruitment'});issued={channel:current.id,...result};await loadConnections();status.textContent='テストコードを発行しました。'
-  }),action('進捗を更新',async()=>{await loadConnections();status.textContent='進捗を更新しました。'}))
+  });const waiting=!checks.ownership_verified||!checks.provider_verified;issue.dataset.waiting=String(waiting);issue.disabled=waiting;if(waiting){const help=element('p','先に上の公式LINEの管理権限・プロバイダーを確認し、確認結果を保存してください。','muted');detail.append(help)}detail.append(issue,action('進捗を更新',async()=>{await loadConnections();status.textContent='進捗を更新しました。'}))
   if(issued?.channel===current.id){detail.append(element('p','1通目：次の内容をコピーして送信'));detail.append(element('pre','接続テスト '+issued.code));detail.append(action('1通目をコピー',async()=>{await navigator.clipboard.writeText('接続テスト '+issued.code);status.textContent='コピーしました。次に別のメッセージで「動作確認」と送ってください。'}),element('p','2通目：動作確認（コードを付けず別のメッセージとして送る）'),element('p','有効期限 '+new Date(issued.expires_at).toLocaleString('ja-JP'),'muted'))}
   const testers=await request(prefix+'/tests')
   if(channelId!==current.id)return
@@ -133,5 +133,5 @@ try{
   if(!session.stores.length)throw new Error('管理する店舗がありません。')
   const wanted=new URLSearchParams(location.search).get('store');if(session.stores.some(item=>item.id===wanted))store.value=wanted
   store.onchange=()=>perform(async()=>{await storeChanged();status.textContent='店舗を切り替えました。'})
-  $('line-workspace').hidden=false;await perform(async()=>{await storeChanged(new URLSearchParams(location.search).get('line_channel'));status.textContent='';if(['#line-connections','#line-tester'].includes(location.hash))$(location.hash.slice(1))?.scrollIntoView({block:'start'})})
+  $('line-workspace').hidden=false;await perform(async()=>{await storeChanged(new URLSearchParams(location.search).get('line_channel'));status.textContent='';if(['#line-connections','#line-console-checks','#line-tester'].includes(location.hash))$(location.hash.slice(1))?.scrollIntoView({block:'start'})})
 }catch(error){status.textContent=error.message}
