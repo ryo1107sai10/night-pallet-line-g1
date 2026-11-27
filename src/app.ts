@@ -1,9 +1,10 @@
+import {agencyEnrollmentPath,agencyEnrollmentInput,readAgencyEnrollment} from './agency-enrollment.js'
 import {piyomaruInfo,configurePiyomaru,askPiyomaru,createPiyomaruJob,readPiyomaruJob,actPiyomaruJob,piyoSettingInput,piyoQuestionInput,piyoJobInput,piyoActionInput,piyoNoteInput,rememberPiyomaruNote,removePiyomaruNote} from './piyomaru.js'
 import {createPiyomaruMediaSource} from './piyomaru-library.js'
 import {createMaterialStorage,createMaterialDraft,materialAsset,materialHistory,materialDraftInput,materialPublishInput,publishMaterial,uploadMaterialChunk} from './piyomaru-materials.js'
 import {acceptanceInput,masterHealth,platformHealth,probeStore,recordStoreAcceptance} from './store-health.js'
 import {intakeView,saveIntake,changeIntake,intakeSaveInput,intakeActionInput} from './recruitment-intake.js'
-import { agencyMasterDetails, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
+import { agencyMasterDetails, inviteAgencyPair, confirmAgencyPair, cancelAgencyPair, authenticatePlatformWorkspace, enterPlatformTenant, inviteAgencyMaster, platformPrincipal, platformSession, platformTenants, platformWorkspace, promoteAgencyMaster, removeAgencyMaster, requireSupervisor } from './platform.js'
 import { publishTour, readTours, tourId, tourInput } from './tours.js'
 import { completeSupervisorHandoff, handoffCompletion, handoffSetup, readSupervisorHandoff, supervisorHandoffPath } from './supervisor-handoff.js'
 import {completeMasterPasswordReset,masterPasswordResetPath,resetCompletion} from './master-password-reset.js'
@@ -203,6 +204,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
   app.get(supervisorHandoffPath,(_req,res)=>{
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/supervisor-handoff.html'))
   })
+  app.get(agencyEnrollmentPath,(_req,res)=>{res.set({'X-Robots-Tag':'noindex, nofollow','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}).sendFile(here('../public/agency-enrollment.html'))})
   app.get(masterPasswordResetPath,(_req,res)=>{
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/master-recovery.html'))
   })
@@ -237,7 +239,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     idOf(req,'connection')
     res.set('X-Robots-Tag','noindex, nofollow').sendFile(here('../public/customer/token.html'))
   })
-  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','dashboard.mjs','master-team.mjs','store-health.mjs'])
+  const staticAssets=new Set(['style.css','admin.mjs','line-setup.mjs','line-invite.mjs','line-module-return.mjs','platform.mjs','workspace-path.mjs','agency.mjs','agency-line.mjs','supervisor-handoff.mjs','master-recovery.mjs','agency-enrollment.mjs','dashboard.mjs','master-team.mjs','store-health.mjs'])
   const tourAssets=new Set(['tour.mjs','tour.css','tour-editor.mjs','piyomaru.mjs','piyomaru.css','piyomaru-atlas.png'])
   app.get('/static/:asset',async(req,res,next)=>{
     const asset=req.params.asset
@@ -437,6 +439,7 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     const result=await completeSupervisorHandoff(pool,cfg,handoffCompletion.parse(req.body),address(req))
     res.set('Set-Cookie',sessionCookie(cfg,'','platform')).json(result)
   })
+  api.post('/auth/master/enrollment',async(req,res)=>{const {invite}=agencyEnrollmentInput.parse(req.body);res.set('Cache-Control','no-store').json(await readAgencyEnrollment(pool,cfg,invite,address(req)))})
   api.post('/auth/activate',async (req,res)=>{ res.json(await accept(pool,cfg,req.body,address(req))) })
   api.post('/auth/master/recovery',async(req,res)=>{
     const result=await completeMasterPasswordReset(pool,cfg,resetCompletion.parse(req.body),address(req))
@@ -883,6 +886,9 @@ export function createApp(pool: pg.Pool, cfg: Config, line = new LineAPI(), goog
     return { actor:{ id:actor.id,email:actor.email,role:actor.role,platform:actor.platform===true,agency:actor.agency===true }, tenant, stores:await storeList(db,actor) }
   }))
   api.get('/agency-master',staff((db,actor)=>agencyMasterDetails(db,actor)))
+  api.post('/agency-master/pair/invite',staff((db,actor,req)=>{const {addresses,mfa_required}=z.strictObject({addresses:z.array(email).length(2),mfa_required:z.boolean().default(true)}).parse(req.body);return inviteAgencyPair(db,cfg,actor,addresses,keyOf(req),mfa_required)},201))
+  api.post('/agency-master/pair/confirm',staff((db,actor,req)=>confirmAgencyPair(db,actor,z.strictObject({id:uuid}).parse(req.body).id)))
+  api.post('/agency-master/pair/cancel',staff((db,actor,req)=>cancelAgencyPair(db,actor,z.strictObject({id:uuid}).parse(req.body).id)))
   api.post('/agency-master/invite',staff((db,actor,req)=>{
     const {address,mode,replace_id}=z.strictObject({address:email,mode:z.enum(['add','replace']).default('replace'),replace_id:uuid.optional()}).parse(req.body)
     return inviteAgencyMaster(db,cfg,actor,address,keyOf(req),{mode,replace_id})

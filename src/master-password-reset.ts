@@ -9,14 +9,14 @@ const recoveryCredential=z.string().refine(value=>{
   const [tenant,raw,extra]=value.split('.')
   return extra===undefined&&uuid.safeParse(tenant).success&&opaque.safeParse(raw).success
 })
-export const resetCompletion=z.strictObject({recovery:recoveryCredential,password,code:z.string().regex(/^\d{6}$/)})
+export const resetCompletion=z.strictObject({recovery:recoveryCredential,password,code:z.string().regex(/^\d{6}$/).optional()})
 const invalid=()=>new Fault(400,'RECOVERY_UNAVAILABLE','再設定リンクまたは最新の認証コードを確認してください。リンクの期限・試行回数を超えた場合は再発行が必要です。')
 
 // 発行のみを行う運用者用関数。メール送達前にパスワードやセッションを変更しない。
 export async function prepareMasterPasswordReset(pool:pg.Pool,cfg:Config,input:z.infer<typeof resetTarget>){
   const data=resetTarget.parse(input)
   return tx(pool,async db=>{
-    const {rows:[directory]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[data.tenant])
+    const {rows:[directory]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[data.tenant])
     if(!directory)throw missing()
     const tenant=directory.tenant_id
     await scope(db,tenant,undefined,true)
@@ -41,7 +41,7 @@ export async function completeMasterPasswordReset(pool:pg.Pool,cfg:Config,data:z
   const [tenant,raw]=data.recovery.split('.'),hash=digest(raw)
   const result=await tx(pool,async db=>{
     await scope(db,tenant,undefined,true)
-    const {rows:[staff]}=await db.query<{id:string;totp_secret:string;last_totp_step:string;password_hash:string}>(`SELECT f.id,f.totp_secret,f.last_totp_step,f.password_hash
+    const {rows:[staff]}=await db.query<{id:string;totp_secret:string;last_totp_step:string;password_hash:string;mfa_required:boolean}>(`SELECT f.id,f.totp_secret,f.last_totp_step,f.password_hash,f.mfa_required
       FROM master_password_reset r JOIN tenant_master m ON m.tenant_id=r.tenant_id AND r.staff_id IN (m.staff_id,m.co_staff_id)
       JOIN staff f ON (f.tenant_id,f.id)=(r.tenant_id,r.staff_id) JOIN tenant t ON t.id=r.tenant_id
       WHERE r.tenant_id=$1 AND r.token_hash=$2 AND r.expires_at>clock_timestamp() AND r.attempts<6
@@ -49,13 +49,13 @@ export async function completeMasterPasswordReset(pool:pg.Pool,cfg:Config,data:z
         AND f.disabled_at IS NULL AND (t.agency_operations_only OR EXISTS(SELECT 1 FROM platform_master p WHERE p.agency_id=t.id))
       FOR UPDATE OF f,r`,[tenant,hash])
     if(!staff)return false
-    const step=factorStep(unseal(cfg,'totp:'+staff.id,staff.totp_secret),data.code)
-    if(step===null||step<=Number(staff.last_totp_step)||await verifyPassword(data.password,staff.password_hash)){
+    const step=staff.mfa_required&&data.code?factorStep(unseal(cfg,'totp:'+staff.id,staff.totp_secret),data.code):null
+    if((staff.mfa_required&&(step===null||step<=Number(staff.last_totp_step)))||await verifyPassword(data.password,staff.password_hash)){
       await db.query('UPDATE master_password_reset SET attempts=attempts+1 WHERE token_hash=$1',[hash])
       return false
     }
     if(!(await db.query('DELETE FROM master_password_reset WHERE token_hash=$1 AND expires_at>clock_timestamp() RETURNING staff_id',[hash])).rowCount)return false
-    await db.query('UPDATE staff SET password_hash=$2,last_totp_step=$3 WHERE id=$1',[staff.id,await hashPassword(data.password),step])
+    await db.query('UPDATE staff SET password_hash=$2,last_totp_step=COALESCE($3::bigint,last_totp_step) WHERE id=$1',[staff.id,await hashPassword(data.password),step])
     const revoked=await db.query('DELETE FROM staff_session WHERE staff_id=$1',[staff.id])
     await audit(db,tenant,null,staff.id,'auth.master_recovery.completed',staff.id,null,{sessions_revoked:revoked.rowCount})
     return true

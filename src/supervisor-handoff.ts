@@ -16,7 +16,7 @@ export const handoffCompletion=handoffSetup.extend({password,code:z.string().reg
 export async function prepareSupervisorHandoff(pool:pg.Pool,cfg:Config,input:{tenant:string;address:string;nextSlug?:string}) {
   return tx(pool,async db=>{
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.platform_master'))")
-    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[input.tenant])
+    const {rows:[tenant]}=await db.query<{tenant_id:string;slug:string}>('SELECT tenant_id,slug FROM tenant_route WHERE lower(slug)=lower($1)',[input.tenant])
     if(!tenant)throw missing()
     await scope(db,tenant.tenant_id,undefined,true)
     const {rows:[staff]}=await db.query<{id:string}>(`SELECT f.id FROM platform_master m
@@ -25,8 +25,8 @@ export async function prepareSupervisorHandoff(pool:pg.Pool,cfg:Config,input:{te
         AND t.supervisor_only AND f.password_hash IS NOT NULL AND f.disabled_at IS NULL
       FOR UPDATE OF f`,[tenant.tenant_id,input.address])
     if(!staff)throw missing()
-    const loginId=input.nextSlug??input.tenant
-    if(loginId!==input.tenant){
+    const loginId=input.nextSlug??tenant.slug
+    if(loginId!==tenant.slug){
       await db.query('UPDATE tenant_route SET slug=$2 WHERE tenant_id=$1',[tenant.tenant_id,loginId])
       await db.query('UPDATE tenant SET slug=$2 WHERE id=$1',[tenant.tenant_id,loginId])
     }
@@ -36,7 +36,7 @@ export async function prepareSupervisorHandoff(pool:pg.Pool,cfg:Config,input:{te
       ON CONFLICT (tenant_id,staff_id) DO UPDATE SET token_hash=excluded.token_hash,
         pending_secret=excluded.pending_secret,expires_at=excluded.expires_at RETURNING expires_at`,
     [tenant.tenant_id,staff.id,digest(raw),seal(cfg,'totp:'+staff.id,secret)])
-    await audit(db,tenant.tenant_id,null,null,'platform.handoff.issued',staff.id,null,{login_id_changed:loginId!==input.tenant})
+    await audit(db,tenant.tenant_id,null,null,'platform.handoff.issued',staff.id,null,{login_id_changed:loginId!==tenant.slug})
     return {login_id:loginId,expires_at:handoff.expires_at,url:cfg.origin+supervisorHandoffPath+'#'+tenant.tenant_id+'.'+raw}
   })
 }

@@ -46,7 +46,7 @@ export async function createRegistration(db: DB, cfg: Config, principal: Actor,
     try {
       let slug = newSlug()
       for (let attempt = 0; ; attempt++) {
-        const taken = await db.query('SELECT 1 FROM tenant_route WHERE slug=$1', [slug])
+        const taken = await db.query('SELECT 1 FROM tenant_route WHERE lower(slug)=lower($1)', [slug])
         if (!taken.rowCount) break
         if (attempt >= 4) throw conflict()
         slug = newSlug()

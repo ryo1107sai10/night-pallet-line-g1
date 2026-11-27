@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 export const uuid = z.uuid()
 export const purpose = z.enum(['customer', 'recruitment'])
-export const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{1,47}$/)
+export const slug = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{1,47}$/)
 export const email = z.email().max(254).transform(value => value.toLowerCase())
 export const text = (max: number) => z.string().trim().min(1).max(max)
 export const revision = z.int().positive()

@@ -161,7 +161,7 @@ $('agency-store-automation').onsubmit=event=>{
 const masterSection=$('agency-master')
 const masterStatus=$('agency-master-status')
 let masterInfo=null
-let lastMasterInvite=null
+let lastMasterInvite=null,lastPairInvite=null
 async function masterCall(path,method='GET',data,key){
   const response=await fetch('/api/v1'+path,{
     method,
@@ -174,7 +174,10 @@ async function masterCall(path,method='GET',data,key){
 }
 function renderMaster(){
   $('agency-master-content').replaceChildren(masterTeam(masterInfo,{
-    inviteResult:lastMasterInvite,refresh:loadMaster,
+    inviteResult:lastMasterInvite,refresh:loadMaster,pairResult:lastPairInvite,
+    pairInvite:async data=>{lastPairInvite=await masterCall('/agency-master/pair/invite','POST',data);await loadMaster();masterStatus.textContent='2名の専用リンクを本人だけに渡してください。'},
+    pairConfirm:async id=>{await masterCall('/agency-master/pair/confirm','POST',{id});lastPairInvite=null;location.reload()},
+    pairCancel:async id=>{await masterCall('/agency-master/pair/cancel','POST',{id});lastPairInvite=null;await loadMaster();masterStatus.textContent='2名の招待を取り消しました。'},
     invite:async data=>{
       lastMasterInvite=await masterCall('/agency-master/invite','POST',data)
       await loadMaster()

@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres'
 import { Secret, TOTP } from 'otpauth'
 import { createApp } from '../dist/app.js'
 import { assertAppRole, poolFor } from '../dist/core.js'
-import { bootstrap, inviteSupervisor, migrate } from '../dist/setup.js'
+import { bootstrap, inviteSupervisor, migrate, renameAgencyLoginId } from '../dist/setup.js'
 import { LineAPI } from '../dist/line.js'
 import {prepareMasterPasswordReset} from '../dist/master-password-reset.js'
 import {verifyPassword} from '../dist/auth.js'
@@ -324,4 +324,87 @@ test('既に有効な店舗担当者の兼任昇格は最終確定までは権�
   expect(promoted,200)
   assert.equal(expect(await request('/session',{cookie:promoted.cookie}),200).actor.role,'admin')
   expect(await request('/session',{cookie:primary}),200)
+})
+
+
+test('法人IDの大文字小文字を区別せず、法人IDの変更後も既存の法人・店舗・マスターを保持する',async()=>{
+  const address='rename-master@example.test',old='old-rename-agency',next='YEEELL'
+  const invite=await bootstrap(owner,cfg,{slug:old,name:'法人ID変更検証',email:address})
+  const oldCookie=await activate(invite,address,old.toUpperCase(),'/auth/master/login')
+  const prior=expect(await request('/session',{cookie:oldCookie}),200)
+  const store=expect(await post('/stores',oldCookie,{name:'維持する店舗',address:'東京都',business_type:'検証',responsible:'担当',timezone:'Asia/Tokyo',cutoff:'06:00'},idempotency()),201)
+  await tx(owner,async db=>{await scope(db,prior.tenant.id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[prior.tenant.id])})
+  await assert.rejects(renameAgencyLoginId(owner,old,'BETA'))
+  assert.equal((await renameAgencyLoginId(owner,old,next)).login_id,next)
+  const current=expect(await request('/session',{cookie:oldCookie}),200)
+  assert.equal(current.tenant.id,prior.tenant.id);assert.equal(current.tenant.slug,next)
+  assert.ok(current.stores.some(s=>s.id===store.id))
+  assert.equal(current.actor.id,prior.actor.id)
+  expect(await post('/auth/master/login',null,{tenant:old,email:address,password:pass,code:code(invite.setup_key,1)}),401)
+  const login=expect(await post('/auth/master/login',null,{tenant:next.toLowerCase(),email:address,password:pass,code:code(invite.setup_key,1)}),200)
+  assert.ok(login)
+  await assert.rejects(bootstrap(owner,cfg,{slug:'yeeell',name:'別法人',email:'other@example.test'}))
+})
+
+
+test('2名の個別招待リンクは独立し、両名が本人登録するまで旧マスター権限を維持する',async()=>{
+  const tenant='pair-agency',address='pair-old@example.test',firstEmail='pair-first@example.test',secondEmail='pair-second@example.test'
+  const invite=await bootstrap(owner,cfg,{slug:tenant,name:'2名引き継ぎ検証',email:address})
+  const oldCookie=await activate(invite,address,tenant,'/auth/master/login')
+  const prior=expect(await request('/session',{cookie:oldCookie}),200)
+  const store=expect(await post('/stores',oldCookie,{name:'引継ぎ対象店舗',address:'東京都',business_type:'検証',responsible:'担当',timezone:'Asia/Tokyo',cutoff:'06:00'},idempotency()),201)
+  await tx(owner,async db=>{await scope(db,prior.tenant.id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[prior.tenant.id])})
+  expect(await post('/agency-master/pair/invite',staff,{addresses:[firstEmail,secondEmail]},idempotency()),403)
+  expect(await post('/agency-master/pair/invite',oldCookie,{addresses:[firstEmail,firstEmail]},idempotency()),400)
+  const pair=expect(await post('/agency-master/pair/invite',oldCookie,{addresses:[firstEmail,secondEmail]},idempotency()),201)
+  assert.equal(pair.candidates.length,2);assert.notEqual(pair.candidates[0].url,pair.candidates[1].url)
+  const [a,b]=pair.candidates.map(c=>new URL(c.url).hash.slice(1))
+  const infoA=expect(await post('/auth/master/enrollment',null,{invite:a}),200)
+  const infoB=expect(await post('/auth/master/enrollment',null,{invite:b}),200)
+  assert.equal(infoA.email,firstEmail);assert.equal(infoB.email,secondEmail);assert.notEqual(infoA.setup_key,infoB.setup_key);assert.ok(infoA.qr.startsWith('data:image/png;base64,'))
+  assert.equal(infoA.login_id,tenant)
+  const enrollmentPage=await send('/master/enrollment/');assert.equal(enrollmentPage.status,200);assert.match(await enrollmentPage.text(),/エールのマスター登録/)
+  expect(await post('/agency-master/pair/confirm',oldCookie,{id:pair.id}),409)
+  expect(await post('/agency-master/invite',oldCookie,{address:'conflict@example.test',mode:'add'},idempotency()),409)
+  expect(await post('/auth/activate',null,{invite:a,password:pass,code:await previousCode(infoA.setup_key)}),200)
+  expect(await post('/auth/master/enrollment',null,{invite:a}),400)
+  expect(await post('/auth/master/login',null,{tenant,email:firstEmail,password:pass,code:code(infoA.setup_key)}),401)
+  expect(await request('/session',{cookie:oldCookie}),200)
+  expect(await post('/agency-master/pair/confirm',oldCookie,{id:pair.id}),409)
+  const renewed=expect(await post('/agency-master/pair/invite',oldCookie,{addresses:[firstEmail,secondEmail]},idempotency()),201)
+  assert.equal(renewed.candidates[0].active,true);assert.equal(renewed.candidates[0].url,undefined);assert.notEqual(renewed.candidates[1].url,pair.candidates[1].url)
+  expect(await post('/auth/master/enrollment',null,{invite:b}),400)
+  const b2=new URL(renewed.candidates[1].url).hash.slice(1),updatedB=expect(await post('/auth/master/enrollment',null,{invite:b2}),200)
+  expect(await post('/auth/activate',null,{invite:b2,password:pass,code:await previousCode(updatedB.setup_key)}),200)
+  assert.equal(expect(await request('/agency-master',{cookie:oldCookie}),200).pair.candidates.every(c=>c.active),true)
+  expect(await post('/agency-master/pair/confirm',oldCookie,{id:pair.id}),200)
+  expect(await request('/session',{cookie:oldCookie}),401)
+  for(const [email,key] of [[firstEmail,infoA.setup_key],[secondEmail,updatedB.setup_key]]){
+    const auth=await post('/auth/master/login',null,{tenant:tenant.toUpperCase(),email,password:pass,code:code(key)})
+    expect(auth,200)
+    const current=expect(await request('/session',{cookie:auth.cookie}),200);assert.equal(current.tenant.id,prior.tenant.id);assert.ok(current.stores.some(s=>s.id===store.id));assert.equal(current.actor.platform,false)
+    assert.equal(expect(await request('/agency-master',{cookie:auth.cookie}),200).masters.length,2)
+  }
+})
+
+test('エールの新2名だけはパスワード認証で登録でき、北村さんと既存マスターのMFAは維持される',async()=>{
+  const tenant='password-agency',email='previous@example.test',first='new-one@example.test',second='new-two@example.test'
+  const old=await bootstrap(owner,cfg,{slug:tenant,name:'パスワード引継ぎ検証',email})
+  const oldCookie=await activate(old,email,tenant,'/auth/master/login')
+  const prior=expect(await request('/session',{cookie:oldCookie}),200)
+  await tx(owner,async db=>{await scope(db,prior.tenant.id,undefined,true);await db.query('UPDATE tenant SET agency_operations_only=true WHERE id=$1',[prior.tenant.id])})
+  assert.equal(expect(await post('/auth/master/login',null,{tenant,email,password:pass}),400).code,'MFA_REQUIRED')
+  assert.equal(expect(await post('/auth/platform/login',null,{tenant:'lilu',email:'kitamura@example.test',password:pass}),400).code,'MFA_REQUIRED')
+  const pair=expect(await post('/agency-master/pair/invite',oldCookie,{addresses:[first,second],mfa_required:false},idempotency()),201)
+  assert.equal(pair.mfa_required,false)
+  expect(await post('/agency-master/pair/invite',oldCookie,{addresses:[first,second],mfa_required:true},idempotency()),409)
+  for(const c of pair.candidates){const token=new URL(c.url).hash.slice(1),info=expect(await post('/auth/master/enrollment',null,{invite:token}),200);assert.equal(info.mfa_required,false);assert.equal(info.setup_key,undefined);assert.equal(info.qr,undefined);assert.equal(info.email,c.email);expect(await post('/auth/activate',null,{invite:token,password:pass}),200);expect(await post('/auth/activate',null,{invite:token,password:pass}),400);expect(await post('/auth/master/login',null,{tenant,email:c.email,password:pass}),401)}
+  expect(await request('/session',{cookie:oldCookie}),200)
+  expect(await post('/agency-master/pair/confirm',oldCookie,{id:pair.id}),200)
+  expect(await request('/session',{cookie:oldCookie}),401)
+  for(const recipient of [first,second]){const auth=await post('/auth/master/login',null,{tenant:tenant.toUpperCase(),email:recipient,password:pass});expect(auth,200);const session=expect(await request('/session',{cookie:auth.cookie}),200);assert.equal(session.tenant.id,prior.tenant.id);assert.equal(session.actor.platform,false);assert.equal(expect(await request('/agency-master',{cookie:auth.cookie}),200).masters.length,2);expect(await post('/auth/platform/login',null,{tenant,email:recipient,password:pass}),401)}
+  const reset=await prepareMasterPasswordReset(owner,cfg,{tenant,address:first}),recovery=new URL(reset.url).hash.slice(1)
+  const password2='New-Demo-Password-123456';expect(await post('/auth/master/recovery',null,{recovery,password:password2}),200)
+  expect(await post('/auth/master/login',null,{tenant,email:first,password:pass}),401)
+  expect(await post('/auth/master/login',null,{tenant,email:first,password:password2}),200)
 })

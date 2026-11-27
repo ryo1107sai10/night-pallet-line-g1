@@ -9,6 +9,9 @@ const platformEntry = /^\/platform\/?$/i.test(location.pathname)
 const loginPath = platformEntry ? '/auth/platform/login' : masterEntry ? '/auth/master/login' : '/auth/login'
 scopeWorkspaceLinks()
 if (platformEntry) $('#login h1').textContent = '管理会社の監督画面にログイン'
+const loginFactor=$('#login-factor'),factorInput=$('#login [name=code]')
+function showLoginFactor(show){if(loginFactor&&factorInput){loginFactor.hidden=!show;factorInput.required=show;factorInput.disabled=!show;if(!show)factorInput.value=''}}
+if(masterEntry){showLoginFactor(false);for(const element of [$('#login [name=email]'),$('#login [name=tenant]')])element?.addEventListener('input',()=>showLoginFactor(false))}
 const content = $('#content')
 const notice = $('#notice')
 const types = { customer:'顧客',recruitment:'採用',shared:'顧客・採用兼用' }
@@ -87,7 +90,7 @@ async function api(path, method = 'GET', data, idem = false) {
   if (!response.ok) {
     const fields = Object.keys(result.field_errors ?? {})
     throw Object.assign(new Error(result.message + (fields.length ? ' (' + fields.join(', ') + ')' : '')),
-      { status:response.status })
+      { status:response.status, code:result.code })
   }
   return result
 }
@@ -510,10 +513,13 @@ function lineNavigationPanel(store, current, registration) {
   return box
 }
 
-let recentMasterInvite
+let recentMasterInvite,recentPairInvite
 function masterPanel(info) {
   const team=panel('エールのマスター管理・引き継ぎ',masterTeam(info,{
-    inviteResult:recentMasterInvite,refresh:()=>refresh(),
+    inviteResult:recentMasterInvite,refresh:()=>refresh(),pairResult:recentPairInvite,
+    pairInvite:async data=>{recentPairInvite=await api('/agency-master/pair/invite','POST',data,true);await refresh();feedback('2名の専用リンクを本人だけに渡してください。')},
+    pairConfirm:async id=>{recentPairInvite=null;await change('/agency-master/pair/confirm','POST',{id},'2名への引き継ぎが完了しました。')},
+    pairCancel:async id=>{recentPairInvite=null;await change('/agency-master/pair/cancel','POST',{id},'2名の招待を取り消しました。')},
     invite:async data=>{
       recentMasterInvite=await api('/agency-master/invite','POST',data,true)
       await refresh()
@@ -529,7 +535,7 @@ function masterPanel(info) {
     },
   }))
   team.id='supervisor-team'
-  team.querySelector('form').id='supervisor-invite'
+  team.querySelector('form[data-single-master]').id='supervisor-invite'
   return team
 }
 
@@ -995,7 +1001,7 @@ if ($('#logout')) $('#logout').onclick = async () => {
   catch (error) { report(error) }
 }
 bind($('#login'),async (data)=>{
-  await api(loginPath,'POST',data)
+  try{await api(loginPath,'POST',data)}catch(error){if(masterEntry&&error.code==='MFA_REQUIRED'){showLoginFactor(true);factorInput.focus()}throw error}
   $('#login').reset()
   if (!$('#workspace')) {
     location.reload()

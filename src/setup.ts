@@ -12,7 +12,7 @@ export async function migrate(pool: pg.Pool, role: string) {
     '012_interviewer_calendar','013_guest_interviews','014_line_modules','015_line_onboarding','016_tenant_master','017_platform_master','018_agency_handoff','019_agency_master_management',
     '020_tour_revisions','021_supervisor_handoff','022_interview_link_tokens','023_liff_free_links',
     '024_registration_flow','025_remove_liff','026_recruitment_delivery','027_agency_master_self_service',
-    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake','042_piyomaru','043_health_materials']
+    '028_registered_supervision','029_operations_usability','030_agency_operations','031_applicant_tags','032_master_password_reset','033_rich_menu_tags','034_source_test','035_tag_verification','036_self_service_calendar','037_studio_library','038_studio_pro','039_studio_media','040_agency_co_master','041_recruitment_intake','042_piyomaru','043_health_materials','044_case_insensitive_login_id','045_agency_master_pair_handoff','046_agency_pair_password_login']
   await tx(pool, async db => {
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.migrate'))")
     await db.query('CREATE SCHEMA IF NOT EXISTS night')
@@ -27,6 +27,7 @@ export async function migrate(pool: pg.Pool, role: string) {
       night.invite_route,night.auth_rate,night.operation,night.tester,night.test_send,night.channel_relationship,
       night.webhook_event,night.store_grant,night.channel,night.store TO ${role}`)
     await db.query(`GRANT SELECT ON night.tenant_route,night.tenant_master,night.platform_master TO ${role}`)
+    await db.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON night.agency_master_pair TO ${role}`)
     await db.query(`GRANT UPDATE (staff_id,co_staff_id,pending_staff_id,pending_mode,pending_replace_id) ON night.tenant_master TO ${role}`)
     await db.query(`GRANT SELECT,INSERT ON night.tour_revision TO ${role}`)
     await db.query(`GRANT SELECT,DELETE ON night.supervisor_handoff TO ${role}`)
@@ -78,7 +79,7 @@ export async function migrate(pool: pg.Pool, role: string) {
 type BootstrapInput = { slug: string; name: string; email: string; billing_contact?: string }
 
 async function firstInvite(db:DB,cfg:ReturnType<typeof configFromEnvironment>,data:BootstrapInput,supervisorOnly:boolean) {
-  const {rows:[registered]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[data.slug])
+  const {rows:[registered]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[data.slug])
   const id=registered?.tenant_id??newId()
   await scope(db,id,undefined,true)
   if (registered) {
@@ -107,7 +108,7 @@ export async function inviteSupervisor(pool:pg.Pool,cfg:ReturnType<typeof config
   data:BootstrapInput & { agency: string; displayName: string }) {
   return tx(pool,async db=>{
     await db.query("SELECT pg_advisory_xact_lock(hashtext('night.platform_master'))")
-    const {rows:[agency]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[data.agency])
+    const {rows:[agency]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[data.agency])
     if (!agency) throw new Error('管理対象の法人が見つかりません。')
     await scope(db,agency.tenant_id)
     if (!(await db.query('SELECT 1 FROM tenant WHERE NOT supervisor_only')).rowCount) {
@@ -126,10 +127,32 @@ export async function inviteSupervisor(pool:pg.Pool,cfg:ReturnType<typeof config
   })
 }
 
+// Owner-only rename: both directories change atomically; the permanent tenant UUID is preserved.
+export async function renameAgencyLoginId(pool:pg.Pool,current:string,next:string) {
+  const oldId=slug.parse(current),newId=slug.parse(next)
+  return tx(pool,async db=>{
+    const {rows:[route]}=await db.query<{tenant_id:string;slug:string}>(
+      'SELECT tenant_id,slug FROM tenant_route WHERE lower(slug)=lower($1) FOR UPDATE',[oldId])
+    if(!route)throw new Error('変更元の法人IDが見つかりません。')
+    await scope(db,route.tenant_id,undefined,true)
+    const {rows:[tenant]}=await db.query<{slug:string;legal_name:string}>(`SELECT slug,legal_name FROM tenant t
+      WHERE t.id=$1 AND NOT t.supervisor_only AND (t.agency_operations_only OR EXISTS(SELECT 1 FROM platform_master p WHERE p.agency_id=t.id)) FOR UPDATE`,[route.tenant_id])
+    if(!tenant||tenant.slug!==route.slug)throw new Error('管理会社の法人情報とログインディレクトリを確認してください。')
+    if((await db.query('SELECT 1 FROM tenant_route WHERE lower(slug)=lower($1) AND tenant_id<>$2',[newId,route.tenant_id])).rowCount)throw new Error('変更先の法人IDはすでに使われています。')
+    if(tenant.slug!==newId){
+      const updated=await db.query('UPDATE tenant_route SET slug=$2 WHERE tenant_id=$1',[route.tenant_id,newId])
+      const changed=await db.query('UPDATE tenant SET slug=$2 WHERE id=$1',[route.tenant_id,newId])
+      if(updated.rowCount!==1||changed.rowCount!==1)throw new Error('法人IDを変更できませんでした。')
+      await audit(db,route.tenant_id,null,null,'agency.login_id_renamed',route.tenant_id,null,{previous:tenant.slug,current:newId})
+    }
+    return {login_id:newId,legal_name:tenant.legal_name,changed:tenant.slug!==newId}
+  })
+}
+
 // Run with the migration database role. Web and worker roles can only read this binding.
 export async function designateMaster(pool:pg.Pool,tenantSlug:string,address:string) {
   return tx(pool,async db=>{
-    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[tenantSlug])
+    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[tenantSlug])
     if (!tenant) throw new Error('該当する法人が見つかりません。')
     await scope(db,tenant.tenant_id,undefined,true)
     await db.query('SELECT id FROM tenant WHERE id=$1 FOR UPDATE',[tenant.tenant_id])
@@ -152,7 +175,7 @@ export async function designateMaster(pool:pg.Pool,tenantSlug:string,address:str
 
 export async function limitAgencyOperations(pool:pg.Pool,tenantSlug:string) {
   return tx(pool,async db=>{
-    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE slug=$1',[tenantSlug])
+    const {rows:[tenant]}=await db.query<{tenant_id:string}>('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)',[tenantSlug])
     if(!tenant)throw new Error('該当する法人が見つかりません。')
     await scope(db,tenant.tenant_id,undefined,true)
     const {rowCount}=await db.query(`UPDATE tenant t SET agency_operations_only=true WHERE t.id=$1
@@ -184,6 +207,8 @@ if (import.meta.main) {
       const data=z.strictObject({tenant:slug,address:email,nextSlug:slug.optional()}).parse({tenant:name,address,nextSlug:billing})
       const result=await prepareSupervisorHandoff(migrationPool,configFromEnvironment(),data)
       console.log(JSON.stringify(result,null,2))
+    } else if (tenant==='--rename-agency') {
+      console.log(JSON.stringify(await renameAgencyLoginId(migrationPool,slug.parse(name),slug.parse(address))))
     } else if (tenant==='--master') {
       await designateMaster(migrationPool,slug.parse(name),email.parse(address))
       console.log('マスターアカウントを指定しました。')

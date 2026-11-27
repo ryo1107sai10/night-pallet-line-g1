@@ -17,7 +17,7 @@
         <label>法人ID<input name="tenant" autocomplete="organization" required></label>
         <label>メールアドレス<input name="email" type="email" autocomplete="username" required></label>
         <label>パスワード<input name="password" type="password" autocomplete="current-password" required></label>
-        <label>認証アプリの6桁のコード<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required></label>
+        <label id="login-factor">認証アプリの6桁のコード<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required></label>
         <button type="submit">ログイン</button>
         <button type="button" class="secondary" id="show-activate">招待を受け取った方</button>
       </form>

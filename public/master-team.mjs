@@ -15,7 +15,7 @@ export function masterTeam(info, actions) {
   for(const [index,master] of masters.entries()){
     const row=el('div',null,'record stack')
     row.append(el('strong',`マスター ${index+1} · ${master.email}`),el('p',master.active===false?'本人の有効化待ち':'有効・全契約店舗を管理','muted'))
-    if(masters.length>1)row.append(button('このマスターの権限を終了',event=>{
+    if(masters.length>1&&!info.pair)row.append(button('このマスターの権限を終了',event=>{
       if(!window.confirm(`${master.email} のマスター権限とログインを終了します。残るマスターの権限・設定は変更しません。進めますか？`))return
       run(event.currentTarget,async()=>{await actions.remove(master.id)})
     },'secondary'))
@@ -45,6 +45,7 @@ export function masterTeam(info, actions) {
     root.append(pending)
   }
   const form=el('form',null,'stack'),mode=document.createElement('select'),target=document.createElement('select'),address=document.createElement('input')
+  form.dataset.singleMaster='true'
   form.append(el('h3','新しいマスターの登録・引き継ぎ'))
   mode.name='mode';mode.append(new Option('兼任マスターを追加（既存のマスターを残す）','add'),new Option('指定したマスターを交代する','replace'))
   mode.options[0].disabled=masters.length>=limit
@@ -63,6 +64,29 @@ export function masterTeam(info, actions) {
     if(info.pending_id&&!window.confirm('現在の招待・候補者を新しい招待に変更します。よろしいですか？'))return
     run(submit,()=>actions.invite({address:address.value.trim(),mode:mode.value,...(mode.value==='replace'?{replace_id:target.value}:{})}))
   }
-  root.append(button('最新の状態を取得',event=>run(event.currentTarget,actions.refresh),'secondary'),form,status)
+  const pairPanel=el('section',null,'record stack')
+  if(actions.pairInvite){
+    pairPanel.append(el('h3','2名へ個別招待リンクを発行'),el('p','新しい2名へそれぞれ専用リンクを渡します。両名が本人登録した後に、前任者の権限を終了して交代します。','muted'))
+    if(info.pair){
+      pairPanel.append(el('p',info.pair.mfa_required?'認証方式：パスワードと6桁コード':'認証方式：メール・パスワードのみ（6桁コード不要）','muted'))
+      for(const [i,candidate] of info.pair.candidates.entries()){
+        const row=el('div',null,'record stack');row.append(el('strong',`担当者 ${i+1} · ${candidate.email}`),el('p',candidate.active?'本人の登録完了':candidate.expires_at?'招待期限：'+new Date(candidate.expires_at).toLocaleString('ja-JP'):'本人の登録待ち','muted'))
+        const issued=actions.pairResult?.id===info.pair.id&&actions.pairResult.candidates.find(c=>c.id===candidate.id)
+        if(issued?.url&&!candidate.active){const value=el('input');value.readOnly=true;value.value=issued.url;value.setAttribute('aria-label',`担当者 ${i+1} の専用招待リンク`);row.append(value,button('この担当者の専用リンクをコピー',event=>run(event.currentTarget,async()=>{await navigator.clipboard.writeText(issued.url);status.textContent='本人専用の招待リンクをコピーしました。'}),'secondary'))}
+        pairPanel.append(row)
+      }
+      const renew=button('未登録者の招待リンクを再発行',event=>{if(!confirm('未登録者の以前の招待リンクを無効化し、新しいリンクを発行します。進めますか？'))return;run(event.currentTarget,()=>actions.pairInvite({addresses:info.pair.candidates.map(c=>c.email),mfa_required:info.pair.mfa_required}))},'secondary');renew.disabled=info.pair.candidates.every(c=>c.active)
+      const approve=button('2名への引き継ぎを確定する',event=>{if(!confirm('両名の本人登録を確認しましたか？ 前任のマスターの権限とログインが終了します。確定しますか？'))return;run(event.currentTarget,()=>actions.pairConfirm(info.pair.id))},'primary');approve.disabled=!info.pair.candidates.every(c=>c.active)
+      pairPanel.append(renew,approve,button('2名の招待を取り消す',event=>{if(confirm('2名の未使用の招待リンクを無効化します。現在のマスターは変更しません。取り消しますか？'))run(event.currentTarget,()=>actions.pairCancel(info.pair.id))},'secondary'))
+      form.hidden=true
+    }else{
+      const f=el('form',null,'stack'),addresses=[1,2].map(i=>{const l=el('label',`担当者${i}のメールアドレス`),input=document.createElement('input');input.type='email';input.required=true;input.autocomplete='off';l.append(input);f.append(l);return input})
+      const send=el('button','担当者2名の専用リンクを発行','primary');send.type='submit';send.disabled=!!info.pending_id;f.append(el('p','この2名はメールとパスワードのみでログインします。認証アプリの6桁コードは不要です。','muted'),send)
+      if(info.pending_id)pairPanel.append(el('p','現在発行済みの1名分の手続きを先に完了してください。','muted'))
+      f.onsubmit=event=>{event.preventDefault();const values=addresses.map(a=>a.value.trim());if(values[0].toLowerCase()===values[1].toLowerCase()){status.textContent='2名それぞれ異なるメールを指定してください。';return}run(send,()=>actions.pairInvite({addresses:values,mfa_required:false}))}
+      pairPanel.append(f)
+    }
+  }
+  root.append(button('最新の状態を取得',event=>run(event.currentTarget,actions.refresh),'secondary'),form,pairPanel,status)
   return root
 }

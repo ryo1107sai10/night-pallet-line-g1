@@ -12,10 +12,10 @@ const factor = z.string().regex(/^\d{6}$/)
 export const password = z.string().min(12).max(128)
 const loginPassword = z.string().min(1).max(128)
 export const memberRole = z.enum(['admin', 'manager', 'sales', 'recruiter', 'reporter'])
-const loginSchema = z.strictObject({ tenant: slug, email, password: loginPassword, code: factor })
-const acceptSchema = z.strictObject({ invite: opaque, password, code: factor })
+const loginSchema = z.strictObject({ tenant: slug.transform(value=>value.toLowerCase()), email, password: loginPassword, code: factor.optional() })
+const acceptSchema = z.strictObject({ invite: opaque, password, code: factor.optional() })
 type StaffRow = Actor & {
-  disabled_at: Date | null; password_hash: string | null; totp_secret: string; last_totp_step: string; agency_staff:boolean
+  disabled_at: Date | null; password_hash: string | null; totp_secret: string; last_totp_step: string; agency_staff:boolean; mfa_required:boolean
 }
 
 function derive(pass: string, salt: string) {
@@ -81,7 +81,7 @@ export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: stri
   await gate(pool, cfg, 'login-ip:' + ip, 40)
   await gate(pool, cfg, 'login-account:' + data.tenant + ':' + data.email, 8)
   const result = await tx(pool, async db => {
-    const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE slug=$1', [data.tenant])
+    const { rows: [directory] } = await db.query('SELECT tenant_id FROM tenant_route WHERE lower(slug)=lower($1)', [data.tenant])
     if (directory) await scope(db, directory.tenant_id)
     const { rows: [staff] } = await db.query<StaffRow & {designated_master:boolean; designated_platform:boolean; supervisor_only:boolean}>(`SELECT f.*,
       EXISTS(SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id)) AS designated_master,
@@ -91,12 +91,15 @@ export async function login(pool: pg.Pool, cfg: Config, input: unknown, ip: stri
       FROM staff f JOIN tenant t ON t.id=f.tenant_id WHERE f.email=$1 AND NOT f.platform_actor FOR UPDATE OF f`, [data.email])
     const passOk = await verifyPassword(data.password, staff?.password_hash)
     if (!staff || staff.disabled_at || !passOk) return null
-    const step = consumeFactor(cfg, staff, data.code)
     const authorized = mode==='platform' ? staff.designated_platform :
       !staff.supervisor_only && (staff.role==='admin' ? staff.designated_master : mode==='staff' && staff.agency_staff)
-    if (step === null || !authorized) return null
+    if(!authorized)return null
+    const passwordOnly=staff.mfa_required===false&&kind==='staff'&&staff.role==='admin'&&staff.agency_staff&&staff.designated_master&&!staff.supervisor_only
+    if(!passwordOnly&&!data.code)throw new Fault(400,'MFA_REQUIRED','認証アプリの現在の6桁コードを入力してください。')
+    const step=passwordOnly?null:consumeFactor(cfg,staff,data.code!)
+    if(!passwordOnly&&step===null)return null
     const raw = token()
-    await db.query('UPDATE staff SET last_totp_step=$2 WHERE id=$1', [staff.id, step])
+    if(step!==null)await db.query('UPDATE staff SET last_totp_step=$2 WHERE id=$1', [staff.id, step])
     await db.query(`INSERT INTO staff_session(token_hash,tenant_id,staff_id,expires_at,session_kind)
       VALUES ($1,$2,$3,now()+make_interval(hours => $5),$4)`,
       [digest(raw),staff.tenant_id,staff.id,kind,sessionHours[kind]])
@@ -159,11 +162,13 @@ export function requireAdmin(actor: Actor) {
 }
 
 export async function createInvite(db: DB, cfg: Config, tenant: string,
-  data: { email: string; role: string; stores: string[] }, actorId: string | null) {
+  data: { email: string; role: string; stores: string[]; mfaRequired?:boolean }, actorId: string | null) {
   await scope(db, tenant, undefined, true)
   const { rows: [existing] } = await db.query<{ id: string; disabled_at: Date | null; password_hash: string | null; platform_actor:boolean }>(
     'SELECT id,disabled_at,password_hash,platform_actor FROM staff WHERE tenant_id=$1 AND email=$2 FOR UPDATE', [tenant,data.email])
   if (existing && (existing.disabled_at || existing.password_hash || existing.platform_actor)) throw conflict()
+  const mfaRequired=data.mfaRequired!==false
+  if(!mfaRequired&&(data.role!=='admin'||!actorId))throw forbidden()
   const id = existing?.id ?? newId()
   const raw = token()
   const secret = new Secret({ size: 20 }).base32
@@ -173,11 +178,11 @@ export async function createInvite(db: DB, cfg: Config, tenant: string,
   if (existing) {
     await db.query('DELETE FROM invite WHERE staff_id=$1', [id])
     await db.query('DELETE FROM store_grant WHERE staff_id=$1', [id])
-    await db.query('UPDATE staff SET role=$2,totp_secret=$3,agency_staff=$4 WHERE id=$1', [id, data.role, encrypted, actorId!==null])
+    await db.query('UPDATE staff SET role=$2,totp_secret=$3,agency_staff=$4,mfa_required=$5 WHERE id=$1', [id, data.role, encrypted, actorId!==null,mfaRequired])
   } else {
-    const staff = await db.query(`INSERT INTO staff(id,tenant_id,email,role,totp_secret,agency_staff)
-      VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,email) DO NOTHING RETURNING id`,
-      [id, tenant, data.email, data.role, encrypted, actorId!==null])
+    const staff = await db.query(`INSERT INTO staff(id,tenant_id,email,role,totp_secret,agency_staff,mfa_required)
+      VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id,email) DO NOTHING RETURNING id`,
+      [id, tenant, data.email, data.role, encrypted, actorId!==null,mfaRequired])
     if (!staff.rowCount) throw conflict()
   }
   await db.query(`INSERT INTO store_grant(tenant_id,staff_id,store_id)
@@ -185,7 +190,7 @@ export async function createInvite(db: DB, cfg: Config, tenant: string,
   const invite = await db.query(`INSERT INTO invite VALUES($1,$2,$3,now()+interval '24 hours')
     RETURNING expires_at`, [digest(raw), tenant, id])
   await db.query('INSERT INTO invite_route VALUES($1,$2)', [digest(raw), tenant])
-  await audit(db, tenant, null, actorId, existing ? 'staff.reinvite' : 'staff.invite', id, null, { role: data.role, stores: data.stores })
+  await audit(db, tenant, null, actorId, existing ? 'staff.reinvite' : 'staff.invite', id, null, { role: data.role, stores: data.stores, mfa_required:mfaRequired })
   return { id, invite_code: raw, setup_key: secret, setup_uri: otp(secret, data.email).toString(),
     expires_at: invite.rows[0].expires_at }
 }
@@ -205,13 +210,16 @@ export async function accept(pool: pg.Pool, cfg: Config, input: unknown, ip: str
       ON (i.tenant_id,i.staff_id)=(f.tenant_id,f.id)
       WHERE i.token_hash=$1 AND i.expires_at>now() AND NOT f.platform_actor AND f.disabled_at IS NULL
         AND f.password_hash IS NULL
-        AND CASE WHEN f.role='admin' THEN EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.pending_staff_id))
+        AND CASE WHEN f.role='admin' THEN (EXISTS (SELECT 1 FROM tenant_master m WHERE m.tenant_id=f.tenant_id AND f.id IN (m.staff_id,m.co_staff_id,m.pending_staff_id))
+          OR EXISTS (SELECT 1 FROM agency_master_pair p WHERE p.tenant_id=f.tenant_id AND f.id IN (p.first_staff_id,p.second_staff_id)))
           ELSE f.agency_staff END
       FOR UPDATE OF f`, [hash])
     if (!staff) throw invalid()
-    const step = consumeFactor(cfg, staff, data.code)
-    if (step === null) throw invalid()
-    await db.query('UPDATE staff SET password_hash=$2,last_totp_step=$3 WHERE id=$1',
+    const passwordOnly=staff.mfa_required===false&&staff.role==='admin'&&staff.agency_staff&&
+      !!(await db.query('SELECT 1 FROM agency_master_pair WHERE tenant_id=$1 AND $2 IN (first_staff_id,second_staff_id) AND NOT mfa_required',[tenant,staff.id])).rowCount
+    const step=passwordOnly?null:(data.code?consumeFactor(cfg,staff,data.code):null)
+    if(!passwordOnly&&step===null)throw invalid()
+    await db.query('UPDATE staff SET password_hash=$2,last_totp_step=COALESCE($3::bigint,last_totp_step) WHERE id=$1',
       [staff.id, await hashPassword(data.password), step])
     await db.query('DELETE FROM invite WHERE token_hash=$1', [hash])
     await audit(db, tenant, null, staff.id, 'staff.activate', staff.id)
